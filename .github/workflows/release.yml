@@ -76,10 +76,31 @@ jobs:
       - name: Install frontend deps
         working-directory: mobile
         run: bun install --frozen-lockfile
-      - name: Build Android APK
+      - name: Initialize Android project
         working-directory: mobile
         env:
-          NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+        run: bun run tauri android init
+      - name: Configure signing keystore
+        working-directory: mobile
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > gen/android/pulsar.keystore
+          cat > gen/android/keystore.properties <<PROPS
+          keyAlias=$ANDROID_KEY_ALIAS
+          password=$ANDROID_KEY_PASSWORD
+          keyPassword=$ANDROID_KEY_PASSWORD
+          storePassword=$ANDROID_STORE_PASSWORD
+          storeFile=pulsar.keystore
+          PROPS
+      - name: Build signed Android APK
+        working-directory: mobile
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
         run: bun run tauri android build --apk
       - name: Attach APK to the release
         env:
