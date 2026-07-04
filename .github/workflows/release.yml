@@ -1,0 +1,90 @@
+name: Release
+
+# Cut from `main`. semantic-release creates a git TAG + GitHub Release from
+# Conventional Commits (no commit-back). An optional Android build attaches an
+# APK — gated on ENABLE_MOBILE_RELEASE because it needs the Android toolchain +
+# signing secrets. iOS builds require a macOS runner + Apple signing and are done
+# manually for now (see README).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 1. Test gate (host compile) + create the tag + GitHub Release.
+  release:
+    name: semantic-release (tag + GitHub release)
+    runs-on: ubuntu-22.04
+    outputs:
+      published: ${{ steps.semrel.outputs.new_release_published }}
+      tag: ${{ steps.semrel.outputs.new_release_git_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install deps (tauri host build + gilrs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential libudev-dev librsvg2-dev \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile gate
+        run: cargo check -p pulsar-mobile --locked
+      - name: Semantic Release
+        id: semrel
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          extra_plugins: |
+            conventional-changelog-conventionalcommits@^9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. Optional: build a release APK and attach it. Enable by setting repo variable
+  #    ENABLE_MOBILE_RELEASE=true and providing an Android signing keystore
+  #    (ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD,
+  #    ANDROID_STORE_PASSWORD). Best-effort scaffold — verify locally first.
+  android:
+    name: Android APK
+    needs: release
+    if: ${{ needs.release.outputs.published == 'true' && vars.ENABLE_MOBILE_RELEASE == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: oven-sh/setup-bun@v2
+      - name: Install frontend deps
+        working-directory: mobile
+        run: bun install --frozen-lockfile
+      - name: Build Android APK
+        working-directory: mobile
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
+        run: bun run tauri android build --apk
+      - name: Attach APK to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mapfile -t apks < <(find mobile/gen/android -name '*.apk' -type f)
+          printf '%s\n' "${apks[@]}"
+          [ ${#apks[@]} -gt 0 ] && gh release upload "${{ needs.release.outputs.tag }}" "${apks[@]}" --clobber

@@ -1,0 +1,33 @@
+# Pulsar mobile — Android + iOS app (Tauri 2), extracted from the monorepo.
+#
+# A thin, client-only Tauri shell (Path A: transparent webview over a native video
+# surface). The shared engine lives in PulsarDesk/pulsar-core (git dependency); the
+# relay lib (on-device local relay) and wire protocol are git deps too.
+[workspace]
+resolver = "2"
+members = ["mobile", "crates/tauri-plugin-pulsar-video"]
+# `cargo check`/`test` default to the host-buildable plugin; the mobile shell is
+# built for android/ios targets (see the CI / `bun run tauri android|ios`).
+default-members = ["crates/tauri-plugin-pulsar-video"]
+
+[workspace.package]
+version = "0.1.0-dev.27"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Pulsar contributors"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Shared crates, now external repos (git dependencies).
+pulsar-core = { git = "https://github.com/PulsarDesk/pulsar-core" }
+pulsar-relay = { git = "https://github.com/PulsarDesk/relay" }
+
+# pulsar-core uses the vendored vigem-client fork on Windows (cfg-gated), so the
+# lockfile resolves it even though mobile never builds for Windows. Patch it via
+# git to the pulsar-core repo (which vendors the fork).
+[patch.crates-io]
+vigem-client = { git = "https://github.com/PulsarDesk/pulsar-core" }

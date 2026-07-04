@@ -28,7 +28,7 @@ tauri-plugin-pulsar-video = { path = "../crates/tauri-plugin-pulsar-video" }
 tauri-plugin-dialog = "2"
 # M4: transport (P2P→relay) + crypto + service protocol. Compiles for android
 # (host-injection deps are cfg(target_os="linux"), which android is not).
-pulsar-core = { path = "../crates/pulsar-core" }
+pulsar-core.workspace = true
 # Local relay: run the rendezvous/relay server on THIS device (Settings → Ağ →
 # "Yerel relay"). The relay lib is portable (tokio UDP, no host-only deps), so it
 # embeds on Android — other LAN devices then point their relay at this phone.
