@@ -92,11 +92,13 @@ jobs:
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > gen/android/pulsar.keystore
           cat > gen/android/keystore.properties <<PROPS
           keyAlias=$ANDROID_KEY_ALIAS
-          password=$ANDROID_KEY_PASSWORD
           keyPassword=$ANDROID_KEY_PASSWORD
           storePassword=$ANDROID_STORE_PASSWORD
-          storeFile=pulsar.keystore
+          storeFile=$(pwd)/gen/android/pulsar.keystore
           PROPS
+          # Tauri's generated app/build.gradle.kts has no signingConfig — inject one
+          # that reads keystore.properties, so the release APK is signed (not -unsigned).
+          python3 scripts/patch-android-signing.py gen/android/app/build.gradle.kts
       - name: Build signed Android APK
         working-directory: mobile
         env:
@@ -107,6 +109,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          mapfile -t apks < <(find mobile/gen/android -name '*.apk' -type f)
+          mapfile -t apks < <(find mobile/gen/android -path '*release*' -name '*.apk' -type f ! -name '*unsigned*')
           printf '%s\n' "${apks[@]}"
           [ ${#apks[@]} -gt 0 ] && gh release upload "${{ needs.release.outputs.tag }}" "${apks[@]}" --clobber
