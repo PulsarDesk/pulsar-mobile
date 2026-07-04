@@ -6,6 +6,7 @@ name: Release
 # signing secrets. iOS builds require a macOS runner + Apple signing and are done
 # manually for now (see README).
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 
