@@ -545,7 +545,7 @@ function _renderBreadcrumb() {
 
 	const strip = document.createElement('nav');
 	strip.className = 'files-breadcrumb';
-	strip.setAttribute('aria-label', 'Dizin yolu');
+	strip.setAttribute('aria-label', t('m.files.breadcrumb'));
 
 	// Root segment
 	const rootBtn = document.createElement('button');

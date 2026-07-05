@@ -607,7 +607,7 @@ function renderControllers() {
   const pads = connectedPads();
   if (!pads.length) { el.innerHTML = `<div class="pad-empty">${t('m.gamepad.none')}</div>`; return; }
   el.innerHTML = pads.map((p) => {
-    const bat = p.battery >= 0 ? `<span class="pad-bat">🔋 %${p.battery}</span>` : '';
+    const bat = p.battery >= 0 ? `<span class="pad-bat">${t('m.gamepad.battery', { n: p.battery })}</span>` : '';
     const name = String(p.name).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const tgt = gamepadTarget(p.name);
     const opt = (v, l) => `<option value="${v}"${tgt === v ? ' selected' : ''}>${l}</option>`;
@@ -638,7 +638,11 @@ function wireFields(section) {
 
   // ── Network mode seg ──
   const netmodeSeg = document.getElementById('s-netmode');
-  wireSegControl(netmodeSeg, 'auto', (v) => save({ networkMode: v }));
+  wireSegControl(netmodeSeg, 'auto', (v) => {
+    save({ networkMode: v });
+    // The home-screen net-pill mirrors the configured mode — tell it live.
+    window.__pulsarBus?.emit('netmode-changed', v);
+  });
 
   // ── Device name: save on blur ──
   const devnameEl = document.getElementById('s-devname');
@@ -1011,7 +1015,7 @@ registerScreen({
     <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"
       stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
   </svg>`,
-  navLabel: 'Ayarlar',
+  navLabel: t('nav.settings'),
   navLabelKey: 'nav.settings',
 
   mount() {

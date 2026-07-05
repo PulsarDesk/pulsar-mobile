@@ -397,12 +397,12 @@ async function refreshA11y() {
 		const openBtn  = $('h-a11y-btn');
 		if (statusEl) {
 			statusEl.textContent = on
-				? 'Uzaktan kontrol açık — karşı cihaz dokunarak kontrol edebilir.'
+				? t('m.host.a11yOn')
 				: t('m.host.a11yHint');
 		}
 		if (openBtn) {
 			openBtn.textContent = on
-				? 'Kontrol açık ✓'
+				? t('m.host.a11yOnBtn')
 				: t('m.host.a11yOpen');
 			openBtn.disabled = on;
 		}

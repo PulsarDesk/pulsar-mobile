@@ -796,7 +796,7 @@ function mount() {
 	}
 
 	const netPillLabels = {
-		auto:         'P2P → relay',
+		auto:         t('m.netpill.modeAuto'),
 		'p2p-only':   t('settings.modeP2p'),
 		'relay-only':  t('settings.modeRelay'),
 	};

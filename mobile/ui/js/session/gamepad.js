@@ -619,7 +619,7 @@ function _buildLayer() {
 	const el = document.createElement('div');
 	el.id        = 'gamepad-layer';
 	el.className = 'gamepad-layer';
-	el.setAttribute('aria-label', 'Sanal oyun kolu');
+	el.setAttribute('aria-label', t('m.gamepad.layerAria'));
 	el.setAttribute('aria-hidden', 'true');  // decorative from a11y perspective
 	el.style.display = 'none';
 
@@ -666,16 +666,16 @@ function _layerHTML() {
     </button>
   </div>
   <div class="gp-dpad" data-ctrl="dpad" aria-label="D-pad">
-    <button class="gp-btn gp-dpad-btn gp-dpad-up"    data-ctrl="dpad-up"    aria-label="Yukarı"  type="button">▲</button>
-    <button class="gp-btn gp-dpad-btn gp-dpad-left"  data-ctrl="dpad-left"  aria-label="Sol"     type="button">◀</button>
+    <button class="gp-btn gp-dpad-btn gp-dpad-up"    data-ctrl="dpad-up"    aria-label="${t('m.gamepad.dpadUp')}"    type="button">▲</button>
+    <button class="gp-btn gp-dpad-btn gp-dpad-left"  data-ctrl="dpad-left"  aria-label="${t('m.gamepad.dpadLeft')}"  type="button">◀</button>
     <div class="gp-dpad-center" aria-hidden="true"></div>
-    <button class="gp-btn gp-dpad-btn gp-dpad-right" data-ctrl="dpad-right" aria-label="Sağ"     type="button">▶</button>
-    <button class="gp-btn gp-dpad-btn gp-dpad-down"  data-ctrl="dpad-down"  aria-label="Aşağı"   type="button">▼</button>
+    <button class="gp-btn gp-dpad-btn gp-dpad-right" data-ctrl="dpad-right" aria-label="${t('m.gamepad.dpadRight')}" type="button">▶</button>
+    <button class="gp-btn gp-dpad-btn gp-dpad-down"  data-ctrl="dpad-down"  aria-label="${t('m.gamepad.dpadDown')}"  type="button">▼</button>
   </div>
 </div>
 
 <!-- ── Left stick ──────────────────────────── -->
-<div class="gp-lstick-zone" data-ctrl="lstick" aria-label="Sol analog çubuk">
+<div class="gp-lstick-zone" data-ctrl="lstick" aria-label="${t('m.gamepad.lstick')}">
   <div class="gp-stick-ring" id="gp-lstick-ring">
     <div class="gp-stick-knob" id="gp-lstick-knob"></div>
   </div>
@@ -707,7 +707,7 @@ function _layerHTML() {
 </div>
 
 <!-- ── Right stick ─────────────────────────── -->
-<div class="gp-rstick-zone" data-ctrl="rstick" aria-label="Sağ analog çubuk">
+<div class="gp-rstick-zone" data-ctrl="rstick" aria-label="${t('m.gamepad.rstick')}">
   <div class="gp-stick-ring" id="gp-rstick-ring">
     <div class="gp-stick-knob" id="gp-rstick-knob"></div>
   </div>
@@ -1032,14 +1032,14 @@ function _updateStatusChip() {
 			</svg>
 			<span class="mono">${count}</span>
 		`;
-		chip.title = `${count} fiziksel kontrolcü bağlı`;
+		chip.title = t('m.gamepad.chipConnected', { n: count });
 	} else {
 		chip.innerHTML = `
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="opacity:0.4">
 				<rect x="3" y="7" width="18" height="12" rx="3" stroke="currentColor" stroke-width="2"/>
 			</svg>
 		`;
-		chip.title = 'Fiziksel kontrolcü bağlı değil';
+		chip.title = t('m.gamepad.chipNone');
 	}
 }
 
@@ -1070,8 +1070,8 @@ function _renderCard(el) {
 
 		<!-- Physical pad count indicator -->
 		<div class="overlay-row" id="gp-card-pads">
-			<span class="label">Bağlı kontrolcü</span>
-			<span class="overlay-chip" id="gp-card-pad-count">${_physicalPadCount > 0 ? _physicalPadCount + ' adet' : 'Yok'}</span>
+			<span class="label">${_tr('m.gamepad.connectedCount', 'Bağlı kontrolcü')}</span>
+			<span class="overlay-chip" id="gp-card-pad-count">${_physicalPadCount > 0 ? _tr('m.gamepad.countN', '{n} adet').replace('{n}', String(_physicalPadCount)) : _tr('m.gamepad.countNone', 'Yok')}</span>
 		</div>
 
 		<!-- Rumble indicator (cyan flash on rumble event) -->
@@ -1395,7 +1395,7 @@ function _injectStyles() {
 		pointer-events: none;
 	}
 	#gamepad-layer::after {
-		content: 'Oyun kolu için yatay modu kullanın';
+		content: "${t('m.gamepad.rotateHint')}";
 		position: absolute;
 		inset: 0;
 		display: flex;

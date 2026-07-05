@@ -99,12 +99,16 @@ export function show(id) {
 }
 
 /**
- * Set a bottom-nav button's text label (the text node after its <svg> icon).
- * The nav markup in index.html is `<button><svg/>Label</button>`.
+ * Set a bottom-nav button's text label. The nav markup in index.html is
+ * `<button><svg/><span data-i18n="…">Label</span></button>` — write into the
+ * span when present (it's also translated by applyI18n) so the two mechanisms
+ * never produce a duplicate label; fall back to the legacy bare text node.
  * @param {Element} btn
  * @param {string} text
  */
 function setNavLabel(btn, text) {
+	const span = btn.querySelector('span[data-i18n]');
+	if (span) { span.textContent = text; return; }
 	const svg = btn.querySelector('svg');
 	let node = svg ? svg.nextSibling : btn.firstChild;
 	while (node && node.nodeType !== 3) node = node.nextSibling; // 3 = TEXT_NODE
@@ -152,10 +156,10 @@ export function exitSession() {
 	document.body.classList.remove('in-session');
 }
 
-// Net-pill transport label map (contract §2.6: "direct"|"relay")
-const _transportLabels = {
-	direct: 'P2P',
-	relay:  'relay',
+// Net-pill transport label keys (contract §2.6: "direct"|"relay")
+const _transportKeys = {
+	direct: 'm.netpill.transportP2p',
+	relay:  'm.netpill.transportRelay',
 };
 
 /**
@@ -167,8 +171,27 @@ const _transportLabels = {
 export function setNetPill(transport) {
 	const pill = document.getElementById('net-pill');
 	if (!pill) return;
-	const label = _transportLabels[transport];
-	if (label) pill.textContent = label;
+	const key = _transportKeys[transport];
+	if (key) pill.textContent = t(key);
+}
+
+const _modeKeys = {
+	'auto':       'm.netpill.modeAuto',
+	'p2p-only':   'm.netpill.modeP2p',
+	'relay-only': 'm.netpill.modeRelay',
+};
+
+/**
+ * Show the configured NETWORK MODE on the net-pill (idle state). The pill used to
+ * be hard-coded "P2P → relay", so switching the mode in Settings never showed.
+ * During a live session setNetPill() overrides it with the real transport;
+ * session end should call this again to fall back to the mode label.
+ * @param {'auto'|'p2p-only'|'relay-only'} mode
+ */
+export function setNetPillMode(mode) {
+	const pill = document.getElementById('net-pill');
+	if (!pill) return;
+	pill.textContent = t(_modeKeys[mode] || _modeKeys['auto']);
 }
 
 /**

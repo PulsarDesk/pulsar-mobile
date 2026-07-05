@@ -1295,7 +1295,7 @@ pub async fn connect_host<R: Runtime>(
     }
 
     let app2 = app.clone();
-    let transport_owned = transport_s.to_string();
+    let mut transport_owned = transport_s.to_string();
     let codec_owned = resolved_codec.clone();
 
     tauri::async_runtime::spawn(async move {
@@ -1672,6 +1672,18 @@ pub async fn connect_host<R: Runtime>(
                         let fps_val = stats_window_frames as f32 / secs;
                         // bytes → megabits/s
                         let mbps_val = (stats_window_bytes as f32 * 8.0) / (secs * 1_000_000.0);
+                        // The connect-time transport snapshot goes stale when a late
+                        // hole-punch ack upgrades the session relay→direct mid-stream.
+                        // Poll the live value once per stats tick (one mutex lock/s) so
+                        // the HUD badge, bar meta and session cards track reality.
+                        let live = transport_str(sess.live_transport().await);
+                        if live != transport_owned {
+                            log::info!("pulsar: transport changed {transport_owned} -> {live} slot={slot}");
+                            transport_owned = live.to_string();
+                            // NOT phase "transport": connecting.js maps that to a handshake
+                            // step and would drag a still-open overlay's indicator backwards.
+                            emit_phase(&app2, slot, "transport-changed", Some(live));
+                        }
                         emit_play_stats(&app2, slot, fps_val, mbps_val, &transport_owned);
 
                         stats_window_frames = 0;

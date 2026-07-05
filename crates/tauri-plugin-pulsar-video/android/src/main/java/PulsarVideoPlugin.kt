@@ -373,7 +373,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 panes.forEach { it.release() }
                 releaseAudio()
                 stopStreamService()
-                webView?.setBackgroundColor(Color.WHITE)
+                webView?.setBackgroundColor(Color.TRANSPARENT) // body paints opaque; WHITE flashed in dark theme
                 val ret = JSObject(); ret.put("ok", true); ret.put("detail", "detached")
                 invoke.resolve(ret)
             } catch (e: Exception) { invoke.reject("detach failed: ${e.message}") }

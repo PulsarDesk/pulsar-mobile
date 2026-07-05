@@ -533,7 +533,7 @@ function openActionSheet(id, ctx) {
   actions.push({ key: 'connect-game',   icon: gameIcon(),   label: t('devices.play') });
 
   if (isSavedDevice) {
-    actions.push({ key: 'fav',    icon: starIcon(isFav), label: isFav ? t('filter.all') + ' — ★ kaldır' : t('devices.fav') });
+    actions.push({ key: 'fav',    icon: starIcon(isFav), label: isFav ? t('devices.unfav') : t('devices.fav') });
     actions.push({ key: 'edit',   icon: editIcon(),      label: t('devices.edit') });
     actions.push({ key: 'forget', icon: trashIcon(),     label: t('devices.remove'), danger: true });
   } else {

@@ -11,6 +11,19 @@
 		<style>
 			#id { font-family: var(--font-mono); font-weight: 600; font-size: 23px; letter-spacing: 0.1em; text-align: center; }
 		</style>
+		<!-- Set the theme BEFORE first paint (render-blocking on purpose): theme.js runs
+		     as a deferred module, so without this dark-mode users get a light first
+		     frame (the "white flash"). Mirrors theme.js loadTheme()/resolved(). -->
+		<script>
+			(function () {
+				var t = 'system';
+				try { t = localStorage.getItem('pulsar.theme.v1') || 'system'; } catch (e) {}
+				if (t === 'system') {
+					t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+				}
+				document.documentElement.setAttribute('data-theme', t);
+			})();
+		</script>
 	</head>
 	<body data-mode="remote">
 		<div class="app">
@@ -74,7 +87,7 @@
 							<span class="pw-chip" id="host-pw">—</span>
 							<span class="hint" style="color: var(--text-faint); font-size: 12px;" data-i18n="m.host.pwHint">tek seferlik şifre — karşı cihaza söyle</span>
 						</div>
-						<button id="go-online" class="btn btn-primary">Çevrimiçi Ol</button>
+						<button id="go-online" class="btn btn-primary" data-i18n="m.host.goOnline">Çevrimiçi Ol</button>
 						<button id="share-id" class="btn btn-ghost full" style="display: none;" data-i18n="m.host.share">ID'yi paylaş</button>
 						<button id="enable-ctrl" class="btn btn-ghost full" data-i18n="m.host.enableControl">Uzaktan kontrolü etkinleştir</button>
 						<div id="ctrl-status" class="hint" style="color: var(--text-faint); font-size: 12px; margin-top: 2px;"></div>
@@ -84,35 +97,35 @@
 
 				<!-- ===== Ayarlar ===== -->
 				<section class="tab" id="t-settings">
-					<h2 class="title">Ayarlar</h2>
-					<p class="sub">Ağ, cihaz ve görünüm tercihleri.</p>
+					<h2 class="title" data-i18n="settings.title">Ayarlar</h2>
+					<p class="sub" data-i18n="settings.sub">Ağ, cihaz ve görünüm tercihleri.</p>
 
 					<div class="sect-label" style="margin-bottom: 8px;">Ağ</div>
 					<div class="card">
 						<div class="field">
-							<label for="relay">Relay sunucusu</label>
+							<label for="relay" data-i18n="settings.relay">Relay sunucusu</label>
 							<input id="relay" class="input mono" style="font-size: 14px" autocomplete="off" />
 						</div>
 						<div class="field">
-							<label>Ağ modu</label>
+							<label data-i18n="settings.connMethod">Ağ modu</label>
 							<div class="seg" id="netmode">
-								<button data-v="auto" aria-selected="true">Otomatik</button>
-								<button data-v="p2p-only" aria-selected="false">Yalnız P2P</button>
-								<button data-v="relay-only" aria-selected="false">Yalnız Relay</button>
+								<button data-v="auto" aria-selected="true" data-i18n="settings.modeAuto">Otomatik</button>
+								<button data-v="p2p-only" aria-selected="false" data-i18n="settings.modeP2p">Yalnız P2P</button>
+								<button data-v="relay-only" aria-selected="false" data-i18n="settings.modeRelay">Yalnız Relay</button>
 							</div>
 						</div>
 					</div>
 
-					<div class="sect-label" style="margin: 16px 2px 8px;">Cihaz</div>
+					<div class="sect-label" style="margin: 16px 2px 8px;" data-i18n="devices.defaultName">Cihaz</div>
 					<div class="card">
 						<div class="field">
-							<label for="devname">Cihaz adı</label>
+							<label for="devname" data-i18n="devices.name">Cihaz adı</label>
 							<input id="devname" class="input" autocomplete="off" placeholder="Telefonum" />
 						</div>
 						<div class="field">
-							<label>Codec tercihi</label>
+							<label data-i18n="settings.codec">Codec tercihi</label>
 							<div class="seg" id="codecpref">
-								<button data-v="auto" aria-selected="true">Otomatik</button>
+								<button data-v="auto" aria-selected="true" data-i18n="codec.auto">Otomatik</button>
 								<button data-v="h265" aria-selected="false">H.265</button>
 								<button data-v="h264" aria-selected="false">H.264</button>
 							</div>
@@ -127,8 +140,8 @@
 
 				<!-- ===== Geçmiş ===== -->
 				<section class="tab" id="t-history">
-					<h2 class="title">Geçmiş</h2>
-					<p class="sub">Son bağlanılan cihazlar — dokun, tekrar bağlan.</p>
+					<h2 class="title" data-i18n="devices.title">Geçmiş</h2>
+					<p class="sub" data-i18n="devices.sub">Son bağlanılan cihazlar — dokun, tekrar bağlan.</p>
 					<div class="row-list" id="history-list"></div>
 				</section>
 			</main>
@@ -137,16 +150,16 @@
 		<!-- bottom nav -->
 		<nav class="bottom">
 			<button data-tab="connect" class="on">
-				<svg viewBox="0 0 24 24" fill="none"><path d="M13 5l7 7-7 7M4 12h15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Bağlan
+				<svg viewBox="0 0 24 24" fill="none"><path d="M13 5l7 7-7 7M4 12h15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-i18n="nav.connect">Bağlan</span>
 			</button>
 			<button data-tab="host">
-				<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="3" width="12" height="18" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M11 18h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Cihazım
+				<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="3" width="12" height="18" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M11 18h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span data-i18n="nav.host">Cihazım</span>
 			</button>
 			<button data-tab="settings">
-				<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Ayarlar
+				<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span data-i18n="nav.settings">Ayarlar</span>
 			</button>
 			<button data-tab="history">
-				<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Geçmiş
+				<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-i18n="nav.devices">Geçmiş</span>
 			</button>
 		</nav>
 
@@ -155,7 +168,7 @@
 			<span class="stat"><span class="live"></span><span data-i18n="m.session.connected">Bağlı</span></span>
 			<span class="meta" id="bar-meta">—</span>
 			<span class="sep"></span>
-			<button class="icon-btn" id="btn-split" title="Split">
+			<button class="icon-btn" id="btn-split" title="Split" data-i18n-title="m.split.title">
 				<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="7" rx="1.6" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="18" height="7" rx="1.6" stroke="currentColor" stroke-width="1.8"/></svg>
 			</button>
 			<button class="icon-btn end" id="btn-end" title="Kes" data-i18n-title="session.end">

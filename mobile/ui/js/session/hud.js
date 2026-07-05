@@ -106,7 +106,7 @@ function getOrCreateStrip() {
 	el.className  = 'hud-strip';
 	el.setAttribute('role', 'status');
 	el.setAttribute('aria-live', 'polite');
-	el.setAttribute('aria-label', 'Performans göstergeleri');
+	el.setAttribute('aria-label', t('m.hud.label'));
 	// Touch: tapping the strip toggles the expanded card
 	el.style.pointerEvents = 'auto';
 	el.addEventListener('click', () => {
@@ -114,7 +114,7 @@ function getOrCreateStrip() {
 		_renderCard();
 	});
 	// Accessible label
-	el.title = 'Performans göstergeleri — genişletmek için dokun';
+	el.title = t('m.hud.stripTitle');
 	// Honour the Settings "Performance HUD" pref (client-only).
 	if (_hudPref('hudVisible') === false) el.style.display = 'none';
 	document.body.appendChild(el);
@@ -151,7 +151,7 @@ function renderStrip() {
 	// FPS
 	if (s.fps != null && s.fps >= 0) {
 		parts.push(
-			`<span class="hud-val" aria-label="${s.fps.toFixed(0)} FPS">${s.fps.toFixed(0)}</span>` +
+			`<span class="hud-val" aria-label="${t('m.hud.ariaFps', { n: s.fps.toFixed(0) })}">${s.fps.toFixed(0)}</span>` +
 			`<span class="hud-lbl">fps</span>`
 		);
 	}
@@ -159,7 +159,7 @@ function renderStrip() {
 	// Latency (RTT, from play-rtt) — network round-trip, the key responsiveness number
 	if (s.rtt != null && s.rtt >= 0) {
 		parts.push(
-			`<span class="hud-val" aria-label="${s.rtt.toFixed(0)} milisaniye gecikme">${s.rtt.toFixed(0)}</span>` +
+			`<span class="hud-val" aria-label="${t('m.hud.ariaRtt', { n: s.rtt.toFixed(0) })}">${s.rtt.toFixed(0)}</span>` +
 			`<span class="hud-lbl">ms</span>`
 		);
 	}
@@ -168,7 +168,7 @@ function renderStrip() {
 	if (s.mbps != null && s.mbps >= 0) {
 		const mbpsStr = s.mbps >= 10 ? s.mbps.toFixed(1) : s.mbps.toFixed(2);
 		parts.push(
-			`<span class="hud-val" aria-label="${mbpsStr} megabit per saniye">${mbpsStr}</span>` +
+			`<span class="hud-val" aria-label="${t('m.hud.ariaMbps', { n: mbpsStr })}">${mbpsStr}</span>` +
 			`<span class="hud-lbl">Mbps</span>`
 		);
 	}
@@ -176,14 +176,14 @@ function renderStrip() {
 	// Decode latency (from play-vstats)
 	if (s.decodeMs != null) {
 		parts.push(
-			`<span class="hud-val" aria-label="${s.decodeMs} milisaniye çözme">${s.decodeMs}</span>` +
+			`<span class="hud-val" aria-label="${t('m.hud.ariaDecode', { n: s.decodeMs })}">${s.decodeMs}</span>` +
 			`<span class="hud-lbl">ms</span>`
 		);
 	}
 
 	// Transport badge
 	if (transportLabel) {
-		parts.push(`<span class="hud-badge" aria-label="${s.transport === 'direct' ? 'Doğrudan P2P bağlantı' : 'Relay bağlantısı'}">${transportLabel}</span>`);
+		parts.push(`<span class="hud-badge" aria-label="${t(s.transport === 'direct' ? 'm.session.transport.direct' : 'm.session.transport.relay')}">${transportLabel}</span>`);
 	}
 
 	// Build inner HTML with separators between parts
@@ -286,18 +286,18 @@ function buildCardHTML() {
 
 	// FPS
 	if (s.fps != null && s.fps >= 0) {
-		rows.push({ label: 'FPS', value: s.fps.toFixed(1) });
+		rows.push({ label: t('quality.fps'), value: s.fps.toFixed(1) });
 	}
 
 	// Latency (RTT)
 	if (s.rtt != null && s.rtt >= 0) {
-		rows.push({ label: 'Gecikme', value: `${s.rtt} ms` });
+		rows.push({ label: t('relay.latency'), value: `${s.rtt} ms` });
 	}
 
 	// Mbps
 	if (s.mbps != null && s.mbps >= 0) {
 		const mbpsStr = s.mbps >= 10 ? s.mbps.toFixed(1) : s.mbps.toFixed(2);
-		rows.push({ label: 'Mbps', value: mbpsStr });
+		rows.push({ label: t('m.hud.mbps'), value: mbpsStr });
 	}
 
 	// Decode latency
@@ -320,7 +320,7 @@ function buildCardHTML() {
 		</div>
 	`).join('');
 
-	const collapseLabel = _collapsed ? 'Genişlet' : 'Daralt';
+	const collapseLabel = _collapsed ? t('m.hud.expand') : t('m.hud.collapse');
 	const collapseIcon  = _collapsed
 		? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><polyline points="6 9 12 15 18 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 		: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><polyline points="18 15 12 9 6 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -332,14 +332,14 @@ function buildCardHTML() {
 					<polyline points="22 12 18 12 15 21 9 3 6 12 2 12" stroke="currentColor"
 					          stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 				</svg>
-				Performans
+				${t('quality.perf')}
 			</span>
 			<button class="hud-collapse-btn icon-btn" id="hud-collapse-btn"
 			        aria-label="${collapseLabel}" type="button">
 				${collapseIcon}
 			</button>
 		</div>
-		${_collapsed ? '<div class="hud-card-collapsed-hint">Dokunarak genişlet</div>' : `<div class="hud-card-rows">${rowsHTML}</div>`}
+		${_collapsed ? `<div class="hud-card-collapsed-hint">${t('m.hud.tapToExpand')}</div>` : `<div class="hud-card-rows">${rowsHTML}</div>`}
 	`;
 }
 
@@ -401,7 +401,7 @@ function tryRegister() {
 			order:   0,           // First card in gauges section
 			mount,
 			onShow,
-			label:   'Performans',
+			label:   t('quality.perf'),
 		});
 	} else {
 		// overlay.js hasn't registered __pulsarRegisterCard yet — retry once DOM loaded
@@ -518,7 +518,7 @@ async function _initListeners() {
 			_lastKeyframeReq = now;
 			invoke('request_keyframe', { slot }).catch(() => {});
 		}
-		showResyncOverlay('Yeniden eşitleniyor…');
+		showResyncOverlay(t('m.session.resync'));
 	});
 
 	// JS bus events (session lifecycle) — via window.__pulsarBus
@@ -989,7 +989,7 @@ export function showResyncOverlay(msg) {
 	el.className = 'hud-stall hud-resync'; // reuse stall styles + own class
 	el.setAttribute('role', 'status');
 	el.setAttribute('aria-live', 'polite');
-	el.setAttribute('aria-label', msg || 'Yeniden eşitleniyor');
+	el.setAttribute('aria-label', msg || t('m.session.resync'));
 	el.innerHTML = `
 		<div class="hud-stall-ring hud-resync-ring" aria-hidden="true"></div>
 		<svg class="hud-stall-icon hud-resync-icon" width="36" height="36"

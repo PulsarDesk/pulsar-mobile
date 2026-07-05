@@ -82,7 +82,7 @@ const fmtSlotLabel = (slot) => t('m.session.slot', { n: slot + 1 });
 // ---------------------------------------------------------------------------
 
 /**
- * @typedef {{ id:'h2'|'v2'|'grid4', labelTr:string, labelEn:string,
+ * @typedef {{ id:'h2'|'v2'|'grid4', label:string,
  *             icon:string, minWidth?:number }} LayoutDesc
  */
 
@@ -90,8 +90,7 @@ const fmtSlotLabel = (slot) => t('m.session.slot', { n: slot + 1 });
 const LAYOUTS = [
 	{
 		id:       'h2',
-		labelTr:  'Yan yana',
-		labelEn:  'Side by side',
+		label:    'm.split.layoutH2',
 		icon: `<svg width="36" height="28" viewBox="0 0 36 28" fill="none" aria-hidden="true">
 			<rect x="1" y="1" width="15" height="26" rx="3" stroke="currentColor" stroke-width="1.75"/>
 			<rect x="20" y="1" width="15" height="26" rx="3" stroke="currentColor" stroke-width="1.75"/>
@@ -99,8 +98,7 @@ const LAYOUTS = [
 	},
 	{
 		id:       'v2',
-		labelTr:  'Üst alta',
-		labelEn:  'Stacked',
+		label:    'm.split.layoutV2',
 		icon: `<svg width="28" height="36" viewBox="0 0 28 36" fill="none" aria-hidden="true">
 			<rect x="1" y="1" width="26" height="15" rx="3" stroke="currentColor" stroke-width="1.75"/>
 			<rect x="1" y="20" width="26" height="15" rx="3" stroke="currentColor" stroke-width="1.75"/>
@@ -108,8 +106,7 @@ const LAYOUTS = [
 	},
 	{
 		id:       'grid4',
-		labelTr:  '2×2 ızgara',
-		labelEn:  '2×2 grid',
+		label:    'm.split.layoutGrid4',
 		minWidth: 600,
 		icon: `<svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
 			<rect x="1"  y="1"  width="15" height="15" rx="3" stroke="currentColor" stroke-width="1.75"/>
@@ -132,11 +129,9 @@ function availableLayouts() {
 
 const $ = (id) => document.getElementById(id);
 
-/** Resolve label for a layout synchronously (best-effort). */
+/** Resolve label for a layout via the i18n catalog. */
 function resolveLabel(desc) {
-	// We can't use async here, so we pick based on document.documentElement.lang
-	const lang = document.documentElement.lang || 'tr';
-	return lang === 'en' ? desc.labelEn : desc.labelTr;
+	return t(desc.label);
 }
 
 // ---------------------------------------------------------------------------

@@ -52,15 +52,16 @@ const _KBD_STRINGS = {
   },
 };
 
-/** Local translate — falls back to the app-wide t() then the key. */
+/** Local translate — app-wide t() first, inline table only as fallback. */
 function tk(key) {
   try {
-    // Use the loaded lang from i18n if available
-    const { lang } = /** @type {any} */ (window.__pulsarI18n || {});
-    const l = lang || 'tr';
+    // Prefer the shared catalog (covers all shipped languages)
+    const v = t(key);
+    if (v !== key) return v;
+    // Fallback: inline table keyed by the active document language
+    const l = (document.documentElement.lang || 'tr').toLowerCase().slice(0, 2);
     return (_KBD_STRINGS[l] && _KBD_STRINGS[l][key])
-      || (_KBD_STRINGS.en[key])
-      || t(key)
+      || (_KBD_STRINGS.tr[key])
       || key;
   } catch (_) {
     return (_KBD_STRINGS.tr[key]) || key;

@@ -34,7 +34,7 @@
 import './theme.js';
 import { lang, setLang, t, applyI18n } from './i18n.js';
 import { getConfig, netmode } from './store/config.js';
-import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill } from './router.js';
+import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill, setNetPillMode } from './router.js';
 import * as tauri            from './tauri.js';
 const { invoke, hasTauri, listen } = tauri;
 
@@ -156,7 +156,15 @@ async function boot() {
 	// 1. i18n — already loaded at module parse time; nothing async needed.
 
 	// 2. Config — kick off async load; screens read the cache synchronously.
-	getConfig().catch(() => { /* non-fatal — falls back to localStorage */ });
+	getConfig()
+		.then(() => setNetPillMode(netmode())) // pill shows the CONFIGURED mode, not a hardcoded label
+		.catch(() => { /* non-fatal — falls back to localStorage */ });
+	// Settings changed the network mode → reflect it immediately.
+	bus.on('netmode-changed', (m) => setNetPillMode(m));
+	// Session over → drop the live-transport override, back to the mode label.
+	bus.on('session-ended', () => setNetPillMode(netmode()));
+	// Language switched → re-render the pill's mode label in the new language.
+	window.addEventListener('langchange', () => setNetPillMode(netmode()));
 
 	// 3. Router — wire bottom-nav + bus listeners + Tauri conn-phase listener.
 	// Pass the tauri module so the router can subscribe to 'conn-phase' and
@@ -220,13 +228,13 @@ export function updateBarMeta(result) {
 	const codecPart = result.codec ? result.codec.toUpperCase() : '?';
 	let transportPart;
 	if (result.transport === 'direct') {
-		transportPart = 'P2P';
+		transportPart = t('m.netpill.transportP2p');
 	} else if (result.transport === 'relay') {
-		transportPart = 'relay';
+		transportPart = t('m.netpill.transportRelay');
 	} else if (result.mos) {
-		transportPart = 'oturum';
+		transportPart = t('m.bar.session');
 	} else {
-		transportPart = 'p2p';
+		transportPart = t('m.netpill.transportP2p');
 	}
 	barMeta.textContent = codecPart + ' · ' + transportPart;
 	// Also update the net-pill to reflect the real transport
