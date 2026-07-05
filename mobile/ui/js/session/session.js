@@ -1322,9 +1322,15 @@ function _injectStyles() {
 }
 
 /* ---- Auth prompt sheet ---- */
-.auth-sheet-wrapper { position: fixed; inset: 0; z-index: 26; pointer-events: none; }
+/* Above the Connecting overlay (z-index 100): during connect the host asks for the
+   OTP while that overlay is still up (connect_host stays pending), so the sheet must
+   sit ON TOP of it — otherwise the popup renders behind the step-loader (only the
+   soft keyboard showed). Its own backdrop dims the loader behind it. */
+.auth-sheet-wrapper { position: fixed; inset: 0; z-index: 120; pointer-events: none; }
 .auth-sheet-wrapper .sheet-backdrop,
 .auth-sheet-wrapper .sheet { pointer-events: auto; }
+/* Fully cover the still-running Connecting loader that sits behind the OTP sheet. */
+.auth-sheet-wrapper .sheet-backdrop { background: rgba(8, 10, 22, 0.86); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 .auth-sheet {
 	max-height: 80dvh;
 }

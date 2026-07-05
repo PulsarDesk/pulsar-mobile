@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Host audio: MediaProjection playback-capture requires RECORD_AUDIO. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Touch haptics: navigator.vibrate() in the client input layer (long-press,
+         double-tap, double-tap-drag) is a no-op without this. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application>
         <!-- Client: keeps decode + sockets alive when backgrounded. -->

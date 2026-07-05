@@ -359,14 +359,36 @@ function wireTouchForwarding() {
 	let cursorEl = null;
 
 	// Gesture bookkeeping
-	const TAP_SLOP = 10, LONG_MS = 480, DBL_MS = 280, TAP_MAX_MS = 600, DRAG_DBL_MS = 360;
-	const PINCH_THRESH = 16, SCROLL_SLOP = 6, SCROLL_DIV = 2.4, REL_SENS = 1.5;
+	const TAP_SLOP = 10, LONG_MS = 480, DBL_MS = 280, TAP_MAX_MS = 600, DRAG_DBL_MS = 450;
+	// A double-tap-drag ("tap-and-a-half") or armed long-press grabs the left button
+	// after this tiny move (px) — small so fast/short drags engage as a DRAG instead of
+	// being misread as a double-click.
+	const DRAG_ENGAGE = 3;
+	// A 2nd tap released in place within this many ms = double-click. Held longer or
+	// moved = drag (whose button-down is delayed past the OS double-click window, so
+	// the drag can never fabricate a double-click).
+	const DBL_TAP_MS = 150;
+
+	const PINCH_THRESH = 16, SCROLL_SLOP = 6, REL_SENS = 1.5;
+	// Two-finger scroll gain: finger-px/frame → host wheel "pixels" (the host divides by
+	// 100 for wheel notches). The old code DIVIDED by 2.4 (→ effective /240: a whole
+	// swipe was barely 1 notch). Multiply so a swipe scrolls naturally.
+	const SCROLL_GAIN = 12;
 	let g1 = null;             // 1-finger: {sx,sy,x,y,t,moved,dragging}
 	let g2 = null;             // 2-finger: {d0, mid0, type, lastMid}
 	let longTimer = null;
 	let lastTap = null;
+	let lastClickSent = null; // {t,fx,fy} — cooldown so the HOST OS can never see two rapid clicks (= its own double-click)
 
 	const inSession = () => hasTauri && document.body.classList.contains('in-session');
+	// Input is gated until the FIRST video frame: while "görüntü bekleniyor" the user
+	// shouldn't be able to click/drag the host blindly. Reset on session end.
+	let videoReady = false;
+	try {
+		const { listen } = window.__TAURI__.event;
+		listen('play-firstframe', () => { videoReady = true; applyMode(); });
+	} catch (_) {}
+	if (bus && bus.on) bus.on('session-ended', () => { videoReady = false; applyMode(); });
 	// Split touch-routing is active whenever ≥2 sessions are live, regardless of
 	// which UI opened the split: the legacy #btn-split set window.__pulsarSplitActive,
 	// but the overlay Split card / split.js target picker never did. The native layout
@@ -521,7 +543,8 @@ function wireTouchForwarding() {
 	// 'cursor-mouse' on <body> gates the cursor's visibility via CSS (hidden when the
 	// overlay is open or out of session). Place it at the rect centre when activating.
 	const applyMode = () => {
-		document.body.classList.toggle('cursor-mouse', mode === 'mouse');
+		// Cursor only once the video is up — no floating pointer over the waiting screen.
+		document.body.classList.toggle('cursor-mouse', mode === 'mouse' && videoReady);
 		if (mode === 'mouse') { ensureCursor(); if (!cur) cur = rectCenter(); moveCursor(cur); }
 	};
 
@@ -547,13 +570,15 @@ function wireTouchForwarding() {
 		const rect0 = rect ? { ...rect } : baseRect();
 		return { d0: d, z0: zfac, rect0, mx: (a.clientX + b.clientX) / 2, my: (a.clientY + b.clientY) / 2 };
 	};
-	const updatePinch = (touches) => {
+	const updatePinch = (touches, allowZoom = true) => {
 		if (!pinch || !pinch.rect0) return;
 		const f = baseRect();
 		const a = touches[0], b = touches[1];
 		const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
 		const mx = (a.clientX + b.clientX) / 2, my = (a.clientY + b.clientY) / 2;
-		const z = clamp(pinch.z0 * d / pinch.d0, 1, MAX_ZOOM);
+		// Pan mode freezes the zoom: only a real 'zoom' gesture may change it — otherwise
+		// natural finger-distance drift during a two-finger pan re-zooms the view.
+		const z = allowZoom ? clamp(pinch.z0 * d / pinch.d0, 1, MAX_ZOOM) : pinch.z0;
 		const w = f.w * z, h = f.h * z;
 		// Keep the frame point under the gesture-start midpoint pinned, and pan with
 		// the current midpoint (two-finger drag = pan).
@@ -579,7 +604,7 @@ function wireTouchForwarding() {
 	};
 
 	addEventListener('touchstart', (e) => {
-		if (!inSession() || gamepadActive || uiBlocked(e)) return; // B1: gate while pad active
+		if (!inSession() || !videoReady || gamepadActive || uiBlocked(e)) return; // gated until first frame
 		if (e.touches.length >= 2) {
 			// Two fingers → pinch-zoom / pan / scroll. Abort any pending 1-finger gesture.
 			g1 = null; clearTimeout(longTimer); longTimer = null;
@@ -599,7 +624,17 @@ function wireTouchForwarding() {
 		// Tap-and-a-half: a press that closely follows a tap becomes a left-button
 		// DRAG as soon as it moves (the standard trackpad gesture; matches the
 		// user's "double-click then hold to drag"). No long still-hold needed.
-		if (lastTap && (Date.now() - lastTap.t) < DRAG_DBL_MS) g1.afterTap = true;
+		if (lastTap && (Date.now() - lastTap.t) < DRAG_DBL_MS &&
+		    Math.hypot(t.clientX - (lastTap.fx ?? lastTap.x), t.clientY - (lastTap.fy ?? lastTap.y)) < 48) {
+			// 2nd tap of a double-tap: send NOTHING yet — disambiguate by what follows.
+			//   release in place → down+up sent on RELEASE = click #2 → double-click
+			//   move (>DRAG_ENGAGE) → button pressed at the start = drag, no wait
+			//   hold still → nothing goes to the host, so no accidental double-click
+			g1.afterTap = true;
+			g1.dblArmed = true;
+			g1.dragging = true; // suppress the plain tap-click path on release
+			lastTap = null;
+		}
 		// Long-press → right click.
 		clearTimeout(longTimer);
 		longTimer = setTimeout(() => {
@@ -618,36 +653,80 @@ function wireTouchForwarding() {
 	}, { passive: true });
 
 	addEventListener('touchmove', (e) => {
-		if (!inSession() || gamepadActive) return; // B1: gate while on-screen pad active
+		if (!inSession() || !videoReady || gamepadActive) return; // gated until first frame
 		if (multi) {
 			if (!g2 || e.touches.length < 2) return;
 			const a = e.touches[0], b = e.touches[1];
 			const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
 			const mid = { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
 			if (g2.type === 'none') {
-				if (Math.abs(d - g2.d0) > PINCH_THRESH) g2.type = 'zoom';
-				else if (Math.hypot(mid.x - g2.mid0.x, mid.y - g2.mid0.y) > SCROLL_SLOP) g2.type = (zfac > 1.001 ? 'pan' : 'scroll');
+				const dDist = Math.abs(d - g2.d0);                              // pinch signal
+				const dMid  = Math.hypot(mid.x - g2.mid0.x, mid.y - g2.mid0.y); // translation signal
+				// Dominant motion wins: a two-finger DRAG (translation) → scroll/pan; only a
+				// real PINCH (distance change out-growing the translation) → zoom. (Old code
+				// checked zoom first on a fixed 16px delta, so drag jitter latched 'zoom'.)
+				if (dDist > PINCH_THRESH && dDist > 1.4 * dMid) g2.type = 'zoom';
+				else if (dMid > SCROLL_SLOP && dMid >= dDist) g2.type = 'scroll'; // two-finger drag = ALWAYS scroll (zoomed too; panning stays on pinch/cursor-edge)
 			}
-			if (g2.type === 'zoom' || g2.type === 'pan') {
-				updatePinch(e.touches); // zoom by distance + pan by midpoint
+			if (g2.type === 'zoom') {
+				updatePinch(e.touches);
 			} else if (g2.type === 'scroll') {
 				const dx = mid.x - g2.lastMid.x, dy = mid.y - g2.lastMid.y;
-				invoke('send_scroll', { slot: 0, dx: -(dx / SCROLL_DIV), dy: -(dy / SCROLL_DIV) }).catch(() => {});
+				invoke('send_scroll', { slot: 0, dx: -(dx * SCROLL_GAIN), dy: -(dy * SCROLL_GAIN) }).catch(() => {});
 			}
 			g2.lastMid = mid;
 			return;
 		}
 		if (!g1) return;
 		const t = e.touches[0];
-		if (!g1.moved && Math.hypot(t.clientX - g1.sx, t.clientY - g1.sy) > TAP_SLOP) {
+		if (!g1.moved && Math.hypot(t.clientX - g1.sx, t.clientY - g1.sy) > (g1.armed ? DRAG_ENGAGE : TAP_SLOP)) {
 			g1.moved = true; g1.dragging = true; clearTimeout(longTimer); longTimer = null;
 		}
 		// Armed hold + first movement → press the LEFT button now and keep it down;
 		// the moves below then drag (window move / text select) until release.
-		if ((g1.armed || g1.afterTap) && !g1.dragStarted && g1.moved) {
+		// Double-tap-drag: the armed 2nd tap moved → press the LEFT button. CRITICAL:
+		// Qt/KWin fire a double-click on the SECOND PRESS within ~400ms of a click, so
+		// if this down lands too soon after the tap's click the HOST maximizes/opens
+		// (the "phantom double-click"). Schedule the down for ≥450ms after the last
+		// sent click; pointer-moves are held until the down goes out, then the drag
+		// streams normally. No recent click → down is immediate.
+		if (g1.dblArmed && !g1.dragStarted &&
+		    Math.hypot(t.clientX - g1.sx, t.clientY - g1.sy) > DRAG_ENGAGE) {
+			g1.dblArmed = false;
+			g1.dragStarted = true;
+			// Grab point = where the user AIMED at engage time (the local cursor visual
+			// keeps moving during the delayed-down wait, so `cur` may drift — snapshot it).
+			const downPos = (mode === 'mouse') ? { ...(cur || rectCenter()) } : { x: g1.sx, y: g1.sy };
+			const dragDown = () => {
+				g1w.waitingDown = false;
+				sendButtonAt(downPos.x, downPos.y, 0, true);
+				if (navigator.vibrate) try { navigator.vibrate(12); } catch (_) {}
+			};
+			const g1w = g1;
+			const wait = lastClickSent ? Math.max(0, 420 - (Date.now() - lastClickSent.t)) : 0;
+			if (wait > 0) {
+				g1w.waitingDown = true;
+				g1w.downTimer = setTimeout(() => { if (g1 === g1w) dragDown(); }, wait);
+			} else {
+				dragDown();
+			}
+		}
+		if (g1.armed && !g1.dragStarted && g1.moved) {
 			g1.dragStarted = true;
 			if (mode === 'mouse') { const c = cur || rectCenter(); sendButtonAt(c.x, c.y, 0, true); }
 			else { sendButtonAt(g1.sx, g1.sy, 0, true); }
+			if (navigator.vibrate) try { navigator.vibrate(12); } catch (_) {}
+		}
+		if (g1.waitingDown) {
+			// Delayed-down window: nothing goes to the host yet (double-click guard),
+			// but keep the LOCAL cursor visual tracking the finger so it doesn't feel
+			// frozen; when the down fires the host catches up in one step.
+			if (mode === 'mouse') {
+				const base = cur || rectCenter();
+				moveCursor({ x: base.x + (t.clientX - g1.x) * REL_SENS, y: base.y + (t.clientY - g1.y) * REL_SENS });
+			}
+			g1.x = t.clientX; g1.y = t.clientY;
+			return;
 		}
 		if (mode === 'mouse') {
 			// Relative: move the cursor by finger delta (kept inside the rect), drive
@@ -665,10 +744,34 @@ function wireTouchForwarding() {
 		if (gamepadActive) return; // B1: gate while on-screen pad active
 		if (e.touches.length === 0) {
 			clearTimeout(longTimer); longTimer = null;
-			if (multi) { multi = false; pinch = null; g2 = null; }
+			if (multi) {
+				multi = false; pinch = null; g2 = null;
+				// Residual zoom lock: after any pinch, zfac rarely lands back at exactly 1,
+				// and anything >1.001 classifies every later two-finger drag as 'pan' —
+				// scroll becomes unreachable forever. If the gesture ended near fit, snap
+				// to fit so two-finger scroll comes back. (Truly zoomed-in stays pan.)
+				if (zfac > 1 && zfac < 1.06) setFit();
+			}
 			else if (g1) {
 				const now = Date.now();
-				if (g1.dragStarted) {
+				if (g1.dblArmed && !g1.dragStarted) {
+						// 2nd tap released in place. Quick (≤DBL_TAP_MS) → click #2 now: with
+						// tap 1's click the host OS assembles the double-click on RELEASE.
+						// Held longer → nothing (drag intent that never moved).
+						if ((now - g1.t) <= DBL_TAP_MS) {
+							const px = mode === 'mouse' ? (cur ? cur.x : g1.sx) : g1.sx;
+							const py = mode === 'mouse' ? (cur ? cur.y : g1.sy) : g1.sy;
+							sendClickAt(px, py, 0);
+							// Anchor both guards on this click: a follow-up press-drag delays its
+							// down past the OS window, and stray taps stay cooldown-swallowed.
+							lastClickSent = { t: now, fx: g1.sx, fy: g1.sy };
+							lastTap = { x: px, y: py, fx: g1.sx, fy: g1.sy, t: now };
+							if (navigator.vibrate) try { navigator.vibrate([8, 24, 8]); } catch (_) {}
+						}
+					} else if (g1.dragStarted && g1.waitingDown) {
+						// Drag ended before the delayed down ever went out → send nothing.
+						clearTimeout(g1.downTimer);
+					} else if (g1.dragStarted) {
 						// End the hold-drag: release the left button at the cursor/finger.
 						if (mode === 'mouse') { const c = cur || rectCenter(); sendButtonAt(c.x, c.y, 0, false); }
 						else { sendButtonAt(g1.x, g1.y, 0, false); }
@@ -680,11 +783,16 @@ function wireTouchForwarding() {
 					} else if (!g1.dragging && (now - g1.t) < TAP_MAX_MS) {
 					const cx = mode === 'mouse' ? (cur ? cur.x : g1.sx) : g1.sx;
 					const cy = mode === 'mouse' ? (cur ? cur.y : g1.sy) : g1.sy;
-					if (lastTap && (now - lastTap.t) < DBL_MS && Math.hypot(cx - lastTap.x, cy - lastTap.y) < 40) {
-						lastTap = null; sendClickAt(cx, cy, 0); sendClickAt(cx, cy, 0); // double-click
-						if (navigator.vibrate) navigator.vibrate([8, 24, 8]);
-					} else {
-						lastTap = { x: cx, y: cy, t: now }; sendClickAt(cx, cy, 0); // left click
+					// Single tap = single left click — but NEVER two rapid clicks to the host:
+					// even when the drag-arm window misses (fast/far 2nd tap), a click landing
+					// within 500ms & ~120px of the previous one is swallowed, so the host OS
+					// cannot assemble a double-click on its own. (Synthetic dbl is removed.)
+					lastTap = { x: cx, y: cy, fx: g1.sx, fy: g1.sy, t: now };
+					const nearPrev = lastClickSent && (now - lastClickSent.t) < 500 &&
+						Math.hypot(g1.sx - lastClickSent.fx, g1.sy - lastClickSent.fy) < 120;
+					if (!nearPrev) {
+						lastClickSent = { t: now, fx: g1.sx, fy: g1.sy };
+						sendClickAt(cx, cy, 0);
 					}
 				}
 				g1 = null;
@@ -695,7 +803,8 @@ function wireTouchForwarding() {
 	}, { passive: true });
 
 	addEventListener('touchcancel', () => {
-		if (g1 && g1.dragStarted) { const c = (mode === 'mouse') ? (cur || rectCenter()) : { x: g1.x, y: g1.y }; sendButtonAt(c.x, c.y, 0, false); }
+		if (g1 && g1.downTimer) clearTimeout(g1.downTimer);
+		if (g1 && g1.dragStarted && !g1.waitingDown) { const c = (mode === 'mouse') ? (cur || rectCenter()) : { x: g1.x, y: g1.y }; sendButtonAt(c.x, c.y, 0, false); }
 		clearTimeout(longTimer); longTimer = null; g1 = null; g2 = null; pinch = null; multi = false;
 	}, { passive: true });
 
