@@ -171,6 +171,9 @@ class SetAspectArgs {
 
 @InvokeArg
 class SetOrientationArgs {
+    // "auto" (free portrait↔landscape), "landscape", or "portrait". Legacy callers may
+    // still send `landscape: Boolean`; honored as a fallback when `mode` is absent.
+    var mode: String? = null
     var landscape: Boolean = false
 }
 
@@ -586,17 +589,21 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
-     * Lock the activity to landscape or portrait orientation.
-     * landscape=true → sensorLandscape, false → sensorPortrait.
+     * Set the activity orientation. "auto" = FULL_SENSOR (free portrait↔landscape — used
+     * by remote-desktop so rotating the phone rotates the view; SENSOR_PORTRAIT/_LANDSCAPE
+     * are BOTH locks and never rotate across the portrait/landscape boundary, which is why
+     * remote sessions were stuck sideways-locked). "landscape"/"portrait" pin the axis.
      */
     @Command
     fun setOrientation(invoke: Invoke) {
         val args = invoke.parseArgs(SetOrientationArgs::class.java)
-        activity.requestedOrientation = if (args.landscape)
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        else
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-        val r = JSObject(); r.put("ok", true); r.put("landscape", args.landscape); invoke.resolve(r)
+        val mode = args.mode ?: if (args.landscape) "landscape" else "portrait"
+        activity.requestedOrientation = when (mode) {
+            "landscape" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            "portrait" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            else -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR // "auto": free rotation
+        }
+        val r = JSObject(); r.put("ok", true); r.put("mode", mode); invoke.resolve(r)
     }
 
     /**

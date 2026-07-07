@@ -830,9 +830,12 @@ export function startSession({ slot, id, codec, mode, transport, label }) {
 	updateBarMeta({ codec, transport });
 
 	// Game mode is landscape-first (Moonlight-style); a game session forces landscape.
-	// Remote sessions leave the OS orientation alone (the display card can override).
-	if (hasTauri && (mode || 'remote') === 'game') {
-		invoke('plugin:pulsar-video|set_orientation', { landscape: true }).catch(() => {});
+	// Remote gets FREE rotation so turning the phone rotates the desktop view — WITHOUT
+	// this, remote inherited the sensor-portrait LOCK left by the previous session's
+	// teardown and was stuck sideways-locked. The display card can still pin an axis.
+	if (hasTauri) {
+		const om = (mode || 'remote') === 'game' ? 'landscape' : 'auto';
+		invoke('plugin:pulsar-video|set_orientation', { mode: om }).catch(() => {});
 	}
 
 	// Emit JS bus event for any listeners (overlay.js, etc.)
@@ -991,7 +994,7 @@ function _dropSlot(slot, fromRust, reason) {
 
 		// Restore portrait so the home / connect screens aren't stuck sideways after
 		// a game session forced landscape.
-		if (hasTauri) invoke('plugin:pulsar-video|set_orientation', { landscape: false }).catch(() => {});
+		if (hasTauri) invoke('plugin:pulsar-video|set_orientation', { mode: 'portrait' }).catch(() => {});
 
 		if (fromRust && entry) {
 			// Show the disconnect + reconnect card

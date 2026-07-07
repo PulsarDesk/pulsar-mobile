@@ -303,22 +303,12 @@ function _wireOrientation() {
 			b.setAttribute('aria-checked', String(active));
 		});
 
-		// Map to native: 'auto' → let the OS decide (portrait as default)
-		const landscape = newOrient === 'landscape';
-		if (newOrient === 'auto') {
-			// Nothing to send for auto — let OS handle; best-effort reset
-			// by sending portrait=false (sensor-portrait which Android respects)
-			try {
-				await invoke('plugin:pulsar-video|set_orientation', { landscape: false });
-			} catch (e) {
-				console.warn('[display] setOrientation (auto) error:', e);
-			}
-		} else {
-			try {
-				await invoke('plugin:pulsar-video|set_orientation', { landscape });
-			} catch (e) {
-				console.warn('[display] setOrientation error:', e);
-			}
+		// Native: 'auto' = FULL_SENSOR (free rotation), else pin the axis. The seg values
+		// (auto|landscape|portrait) map 1:1 to the plugin's mode.
+		try {
+			await invoke('plugin:pulsar-video|set_orientation', { mode: newOrient });
+		} catch (e) {
+			console.warn('[display] setOrientation error:', e);
 		}
 	});
 }
