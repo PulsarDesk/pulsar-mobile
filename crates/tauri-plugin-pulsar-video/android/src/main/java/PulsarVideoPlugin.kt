@@ -215,6 +215,14 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var audioDisabled = false
     /** Current gain for the AudioTrack: 1f = full volume, 0f = muted. W3-audio-mute. */
     private var audioGain = 1f
+    /**
+     * Monotonic presentation time (µs) for the opus decoder input. MUST advance: the
+     * decoder discards output whose PTS falls inside the codec-delay/seek-preroll window
+     * (OpusHead pre-skip = 3840 samples = 80 ms). Feeding every packet with PTS 0 kept
+     * ALL output inside that window, so c2.android.opus.decoder emitted ZERO PCM (silent
+     * audio though packets flowed + the codec was RUNNING). Incremented per packet.
+     */
+    private var audioPtsUs = 0L
     /** Per-pane aspect mode: "fit" | "fill" | "stretch". W3-aspect. W5-native: 4 slots. */
     private val aspectMode = Array(MAX_PANES) { "fit" }
     /** W5-native: current layout — "single" | "left-right" | "top-bottom" | "quad". */
@@ -1256,7 +1264,11 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 return
             }
             buf.put(opus)
-            codec.queueInputBuffer(inIdx, 0, opus.size, 0, 0)
+            codec.queueInputBuffer(inIdx, 0, opus.size, audioPtsUs, 0)
+            // ~10 ms/packet (host encodes frame_duration=10). The exact value is
+            // immaterial to MODE_STREAM playback rate — it only has to advance
+            // monotonically so the decoder emits output past the pre-skip window.
+            audioPtsUs += 10_000L
         }
         val info = MediaCodec.BufferInfo()
         while (true) {
@@ -1292,6 +1304,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         try { audioTrack?.stop() } catch (_: Exception) {}
         try { audioTrack?.release() } catch (_: Exception) {}
         audioCodec = null; audioTrack = null; audioConfigured = false
+        audioPtsUs = 0L
     }
 
     private fun leLong(v: Long): ByteArray {
