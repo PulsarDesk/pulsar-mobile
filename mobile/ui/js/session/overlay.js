@@ -166,6 +166,11 @@ let _fabEl    = null;
 export function open() {
 	if (!_dockEl) _buildDOM();
 	_renderDock();
+	// Always open scrolled to the TOP — a prior session may have left the dock (or its
+	// card-area) scrolled down; reopening should start fresh from the first card.
+	_dockEl.scrollTop = 0;
+	const _ca = _dockEl.querySelector('.overlay-card-area');
+	if (_ca) _ca.scrollTop = 0;
 	_open = true;
 	// Disable input forwarding (input.js checks this) + hide the FAB so it doesn't
 	// float over the dock.
@@ -376,10 +381,13 @@ function _wireDockSwipe(el) {
 	const cardArea = () => el.querySelector('.overlay-card-area');
 	const start = (e) => {
 		const p = e.touches[0];
-		// Only arm from the handle/header, or when the (scrollable) card area is at the top.
+		// Only arm from the handle/header, or when the scroll is at the top. The scroll
+		// container is the DOCK in landscape (whole-dock scroll) and the card-area in
+		// portrait — check BOTH so a mid-scroll drag scrolls instead of dismissing (a
+		// content scroll must never close the sheet).
 		const onGrab = e.target.closest && e.target.closest('.overlay-handle, .overlay-header');
 		const a = cardArea();
-		const atTop = !a || a.scrollTop <= 0;
+		const atTop = el.scrollTop <= 0 && (!a || a.scrollTop <= 0);
 		if (!onGrab && !atTop) { active = false; return; }
 		sy = p.clientY; dy = 0; active = true;
 		el.style.transition = 'none';
@@ -671,6 +679,16 @@ function _injectStyles() {
 	overflow: hidden;
 	border-top-left-radius: var(--r-xl, 26px);
 	border-top-right-radius: var(--r-xl, 26px);
+	/* Cap + centre UNCONDITIONALLY. margin-inline:auto did NOT centre in this WebView
+	 * (with left:0/right:0 the sheet pinned left at 640px), so centre the bulletproof
+	 * way: left:50% + a negative margin of half the width. No transform is used, so
+	 * the slide/swipe translateY is untouched. Portrait: width = 100%, margin = -50%
+	 * → flush-left full width (no-op). Landscape: width = 640px, margin = -320px →
+	 * centred. right:auto releases the base right:0 pin. */
+	left: 50%;
+	right: auto;
+	width: min(640px, 100%);
+	margin-left: calc(min(640px, 100%) * -0.5);
 }
 .overlay-handle {
 	width: 38px; height: 4px;
@@ -919,6 +937,40 @@ body[data-mode="game"] .overlay-toggle input:checked ~ .track {
 .overlay-toggle input:checked ~ .thumb {
 	transform: translateX(20px);
 	background: oklch(0.99 0 0);
+}
+
+/* ==== LANDSCAPE (game streaming) responsiveness ====
+ * A landscape phone is SHORT (small dvh) and WIDE. The full-width bottom sheet then
+ * stretches edge-to-edge and its 80dvh height clips the cards under the footer. The
+ * desktop-column media query that would centre it needs min-height:560px, which a
+ * landscape phone (CSS height ~340px) never meets — so handle orientation directly.
+ * Placed at the END of the sheet so these override the base rules above (equal
+ * specificity → later source wins; @media adds none). */
+@media (orientation: landscape) {
+	/* Short screen: the pinned footer + an independently-scrolling card-area left a
+	 * tiny scroll window that cramped the screen. Instead the WHOLE dock scrolls as
+	 * one block (handle → pills → cards → End session), so the disconnect button
+	 * sits at the BOTTOM of the content, not pinned. (Portrait keeps the pinned
+	 * footer via the base rules — this override is landscape-only.) */
+	/* Narrower than the 640 base: the cards' controls (segmented codec buttons, toggles)
+	 * are laid out for a ~400px portrait column, so at 640 they left-group with a sparse
+	 * right gap. ~480 gives a portrait-like density, centred (base left:50%). */
+	#overlay-dock {
+		max-height: 94dvh;
+		overflow-y: auto;
+		width: min(480px, 100%);
+		margin-left: calc(min(480px, 100%) * -0.5);
+	}
+	/* Single column: the wide-screen 2-col grid (@media min-width:600) leaves a lonely
+	 * card in the LEFT column when a section has one card (Stream = one QUALITY/PERF
+	 * card), which reads as "left-aligned / broken". One column fills the centred dock
+	 * and gives the controls (sliders, segmented buttons) room. */
+	.overlay-card-area { overflow: visible; flex: none; grid-template-columns: 1fr; }
+	.overlay-footer { margin-top: 14px; }
+	/* Reclaim vertical space for the cards on the short screen. */
+	.overlay-handle { margin: 8px auto 2px; }
+	.overlay-header { padding: 2px 16px 6px; }
+	.overlay-section-row { padding: 0 16px 6px; }
 }
 `;
 	document.head.appendChild(style);
