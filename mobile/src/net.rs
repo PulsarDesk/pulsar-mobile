@@ -28,6 +28,20 @@ use pulsar_core::{Discovery, NetworkMode, Node};
 
 use crate::identity::load_identity;
 
+/// Parse a user-entered relay address, defaulting to the standard relay port when
+/// the input has none (e.g. just a hostname/IP) — so typing "192.168.1.50" works
+/// without also typing ":21116". The stored/displayed config value is untouched;
+/// only the address actually used to connect gets the default port.
+pub(crate) fn parse_relay(s: &str) -> Result<SocketAddr, String> {
+    let s = s.trim();
+    let with_port = if s.contains(':') {
+        s.to_string()
+    } else {
+        format!("{s}:{}", pulsar_core::proto::DEFAULT_RELAY_PORT)
+    };
+    with_port.parse().map_err(|e| format!("bad relay: {e}"))
+}
+
 /// The app's single relay `Node`, created on first use (a client connect or
 /// `go_online`) and reused by both roles thereafter. `None` until first use.
 #[derive(Default)]

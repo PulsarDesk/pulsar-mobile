@@ -436,7 +436,7 @@ pub async fn go_online<R: Runtime>(
     let cfg = load_config(&app);
 
     let relay_str = if relay.is_empty() { cfg.relay.clone() } else { relay };
-    let relay_addr: SocketAddr = relay_str.parse().map_err(|e| format!("bad relay: {e}"))?;
+    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
 
     let dev_name = if name.is_empty() {
         if cfg.device_name.is_empty() { "Pulsar Telefon".to_string() } else { cfg.device_name.clone() }

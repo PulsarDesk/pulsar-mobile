@@ -164,7 +164,7 @@ pub async fn relay_health<R: Runtime>(
 ) -> Result<RelayHealth, String> {
     use pulsar_core::proto::{encode, ClientMsg, DeviceId, Token};
     let relay_str = if relay.is_empty() { load_config(&app).relay } else { relay };
-    let addr: SocketAddr = relay_str.parse().map_err(|e| format!("bad relay: {e}"))?;
+    let addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
     let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| e.to_string())?;
@@ -995,9 +995,7 @@ pub async fn connect_host<R: Runtime>(
     let cfg = load_config(&app);
 
     let relay_str = if relay.is_empty() { cfg.relay.clone() } else { relay };
-    let relay_addr: SocketAddr = relay_str
-        .parse()
-        .map_err(|e| format!("bad relay addr: {e}"))?;
+    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
 
     let dev_name = if name.is_empty() {
         if cfg.device_name.is_empty() { "Pulsar Mobile".to_string() } else { cfg.device_name.clone() }
