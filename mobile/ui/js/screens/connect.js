@@ -29,6 +29,7 @@ import { isSaved, savedPeers }                              from '../store/peers
 import { getPeerMeta, setPeerName, setPeerImage }          from '../store/peerMeta.js';
 import { getPref }                                         from '../store/prefs.js';
 import { start as startConnecting, cancel as cancelConnecting } from './connecting.js';
+import { openGamesFetch }                                  from './games.js';
 import { toast }                                           from '../toast.js';
 
 // Slot → connected device id (set in doConnect) so the host-identity events below
@@ -554,8 +555,12 @@ export function refreshHz() { return _refreshHz; }
  * @param {string} target           — relay 9-digit ID (digits only) or "ip" / "ip:port"
  * @param {number} slot             — 0 or 1
  * @param {'remote'|'game'} [modeOverride]  — if omitted, reads body[data-mode]
+ * @param {string} [gameId]         — game-mode ONLY: the picked host game id ('' =
+ *                                    Desktop / whole screen). When omitted in game
+ *                                    mode we FETCH the host library first (desktop
+ *                                    parity) and this streams only after a pick.
  */
-export async function doConnect(target, slot, modeOverride) {
+export async function doConnect(target, slot, modeOverride, gameId) {
 	if (!hasTauri) { say('window.__TAURI__ yok', true); return; }
 
 	// Normalise target
@@ -572,6 +577,17 @@ export async function doConnect(target, slot, modeOverride) {
 		return;
 	}
 
+	// Read mode from body[data-mode] (set by router), or use override.
+	const connectMode = modeOverride || document.body.dataset.mode || 'remote';
+
+	// GAME MODE FETCH (desktop parity): the FIRST game-mode connect (no gameId yet)
+	// doesn't stream — it opens the host-library picker. Picking a card calls back
+	// into doConnect with the chosen gameId ('' = Desktop), which streams below.
+	if (connectMode === 'game' && gameId === undefined) {
+		openGamesFetch(normTarget, slot);
+		return;
+	}
+
 	// Remember which device this slot is connected to, so the host's pushed
 	// identity (peer-name / peer-avatar events) can be cached under the right id.
 	_slotTarget[slot] = normTarget;
@@ -580,8 +596,9 @@ export async function doConnect(target, slot, modeOverride) {
 	if (connectBtn) connectBtn.disabled = true;
 	say(t('status.connecting'));
 
-	// Read mode from body[data-mode] (set by router), or use override
-	const mode = modeOverride || document.body.dataset.mode || 'remote';
+	// The personality for this stream (computed above; `connectMode` is the sole
+	// source now that game mode fetches the library first).
+	const mode = connectMode;
 
 	// Show the connecting overlay (phase popup: reaching → transport → auth →
 	// preparing) for the WHOLE connection process — no matter where the connect was
@@ -616,6 +633,9 @@ export async function doConnect(target, slot, modeOverride) {
 			height:      qParams.height,
 			quality:     qParams.quality,
 			hdr:         getPref('hdr') === true,
+			// Game-mode: the host-side game to launch before streaming ('' = Desktop /
+			// whole screen). Undefined in remote mode → host streams the desktop.
+			gameId:      gameId ?? '',
 		});
 
 		if (connectBtn) connectBtn.disabled = false;
@@ -764,16 +784,9 @@ function mount() {
 		} catch (_) { say(t('session.clipboardError'), true); }
 	});
 
-	// --- Mode toggle buttons —
-	// bus.emit so router.js (sole writer of data-mode) handles the class swap.
-	$('m-remote')?.addEventListener('click', () => {
-		const b = getBus();
-		if (b) b.emit('mode-changed', 'remote');
-	});
-	$('m-game')?.addEventListener('click', () => {
-		const b = getBus();
-		if (b) b.emit('mode-changed', 'game');
-	});
+	// The remote/game personality is chosen from the TOP-BAR toggle (#mode-toggle,
+	// wired in app.js), not a per-connect segmented control — so there's no m-remote/
+	// m-game wiring here anymore. doConnect() reads body[data-mode] for the mode.
 
 	// --- Settings (netmode, relay, deviceName, codec) wired to config store ---
 	const relayEl = $('relay');

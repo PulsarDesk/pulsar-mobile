@@ -67,6 +67,32 @@ header.top .pill {
 }
 .mark { width: 26px; height: 26px; flex: none; }
 
+/* ---- Top-bar game-mode toggle ---- */
+.mode-btn {
+	flex: none;
+	width: 34px;
+	height: 34px;
+	display: grid;
+	place-items: center;
+	border: 1px solid var(--border);
+	border-radius: var(--r-pill);
+	background: var(--surface-2);
+	color: var(--text-muted);
+	cursor: pointer;
+	padding: 0;
+	transition: color 0.2s var(--ease), background 0.2s var(--ease),
+		border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.mode-btn svg { width: 19px; height: 19px; }
+.mode-btn:active { background: var(--surface-3); }
+/* Pressed = game mode active. Cyan-filled to read as a live toggle. */
+.mode-btn.on {
+	background: var(--cyan);
+	border-color: var(--cyan);
+	color: #fff;
+	box-shadow: 0 0 0 3px var(--cyan-soft);
+}
+
 /* ---- Scrollable main ---- */
 main.scroll {
 	flex: 1;
@@ -94,6 +120,45 @@ h2.title {
 	margin: 14px 2px 4px;
 }
 .sub { color: var(--text-muted); font-size: 13.5px; margin: 0 2px 18px; }
+
+/* Game-mode eyebrow above the connect title — hidden in remote mode. */
+.game-eyebrow {
+	display: none;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	color: var(--cyan);
+	margin: 14px 2px 0;
+}
+body[data-mode="game"] .game-eyebrow { display: block; }
+
+/* ==== Game personality (body[data-mode="game"]) — controller-first, cyan,
+ *      pure client: no hosting, so the "Cihazım" tab is dropped. ==== */
+/* Drop the host tab; the remaining 3 (connect / settings / devices) space out.
+ * The phone nav is a 4-col grid, so re-flow to 3 cols in game mode (the wide
+ * sidebar layout is flex, so it needs no column override). */
+body[data-mode="game"] nav.bottom button[data-tab="host"] { display: none; }
+body[data-mode="game"] nav.bottom { grid-template-columns: repeat(3, 1fr); }
+/* Push the cyan glow harder so the shift in personality is felt immediately.
+ * MUST exclude .in-session: during a session the body is transparent so the
+ * native video surface shows through (Path A). This opaque `var(--bg)` layer
+ * would otherwise OCCLUDE the remote video → black screen in game mode. */
+body[data-mode="game"]:not(.in-session) {
+	background:
+		radial-gradient(130% 80% at 50% -10%, var(--cyan-soft), transparent 58%),
+		radial-gradient(90% 55% at 105% 2%, var(--cyan-soft), transparent 50%),
+		var(--bg);
+}
+/* Center the connect hero + enlarge the title, matching the desktop gaming home. */
+body[data-mode="game"] #t-connect { text-align: center; }
+body[data-mode="game"] #t-connect > .title { font-size: 30px; margin-top: 6px; }
+body[data-mode="game"] #t-connect > .sub { margin-left: auto; margin-right: auto; max-width: 34ch; }
+body[data-mode="game"] #t-connect > .relay-status { justify-content: center; }
+/* The card + quick lists stay left-aligned inside a centered column. */
+body[data-mode="game"] #t-connect .card,
+body[data-mode="game"] #t-connect #lan-quick,
+body[data-mode="game"] #t-connect #recent-quick { text-align: left; }
 
 /* ---- Card ---- */
 .card {

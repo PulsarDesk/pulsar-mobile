@@ -34,6 +34,7 @@
 import './theme.js';
 import { lang, setLang, t, applyI18n } from './i18n.js';
 import { getConfig, netmode } from './store/config.js';
+import { getPref, setPref } from './store/prefs.js';
 import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill, setNetPillMode } from './router.js';
 import * as tauri            from './tauri.js';
 const { invoke, hasTauri, listen } = tauri;
@@ -73,6 +74,7 @@ _importOverlay.then(() => import('./session/display.js')).catch(() => null);
 _importOverlay.then(() => import('./session/audio.js')).catch(() => null);
 _importOverlay.then(() => import('./session/sidechannels.js')).catch(() => null);
 _importOverlay.then(() => import('./session/files.js')).catch(() => null);
+_importOverlay.then(() => import('./session/keyboard.js')).catch(() => null);
 // Global connected-controller monitor (toast on connect + the "Controllers" list).
 import('./session/gamepad-monitor.js').catch(() => null);
 
@@ -170,6 +172,18 @@ async function boot() {
 	// Pass the tauri module so the router can subscribe to 'conn-phase' and
 	// update the net-pill with the real transport (Direct / Relay) before auth.
 	initRouter(bus, tauri);
+
+	// 3a. App personality (remote / game), chosen from the top-bar toggle and
+	// persisted so the app reopens in the last mode. setMode() (router) is the
+	// sole writer of body[data-mode]; restore it before the first paint settles.
+	const storedMode = getPref('appMode') === 'game' ? 'game' : 'remote';
+	setMode(storedMode);
+	const modeBtn = document.getElementById('mode-toggle');
+	modeBtn?.addEventListener('click', () => {
+		const next = document.body.dataset.mode === 'game' ? 'remote' : 'game';
+		setPref('appMode', next);
+		bus.emit('mode-changed', next); // router.setMode() applies it (single writer)
+	});
 
 	// 3b. Pre-mount the host screen so its incoming-connection listener
 	// (session-request → approval modal) + the approval sheet are live from
@@ -357,12 +371,25 @@ function wireTouchForwarding() {
 	let pinch = null;           // active 2-finger pinch/pan state (for updatePinch)
 	let multi = false;          // ≥2 fingers down at any point this gesture
 
-	// ── Pointer mode (overlay-toggleable) ──────────────────────────────────────
+	// ── Pointer mode (overlay-toggleable, PER PERSONALITY) ──────────────────────
 	// 'mouse' = trackpad/relative: a local cursor moves by finger delta, tap=click
 	//           at the cursor (precise, AnyDesk default). 'touch' = absolute: the
 	//           host pointer follows the finger, tap=click where you touch.
-	const MODE_KEY = 'pulsar.input.mode.v1';
-	let mode = (() => { try { return localStorage.getItem(MODE_KEY) === 'touch' ? 'touch' : 'mouse'; } catch (_) { return 'mouse'; } })();
+	// Game streaming defaults to TOUCH (direct, Moonlight-style); remote desktop
+	// defaults to MOUSE (trackpad + cursor dot). Each personality remembers its own
+	// overlay choice under a distinct key — enabling mouse in the game overlay never
+	// leaks into remote, and vice-versa.
+	const MODE_KEY = 'pulsar.input.mode.v1';           // remote (legacy key)
+	const MODE_KEY_GAME = 'pulsar.input.mode.game.v1'; // game
+	const inputModeKey = () => (document.body.dataset.mode === 'game' ? MODE_KEY_GAME : MODE_KEY);
+	const resolveInputMode = () => {
+		try {
+			const s = localStorage.getItem(inputModeKey());
+			if (s === 'touch' || s === 'mouse') return s;
+		} catch (_) {}
+		return document.body.dataset.mode === 'game' ? 'touch' : 'mouse';
+	};
+	let mode = resolveInputMode();
 	let cur = null;             // virtual cursor {x,y} CSS px (mouse mode), kept in rect
 	let cursorEl = null;
 
@@ -397,6 +424,10 @@ function wireTouchForwarding() {
 		listen('play-firstframe', () => { videoReady = true; applyMode(); });
 	} catch (_) {}
 	if (bus && bus.on) bus.on('session-ended', () => { videoReady = false; applyMode(); });
+	// Re-resolve the pointer mode for THIS session's personality (game → touch,
+	// remote → mouse, or the per-personality overlay override) — the initial value
+	// was read before any session set body[data-mode].
+	if (bus && bus.on) bus.on('session-started', () => { mode = resolveInputMode(); applyMode(); });
 	// Split touch-routing is active whenever ≥2 sessions are live, regardless of
 	// which UI opened the split: the legacy #btn-split set window.__pulsarSplitActive,
 	// but the overlay Split card / split.js target picker never did. The native layout
@@ -819,7 +850,7 @@ function wireTouchForwarding() {
 	// Pointer-mode toggle (from the overlay Display card). Persisted + reflected live.
 	if (bus && bus.on) bus.on('input-mode-changed', (m) => {
 		mode = (m === 'touch') ? 'touch' : 'mouse';
-		try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+		try { localStorage.setItem(inputModeKey(), mode); } catch (_) {}
 		applyMode();
 	});
 	applyMode();

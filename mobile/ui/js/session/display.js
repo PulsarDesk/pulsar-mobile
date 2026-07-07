@@ -78,11 +78,20 @@ let _aspect = 'fit';
 /** Current orientation request: 'auto' | 'portrait' | 'landscape' */
 let _orientation = 'auto';
 
+/** Pointer mode is PER PERSONALITY (mirrors app.js): game streaming defaults to
+ * TOUCH, remote to MOUSE, each under its own key. */
+function _pointerKey() {
+	return document.body.dataset.mode === 'game' ? 'pulsar.input.mode.game.v1' : 'pulsar.input.mode.v1';
+}
+function _resolvePointerMode() {
+	try {
+		const s = localStorage.getItem(_pointerKey());
+		if (s === 'touch' || s === 'mouse') return s;
+	} catch (_) {}
+	return document.body.dataset.mode === 'game' ? 'touch' : 'mouse';
+}
 /** Current pointer mode: 'mouse' (trackpad/relative) | 'touch' (absolute). */
-let _pointerMode = (() => {
-	try { return localStorage.getItem('pulsar.input.mode.v1') === 'touch' ? 'touch' : 'mouse'; }
-	catch (_) { return 'mouse'; }
-})();
+let _pointerMode = _resolvePointerMode();
 
 /**
  * Available host displays (populated by W4-sidechannels via host-displays event).
@@ -110,6 +119,9 @@ const CARD_ID = 'display-card';
  * @param {HTMLElement} container
  */
 function mount(container) {
+	// Re-resolve for THIS session's personality so the toggle reflects the right
+	// default (game → touch, remote → mouse) + any per-personality override.
+	_pointerMode = _resolvePointerMode();
 	container.innerHTML = `
 <div class="display-card" id="${CARD_ID}" aria-label="${t('display.cardLabel')}">
 
@@ -194,7 +206,7 @@ function _wirePointer() {
 			b.classList.toggle('active', a);
 			b.setAttribute('aria-checked', String(a));
 		});
-		try { localStorage.setItem('pulsar.input.mode.v1', m); } catch (_) {}
+		try { localStorage.setItem(_pointerKey(), m); } catch (_) {}
 		window.__pulsarBus?.emit('input-mode-changed', m);
 	});
 }

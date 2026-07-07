@@ -47,8 +47,9 @@ use tokio::time::timeout;
 
 use pulsar_core::proto::DeviceId;
 use pulsar_core::service::{
-    self, query_stream_caps, recv_host_auth, request_stream, send_auth, send_bye,
-    send_data_via, send_input_via, AuthOutcome, DataMsg, HostAuth, InputEvent, StreamReq,
+    self, query_stream_caps, recv_host_auth, request_games, request_launch, request_stream,
+    send_auth, send_bye, send_data_via, send_input_via, AuthOutcome, DataMsg, GameInfo, HostAuth,
+    InputEvent, StreamReq,
 };
 use pulsar_core::{NetworkMode, QualityPref, SessionSender, Transport};
 
@@ -68,6 +69,12 @@ const POST_AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long we wait for the user to enter a password after an `auth-prompt`.
 const PW_SUBMIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Reserved slot for the game-mode games FETCH (`list_remote_games`). Distinct from
+/// the real stream slots (0/1) so a fetch's auth-prompt/OTP + cancel never collide
+/// with a live or upcoming stream session. The auth sheet keys its DOM off the slot,
+/// so any value works; `submit_password(FETCH_SLOT, …)` routes to the right pending.
+const FETCH_SLOT: u8 = 200;
 
 /// Interval for fps/mbps stats emission.
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
@@ -944,6 +951,96 @@ async fn auth_race<R: Runtime>(
     }
 }
 
+// ── list_remote_games command (game-mode fetch) ───────────────────────────────
+
+/// One game/app the host publishes, serialized to JS for the game-mode picker.
+/// Mirrors the desktop `GameInfo` (id / title / kind / cover image).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GameDto {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub image: String,
+}
+
+impl From<GameInfo> for GameDto {
+    fn from(g: GameInfo) -> Self {
+        GameDto { id: g.id, title: g.title, kind: g.kind, image: g.image }
+    }
+}
+
+/// Game-mode FETCH (desktop parity): connect + authenticate to `target`, ask the
+/// host for its published game/app library, and return it — WITHOUT starting a
+/// stream. The session is dropped on return; the caller then picks an entry and
+/// calls `connect_host` with that `game_id` to actually stream (which launches it).
+///
+/// Auth runs on the reserved fetch slot ([`FETCH_SLOT`]); if the host needs a
+/// password the same `auth-prompt`/`submit_password` OTP flow fires as for a normal
+/// connect. The host's OTP is stable within a `go_online`, so the password the user
+/// enters here also unlocks the follow-up stream connect (JS reuses it → no second
+/// prompt).
+///
+/// JS: `invoke('list_remote_games', { relay, target, password, netmode, name })`
+#[tauri::command]
+pub async fn list_remote_games<R: Runtime>(
+    app: AppHandle<R>,
+    relay: String,
+    target: String,
+    password: String,
+    netmode: String,
+    name: String,
+) -> Result<Vec<GameDto>, String> {
+    // Cancel any stale read loop on the fetch slot before binding.
+    if let Some(old_cancel) = app.state::<SessionRegistry>().cancel_for(FETCH_SLOT) {
+        old_cancel.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let cfg = load_config(&app);
+    let relay_str = if relay.is_empty() { cfg.relay.clone() } else { relay };
+    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
+    let dev_name = if name.is_empty() {
+        if cfg.device_name.is_empty() { "Pulsar Mobile".to_string() } else { cfg.device_name.clone() }
+    } else {
+        name
+    };
+    let net_mode = if netmode.is_empty() { cfg.network_mode } else { parse_mode(&netmode) };
+
+    let (node, _my_id) =
+        crate::net::get_or_create_node(&app, relay_addr, net_mode, dev_name).await?;
+
+    // Connect (relay ID or IP:port), inside the overall connect budget.
+    let mut sess = timeout(CONNECT_TIMEOUT, async {
+        if let Some(addr) = target.parse::<SocketAddr>().ok() {
+            node.connect_direct(addr, None)
+                .await
+                .map_err(|e| format!("connect-direct failed: {e:?}"))
+        } else {
+            let dev_id = DeviceId::parse(&target)
+                .ok_or_else(|| format!("bad target (not a device id or IP:port): {target}"))?;
+            node.connect(dev_id).await.map_err(|e| format!("connect failed: {e:?}"))
+        }
+    })
+    .await
+    .map_err(|_| "connect-timed-out".to_string())??;
+
+    match auth_race(&app, FETCH_SLOT, &mut sess, &password, &target).await? {
+        AuthOutcome::Accepted => {}
+        AuthOutcome::Denied => return Err("auth denied (wrong password?)".into()),
+        AuthOutcome::NeedPassword => return Err("host requires a password".into()),
+    }
+
+    let games = timeout(POST_AUTH_TIMEOUT, request_games(&mut sess))
+        .await
+        .map_err(|_| "connect-timed-out".to_string())?
+        .map_err(|e| format!("request_games failed: {e:?}"))?;
+
+    // Politely close the fetch session (best-effort); the host frees the slot.
+    let _ = send_bye(&mut sess).await;
+    Ok(games.into_iter().map(GameDto::from).collect())
+}
+
 // ── connect_host command ──────────────────────────────────────────────────────
 
 /// Connect to `target` (9-digit relay ID **or** `IP:port` for LAN direct) on
@@ -975,7 +1072,11 @@ pub async fn connect_host<R: Runtime>(
     height: u32,           // 0 = host default
     quality: String,       // "latency" | "balanced" | "quality"
     hdr: bool,             // request HDR (HEVC Main10 / PQ) from the host
+    // game-mode: host-side id to launch before streaming ("" / "desktop" = whole
+    // screen). Option so an older JS caller omitting it still deserializes.
+    game_id: Option<String>,
 ) -> Result<ConnectResult, String> {
+    let game_id = game_id.unwrap_or_default();
     // Tear down any still-running read loop on this slot BEFORE binding a new Node.
     // Each connect binds a FRESH Node that registers with the relay under our
     // (identity-derived, shared) device id; if the previous slot's loop is still
@@ -1068,6 +1169,18 @@ pub async fn connect_host<R: Runtime>(
             // loop above somehow exits (it loops internally on NeedPassword). Guard
             // for completeness.
             return Err("host requires a password".into());
+        }
+    }
+
+    // ── Game-mode launch (desktop parity) ─────────────────────────────────────
+    // If the game-mode picker chose a specific game/app (not the built-in Desktop
+    // entry), ask the host to launch it BEFORE requesting the stream, so the
+    // captured screen already shows the game. "" and "desktop" both mean "stream
+    // the whole screen" (no launch). A launch failure is non-fatal — fall through
+    // to streaming the desktop rather than aborting the whole connect.
+    if !game_id.is_empty() && game_id != "desktop" {
+        if let Err(e) = request_launch(&mut sess, &game_id).await {
+            log::warn!("pulsar: request_launch({game_id}) failed, streaming desktop: {e:?}");
         }
     }
 
@@ -1203,17 +1316,14 @@ pub async fn connect_host<R: Runtime>(
     // fps 0 = "host default" — but the host's default is its own config/panel Hz
     // (120+ on a gaming PC), with NO cap for mobile clients. The phone pipeline is
     // sized for ~60 fps (decode + touch UI share the SoC); 120+ fps just floods the
-    // input queue. Default to 60; in REMOTE mode also cap explicit picks at 60 —
-    // remote desktop wants quality-per-bit, and 120 fps halves the bits per frame
-    // (the JS "auto" fps pref resolves to the panel Hz = 120 on this phone, which
-    // the user reads as "why is it blocky"). Game mode honours the explicit pick.
-    let fps = if fps == 0 {
-        60
-    } else if mode == "remote" {
-        fps.min(60)
-    } else {
-        fps
-    };
+    // input queue. Cap BOTH modes at 60 on mobile: the JS "auto" fps pref resolves
+    // to the panel Hz (120 on this phone), and 120 fps on a software-x264 / relay
+    // host starves each frame of bits AND overloads the encoder — with any wire loss
+    // the client then never gets a CLEAN keyframe (the host can't force one on the
+    // gst-launch path), so it drops every AU waiting for an IDR and the screen stays
+    // black. 60 fps halves the per-frame load and keeps frames robust; a 120 Hz
+    // gaming feel isn't reachable through a phone decoder + relay anyway.
+    let fps = if fps == 0 { 60 } else { fps.min(60) };
 
     let req = StreamReq {
         port: 0, // unused with media-over-session
@@ -1396,6 +1506,11 @@ pub async fn connect_host<R: Runtime>(
         // ok=false while its decoder is being rebuilt / is disabled).
         let mut audio_feed_fails: u64 = 0;
         let mut cancelled = false;
+        // Host said Bye (kicked us / went offline). Over a relay `recv` never returns
+        // `None` when the peer vanishes, so this explicit signal is what ends the session
+        // AT ONCE instead of waiting out HOST_SILENCE_TIMEOUT (the "video froze, then it
+        // disconnected seconds later" the user saw).
+        let mut host_bye = false;
 
         // Stats window counters (reset each STATS_INTERVAL).
         let mut stats_window_frames: u64 = 0;
@@ -1559,9 +1674,18 @@ pub async fn connect_host<R: Runtime>(
                                         };
                                         emit_play_rtt(&app2, slot, sample);
                                     }
+                                } else if service::is_bye(bytes) {
+                                    // Host kicked us / went offline — tear down immediately
+                                    // (handled right after the batch so the loop's Node drops
+                                    // now, not after the silence watchdog).
+                                    host_bye = true;
                                 } else {
                                     crate::datachan::route(&app2, slot, bytes);
                                 }
+                            }
+                            if host_bye {
+                                log::info!("pulsar: host sent Bye (slot={slot}) — ending session now");
+                                break 'read;
                             }
                             // A23: ONE coalesced retransmit NACK for every hole found
                             // across the whole batch (was one send per gap).

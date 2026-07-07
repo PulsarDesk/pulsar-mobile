@@ -129,17 +129,44 @@ export function refreshNavLabels() {
 }
 
 /**
- * SOLE writer of body[data-mode].
- * Also syncs the connect-tab mode toggle buttons (m-remote / m-game).
+ * SOLE writer of body[data-mode]. Drives the whole app's personality:
+ *   - syncs the top-bar game toggle (#mode-toggle) pressed state,
+ *   - swaps the connect-tab copy (remote vs. game),
+ *   - bounces off the host tab when entering game mode (game = pure client, no
+ *     hosting — the "Cihazım" tab is hidden by CSS in game mode).
  * @param {'remote'|'game'} m
  */
 export function setMode(m) {
+	const game = m === 'game';
 	document.body.dataset.mode = m;
-	// Sync mode seg buttons if they exist
-	const mRemote = document.getElementById('m-remote');
-	const mGame   = document.getElementById('m-game');
-	if (mRemote) mRemote.setAttribute('aria-selected', String(m === 'remote'));
-	if (mGame)   mGame.setAttribute('aria-selected',   String(m === 'game'));
+
+	// Top-bar toggle pressed state (cyan when game).
+	const btn = document.getElementById('mode-toggle');
+	if (btn) {
+		btn.classList.toggle('on', game);
+		btn.setAttribute('aria-pressed', String(game));
+	}
+
+	// Game mode is a pure-client personality — no hosting. If the host tab is
+	// active while entering game mode, its nav button is about to be hidden, so
+	// move to connect first (else the user is stranded on an invisible tab).
+	if (game && _activeId === 'host') show('connect');
+
+	// Connect-tab copy follows the personality. Rewrite the data-i18n KEY (not just
+	// the text) so a later applyI18n()/langchange re-render keeps the game copy
+	// instead of reverting to the remote strings.
+	const title = document.querySelector('#t-connect h2.title');
+	const sub   = document.querySelector('#t-connect p.sub');
+	if (title) {
+		const k = game ? 'home.gameTitle' : 'home.title';
+		title.setAttribute('data-i18n', k);
+		title.textContent = t(k);
+	}
+	if (sub) {
+		const k = game ? 'home.gameSub' : 'home.sub';
+		sub.setAttribute('data-i18n', k);
+		sub.textContent = t(k);
+	}
 }
 
 /**

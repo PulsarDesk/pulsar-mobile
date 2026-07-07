@@ -65,6 +65,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // ── Input / session (client.rs) ───────────────────────────────────
             client::connect_host,
+            client::list_remote_games,
             client::relay_health,
             client::local_ip,
             client::node_port,
