@@ -17,7 +17,7 @@
 //! spawns the heartbeat keyed on a weak ref, so the node stays alive exactly as
 //! long as this `Arc` is held in managed state.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime};
@@ -32,14 +32,69 @@ use crate::identity::load_identity;
 /// the input has none (e.g. just a hostname/IP) — so typing "192.168.1.50" works
 /// without also typing ":21116". The stored/displayed config value is untouched;
 /// only the address actually used to connect gets the default port.
-pub(crate) fn parse_relay(s: &str) -> Result<SocketAddr, String> {
+///
+/// Resolves DNS names, not just numeric IPs: `str::parse::<SocketAddr>()` only
+/// accepts a literal IP, so a hostname like `vps.example.com:21121` would `Err`
+/// and the node never reached the relay (IP worked, name didn't). We fall back to
+/// `lookup_host` and prefer IPv4 — the relay binds `0.0.0.0`, and a name that
+/// resolves to `::1`/AAAA first would never reach an IPv4-only relay.
+pub(crate) async fn parse_relay(s: &str) -> Result<SocketAddr, String> {
     let s = s.trim();
     let with_port = if s.contains(':') {
         s.to_string()
     } else {
         format!("{s}:{}", pulsar_core::proto::DEFAULT_RELAY_PORT)
     };
-    with_port.parse().map_err(|e| format!("bad relay: {e}"))
+    // Numeric IP:port — no resolver needed.
+    if let Ok(parsed) = with_port.parse::<SocketAddr>() {
+        return Ok(parsed);
+    }
+    // Hostname → DNS.
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(&with_port)
+        .await
+        .map_err(|e| format!("bad relay: {e}"))?
+        .collect();
+    resolved
+        .iter()
+        .copied()
+        .find(SocketAddr::is_ipv4)
+        .or_else(|| resolved.first().copied())
+        .ok_or_else(|| format!("bad relay: {with_port} çözülemedi"))
+}
+
+/// Resolve a direct-connect target — an `IP`, `IP:port`, `host`, or `host:port`
+/// (a bare address gets the default node port) — to a socket address. Mirrors the
+/// desktop `connect_target` flow: a bare LAN IP works WITHOUT a port, and DNS names
+/// resolve (IPv4 first — the host binds an IPv4 socket). Returns `None` for a
+/// non-address (e.g. a 9-digit relay ID), so the caller falls through to
+/// `DeviceId::parse`. Previously the callers used `target.parse::<SocketAddr>()`,
+/// which requires a literal `IP:port` — a bare IP or a hostname both `Err`'d and
+/// the connect died as "bad target".
+pub(crate) async fn resolve_target(s: &str) -> Option<SocketAddr> {
+    let s = s.trim();
+    // Numeric fast paths: IP:port, then bare IP (default node port).
+    if let Ok(sa) = s.parse::<SocketAddr>() {
+        return Some(sa);
+    }
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        return Some(SocketAddr::new(ip, pulsar_core::proto::DEFAULT_NODE_PORT));
+    }
+    // A bare relay ID (9 digits) has neither a dot nor a colon — skip DNS so a
+    // relay-ID connect never blocks on a doomed lookup.
+    if !s.contains('.') && !s.contains(':') {
+        return None;
+    }
+    let with_port = if s.contains(':') {
+        s.to_string()
+    } else {
+        format!("{s}:{}", pulsar_core::proto::DEFAULT_NODE_PORT)
+    };
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(&with_port).await.ok()?.collect();
+    resolved
+        .iter()
+        .copied()
+        .find(SocketAddr::is_ipv4)
+        .or_else(|| resolved.first().copied())
 }
 
 /// The app's single relay `Node`, created on first use (a client connect or
@@ -79,8 +134,16 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
 ) -> Result<(Arc<Node>, DeviceId), String> {
     let shared = app.state::<SharedNode>();
     let mut g = shared.0.lock().await;
-    if let Some(inner) = g.as_ref() {
+    if let Some(inner) = g.as_mut() {
         if inner.relay_addr == relay_addr && inner.mode == mode {
+            // Reusing a node that bound while the relay was down (offline, no id yet):
+            // retry registration now — the relay may have come back — so a second
+            // go_online upgrades offline → online WITHOUT a rebind.
+            if inner.my_id.0 < DeviceId::MIN {
+                if let Ok(id) = inner.node.register().await {
+                    inner.my_id = id;
+                }
+            }
             return Ok((inner.node.clone(), inner.my_id));
         }
         log::info!(
@@ -97,10 +160,19 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
     let node = Node::bind_with_identity(local, relay_addr, mode, dev_name, identity)
         .await
         .map_err(|e| format!("bind failed: {e}"))?;
-    let my_id = node
-        .register()
-        .await
-        .map_err(|e| format!("register failed: {e:?}"))?;
+    // Register is BEST-EFFORT: if the relay is unreachable we still keep the node bound +
+    // stored so the host accept loop serves LAN peers by IP:port, AND a client can reach
+    // a DIRECT ip:port target (neither needs the relay). `DeviceId(0)` (< DeviceId::MIN)
+    // marks "no relay id yet"; a later go_online retries registration (see the reuse path
+    // above). Previously a register failure `?`-returned here and dropped the node, so a
+    // relay outage killed even relay-less direct connects + hosting.
+    let my_id = match node.register().await {
+        Ok(id) => id,
+        Err(e) => {
+            log::info!("pulsar: relay unreachable ({e:?}) — offline mode, node still bound + serving");
+            DeviceId(0)
+        }
+    };
     *g = Some(SharedNodeInner {
         node: node.clone(),
         my_id,
@@ -120,10 +192,13 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
 #[derive(Default)]
 pub struct SharedDiscovery(pub Mutex<Option<Arc<Discovery>>>);
 
-/// Start the discovery beacon on the first call, reuse it after. Announced id-less
-/// (`id: None`) with port 0 — the phone is primarily a *discoverer* here (the
-/// connect screen's "on your network" list + recents online dots); peers identify
-/// it by name. The async `Mutex` serialises concurrent first-callers.
+/// Start the discovery beacon on the first call, reuse it after. Started RECEIVE-ONLY
+/// (announcing paused): the phone is a *discoverer* here (the connect screen's "on your
+/// network" list + recents online dots), NOT a host. Merely opening the connect screen
+/// must not advertise the phone on the LAN — without going online it can't accept a
+/// connection, so announcing would make it show up (and look reachable) in other
+/// devices' lists when it isn't. Receiving still runs, so the list keeps working. The
+/// async `Mutex` serialises concurrent first-callers.
 pub(crate) async fn get_or_create_discovery<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Arc<Discovery>, String> {
@@ -137,6 +212,8 @@ pub(crate) async fn get_or_create_discovery<R: Runtime>(
     let disc = Discovery::start(cfg.device_name, 0, pubkey, None)
         .await
         .map_err(|e| format!("discovery start failed: {e}"))?;
+    // Receive-only until (and unless) the phone actually goes online as a host.
+    disc.set_paused(true);
     *g = Some(disc.clone());
     Ok(disc)
 }

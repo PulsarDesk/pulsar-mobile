@@ -51,6 +51,9 @@ let myId = null;
 
 /** Current OTP */
 let currentOtp = '';
+// Offline (relay unreachable) LAN direct-connect address "ip:port", shown in place of
+// the relay-only 9-digit id. Empty when registered online.
+let myAddr = '';
 
 /** Whether a go_online call is in flight */
 let going = false;
@@ -169,7 +172,12 @@ async function applyUnattendedHost() {
 function renderId() {
 	const idEl = $('h-id');
 	if (!idEl) return;
-	if (myId != null) {
+	if (myAddr) {
+		// Offline: the 9-digit id only resolves via the relay, so show the LAN
+		// direct-connect address instead.
+		idEl.textContent = myAddr;
+		idEl.classList.remove('ph');
+	} else if (myId) {
 		idEl.textContent = fmtId(myId);
 		idEl.classList.remove('ph');
 	} else {
@@ -326,6 +334,7 @@ async function doGoOnline() {
 		if (r && r.ok) {
 			isOnline = true;
 			myId = r.id;
+			myAddr = r.addr || ''; // set only when the relay was unreachable (offline)
 			currentOtp = r.password;
 			renderId();
 			renderOtp();
@@ -349,6 +358,7 @@ async function goOffline() {
 
 	isOnline = false;
 	myId = null;
+	myAddr = '';
 	currentOtp = '';
 	activePeers = [];
 	stopElapsedCounter();
@@ -429,14 +439,16 @@ function stopElapsedCounter() {
 // ── Copy / share helpers ──────────────────────────────────────────────────────
 
 async function copyId() {
-	if (myId == null) return;
-	await clipboard(fmtId(myId));
+	const val = myAddr || (myId != null ? fmtId(myId) : '');
+	if (!val) return;
+	await clipboard(val);
 	showToast(t('m.copied'));
 }
 
 async function shareId() {
-	if (myId == null) return;
-	const id = fmtId(myId);
+	const val = myAddr || (myId != null ? fmtId(myId) : '');
+	if (!val) return;
+	const id = val;
 	// Copy to the clipboard AND open the system share sheet.
 	await clipboard(id);
 	showToast(t('m.copied'));

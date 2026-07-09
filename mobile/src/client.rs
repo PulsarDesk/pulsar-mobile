@@ -171,7 +171,7 @@ pub async fn relay_health<R: Runtime>(
 ) -> Result<RelayHealth, String> {
     use pulsar_core::proto::{encode, ClientMsg, DeviceId, Token};
     let relay_str = if relay.is_empty() { load_config(&app).relay } else { relay };
-    let addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
+    let addr: SocketAddr = crate::net::parse_relay(&relay_str).await?;
     let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| e.to_string())?;
@@ -789,15 +789,34 @@ pub async fn lan_devices<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<Lan
     // heard. Requires the Android MulticastLock (acquired in MainActivity) to
     // receive announces; without it this returns an empty list (graceful degrade).
     let disc = crate::net::get_or_create_discovery(&app).await?;
-    let peers = disc.peers().await;
-    Ok(peers
-        .into_iter()
+    let our_pubkey = crate::identity::load_identity(&app).public_bytes();
+    // Collapse a device seen under several beacon nonces (a restart/reconnect mints a
+    // fresh nonce; the stale beacons linger until TTL) into ONE row per identity pubkey,
+    // keeping the freshest — otherwise the same device shows as duplicate rows sharing
+    // its relay id. Drop our own beacon in the same pass.
+    let mut by_key: std::collections::HashMap<[u8; 32], pulsar_core::discovery::DiscoveredPeer> =
+        std::collections::HashMap::new();
+    for p in disc.peers().await {
+        if p.pubkey == our_pubkey {
+            continue;
+        }
+        match by_key.get(&p.pubkey) {
+            Some(kept) if kept.last_seen >= p.last_seen => {}
+            _ => {
+                by_key.insert(p.pubkey, p);
+            }
+        }
+    }
+    let mut list: Vec<LanDevice> = by_key
+        .into_values()
         .map(|p| LanDevice {
             id: p.id.map(|d| d.0.to_string()),
             name: p.name,
             addr: p.addr.to_string(),
         })
-        .collect())
+        .collect();
+    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(list)
 }
 
 // ── ConnectResult ─────────────────────────────────────────────────────────────
@@ -999,7 +1018,7 @@ pub async fn list_remote_games<R: Runtime>(
 
     let cfg = load_config(&app);
     let relay_str = if relay.is_empty() { cfg.relay.clone() } else { relay };
-    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
+    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str).await?;
     let dev_name = if name.is_empty() {
         if cfg.device_name.is_empty() { "Pulsar Mobile".to_string() } else { cfg.device_name.clone() }
     } else {
@@ -1012,13 +1031,13 @@ pub async fn list_remote_games<R: Runtime>(
 
     // Connect (relay ID or IP:port), inside the overall connect budget.
     let mut sess = timeout(CONNECT_TIMEOUT, async {
-        if let Some(addr) = target.parse::<SocketAddr>().ok() {
+        if let Some(addr) = crate::net::resolve_target(&target).await {
             node.connect_direct(addr, None)
                 .await
                 .map_err(|e| format!("connect-direct failed: {e:?}"))
         } else {
             let dev_id = DeviceId::parse(&target)
-                .ok_or_else(|| format!("bad target (not a device id or IP:port): {target}"))?;
+                .ok_or_else(|| format!("bad target (not a device id, IP, or host): {target}"))?;
             node.connect(dev_id).await.map_err(|e| format!("connect failed: {e:?}"))
         }
     })
@@ -1096,7 +1115,7 @@ pub async fn connect_host<R: Runtime>(
     let cfg = load_config(&app);
 
     let relay_str = if relay.is_empty() { cfg.relay.clone() } else { relay };
-    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
+    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str).await?;
 
     let dev_name = if name.is_empty() {
         if cfg.device_name.is_empty() { "Pulsar Mobile".to_string() } else { cfg.device_name.clone() }
@@ -1130,14 +1149,14 @@ pub async fn connect_host<R: Runtime>(
 
     let connect_result = timeout(CONNECT_TIMEOUT, async {
         // ── W2-ipconnect: branch on DeviceId vs SocketAddr ───────────────────
-        let sess = if let Some(addr) = target.parse::<SocketAddr>().ok() {
-            // IP / IP:port — connect directly without relay rendezvous.
+        let sess = if let Some(addr) = crate::net::resolve_target(&target).await {
+            // IP / IP:port / host[:port] — connect directly without relay rendezvous.
             node.connect_direct(addr, None)
                 .await
                 .map_err(|e| format!("connect-direct failed: {e:?}"))?
         } else {
             let dev_id = DeviceId::parse(&target)
-                .ok_or_else(|| format!("bad target (not a device id or IP:port): {target}"))?;
+                .ok_or_else(|| format!("bad target (not a device id, IP, or host): {target}"))?;
             node.connect(dev_id)
                 .await
                 .map_err(|e| format!("connect failed: {e:?}"))?

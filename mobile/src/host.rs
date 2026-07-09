@@ -329,6 +329,10 @@ pub struct OnlineResult {
     pub ok: bool,
     pub id: u32,
     pub password: String,
+    /// Offline mode (relay unreachable): our LAN direct-connect address `ip:port`, which
+    /// peers can still reach without the relay. Empty when registered online (the 9-digit
+    /// `id` is the identifier then). `id` is 0 (< `DeviceId::MIN`) whenever this is set.
+    pub addr: String,
 }
 
 // ── Auth approval race (30-second auto-deny) ──────────────────────────────────
@@ -436,7 +440,7 @@ pub async fn go_online<R: Runtime>(
     let cfg = load_config(&app);
 
     let relay_str = if relay.is_empty() { cfg.relay.clone() } else { relay };
-    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str)?;
+    let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str).await?;
 
     let dev_name = if name.is_empty() {
         if cfg.device_name.is_empty() { "Pulsar Telefon".to_string() } else { cfg.device_name.clone() }
@@ -478,6 +482,9 @@ pub async fn go_online<R: Runtime>(
     // incoming-request popup then never fired. See `net.rs`. Re-running go_online
     // reuses this node (only the OTP + accept loop are refreshed).
     let (node, id) = crate::net::get_or_create_node(&app, relay_addr, mode, dev_name).await?;
+    // Capture the bound port now — `node` is moved into the accept loop below, so grab it
+    // here for the offline-mode `ip:port` we return at the end.
+    let node_port = node.local_addr().map(|a| a.port()).unwrap_or(0);
 
     // Emit the initial password so the UI can display it immediately.
     let _ = app.emit("host-password", HostPasswordPayload { password: password.clone() });
@@ -662,7 +669,20 @@ pub async fn go_online<R: Runtime>(
         }
     });
 
-    Ok(OnlineResult { ok: true, id: id.0, password })
+    // Offline (relay unreachable): the node is bound + its accept loop is live, so LAN
+    // peers can still reach us DIRECTLY — surface that ip:port so the UI shows it in place
+    // of the relay-only 9-digit id.
+    let addr = if id.0 < pulsar_core::proto::DeviceId::MIN {
+        let ip = crate::client::local_ip().await.unwrap_or_default();
+        if !ip.is_empty() && node_port != 0 {
+            format!("{ip}:{node_port}")
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    Ok(OnlineResult { ok: true, id: id.0, password, addr })
 }
 
 // ── go_offline ────────────────────────────────────────────────────────────────
