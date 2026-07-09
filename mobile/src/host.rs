@@ -669,6 +669,13 @@ pub async fn go_online<R: Runtime>(
         }
     });
 
+    // Advertise on the LAN now that we're actually a host: (re)start the beacon with the
+    // real bound port + our id (if registered), announcing. Merely opening the connect
+    // screen keeps the beacon receive-only (net.rs), so this is what makes us discoverable
+    // + directly reachable AFTER go_online — and only then.
+    let disc_id = if id.0 >= pulsar_core::proto::DeviceId::MIN { Some(id) } else { None };
+    crate::net::announce_as_host(&app, node_port, disc_id).await;
+
     // Offline (relay unreachable): the node is bound + its accept loop is live, so LAN
     // peers can still reach us DIRECTLY — surface that ip:port so the UI shows it in place
     // of the relay-only 9-digit id.
@@ -709,6 +716,8 @@ pub async fn go_offline<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
     // Stop native host capture.
     let _ = app.pulsar_video().stop_host();
+    // Stop advertising on the LAN (back to receive-only) so we no longer appear/reachable.
+    crate::net::stop_announcing(&app).await;
     log::info!("pulsar host: went offline");
     Ok(())
 }

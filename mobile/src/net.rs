@@ -217,3 +217,30 @@ pub(crate) async fn get_or_create_discovery<R: Runtime>(
     *g = Some(disc.clone());
     Ok(disc)
 }
+
+/// Advertise on the LAN as a HOST: (re)start the beacon ANNOUNCING (unpaused) with the
+/// real bound `node_port` + our relay `id` (if registered), replacing the receive-only
+/// list beacon. This is what makes the device discoverable + directly reachable — but
+/// ONLY after it has gone online as a host, never merely from opening the connect screen.
+pub(crate) async fn announce_as_host<R: Runtime>(
+    app: &AppHandle<R>,
+    node_port: u16,
+    id: Option<DeviceId>,
+) {
+    let cfg = crate::config::load_config(app);
+    let pubkey = load_identity(app).public_bytes();
+    match Discovery::start(cfg.device_name, node_port, pubkey, id).await {
+        Ok(disc) => {
+            *app.state::<SharedDiscovery>().0.lock().await = Some(disc);
+        }
+        Err(e) => log::warn!("pulsar: host LAN beacon failed to start: {e}"),
+    }
+}
+
+/// Go back to receive-only on the LAN (stop advertising) — called when the host goes
+/// offline so the device stops appearing/being reachable to other devices.
+pub(crate) async fn stop_announcing<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(d) = app.state::<SharedDiscovery>().0.lock().await.as_ref() {
+        d.set_paused(true);
+    }
+}
