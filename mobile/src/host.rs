@@ -597,6 +597,9 @@ pub async fn go_online<R: Runtime>(
                         let audio_port = asock.local_addr().map(|a| a.port()).unwrap_or(0);
 
                         let vsender = sender.clone();
+                        // Kept for the kick branch below (the video/audio forwarders move
+                        // their own clones): a kicked client is told with an explicit Bye.
+                        let bye_sender = sender.clone();
                         let vfwd = tauri::async_runtime::spawn(async move {
                             let mut buf = vec![0u8; 4096];
                             while let Ok((n, _)) = vsock.recv_from(&mut buf).await {
@@ -685,6 +688,13 @@ pub async fn go_online<R: Runtime>(
                                 data,
                             ) => {}
                             _ = kick2.notified() => {
+                                // Tell the client it was kicked so it tears down INSTANTLY
+                                // (a clean disconnect) instead of hanging on the frozen last
+                                // frame until its stall watchdog — over a relay the client's
+                                // recv never returns None when we vanish. serve_with (and the
+                                // Session) is still alive in this select branch, so the Bye
+                                // goes out. Mirrors the desktop host.
+                                let _ = pulsar_core::service::send_bye_via(&bye_sender).await;
                                 log::info!("pulsar host: kicked peer sid={sid} peer={peer}");
                             }
                         }
