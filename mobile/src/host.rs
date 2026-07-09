@@ -307,6 +307,11 @@ struct SessionRequestPayload {
     req_id: u32,
     peer: String,
     has_password: bool,
+    /// The connecting device's beacon name, shown only when its VERIFIED session pubkey
+    /// matches a LAN beacon we've heard (so it's trustworthy for THIS peer). None otherwise.
+    name: Option<String>,
+    /// Its relay id (9-digit) from that same matched beacon, when it's relay-registered.
+    id: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -345,6 +350,35 @@ pub struct OnlineResult {
 ///    then race: UI `respond_request` **vs.** 30-second auto-deny.
 ///
 /// Returns `true` if the session should proceed.
+/// Resolve the connecting peer's (name, relay id) for the approval sheet by matching the
+/// session's VERIFIED pubkey against a LAN beacon we've heard. The beacon's name/id are
+/// UNVERIFIED claims, but the session handshake verified the peer's key, so a pubkey match
+/// makes them trustworthy for THIS peer. Returns (None, None) when nothing matches.
+async fn peer_identity<R: Runtime>(
+    app: &AppHandle<R>,
+    sess: &pulsar_core::Session,
+) -> (Option<String>, Option<String>) {
+    let Some(pk) = sess.peer_pubkey().await else {
+        return (None, None);
+    };
+    // `pk` is already the raw [u8; 32] key — compare directly to the beacon's.
+    let disc = app
+        .state::<crate::net::SharedDiscovery>()
+        .0
+        .lock()
+        .await
+        .clone();
+    let Some(disc) = disc else { return (None, None) };
+    for p in disc.peers().await {
+        if p.pubkey == pk {
+            let name = Some(p.name).filter(|n| !n.is_empty());
+            let id = p.id.map(|d| format!("{:09}", d.0));
+            return (name, id);
+        }
+    }
+    (None, None)
+}
+
 async fn approval_race<R: Runtime>(
     app: &AppHandle<R>,
     sess: &mut pulsar_core::Session,
@@ -380,12 +414,15 @@ async fn approval_race<R: Runtime>(
     // Emit session-request so the JS shows the approval bottom-sheet.
     let req_id = host_state.next_req.fetch_add(1, Ordering::Relaxed);
     let has_pw = !first_pw.is_empty();
+    let (name, id) = peer_identity(app, sess).await;
     let _ = app.emit(
         "session-request",
         SessionRequestPayload {
             req_id,
             peer: peer.to_string(),
             has_password: has_pw,
+            name,
+            id,
         },
     );
     // Also raise a high-priority Android notification: the JS approval sheet is

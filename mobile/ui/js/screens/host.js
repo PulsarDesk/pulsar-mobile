@@ -36,7 +36,7 @@ import { getConfig } from '../store/config.js';
 /** @type {{ sid: number, peer: string, elapsed: number }[]} */
 let activePeers = [];
 
-/** @type {{ reqId: number, peer: string, hasPassword: boolean } | null} */
+/** @type {{ reqId: number, peer: string, hasPassword: boolean, name?: string|null, id?: string|null } | null} */
 let pendingRequest = null;
 
 /** Auto-deny countdown timer id */
@@ -250,18 +250,27 @@ function openApprovalSheet(req) {
 	if (!sheet || !backdrop) return;
 
 	// Populate.
-	const peerEl = $('h-req-peer');
-	const pwEl   = $('h-req-pw-status');
-	const cntEl  = $('h-req-countdown');
+	const nameEl   = $('h-req-name');
+	const detailEl = $('h-req-detail');
+	const pwEl     = $('h-req-pw-status');
+	const denyCnt  = $('h-req-deny-cnt');
 
-	if (peerEl) peerEl.textContent = req.peer;
-	if (pwEl) {
-		pwEl.textContent = req.hasPassword
-			? t('approve.pwOk')
-			: t('approve.pwNone');
-		pwEl.className = 'val-chip ' + (req.hasPassword ? 'ok' : '');
-	}
-	if (cntEl) cntEl.textContent = countdownRemaining + 's';
+	// Identity: prefer the beacon name (present only when the host verified it belongs to
+	// THIS peer), then the relay id (grouped), then the ip. The most human of those is the
+	// primary line; whatever's left goes on the detail line.
+	const idFmt = req.id ? fmtId(req.id) : '';
+	const primary = req.name || idFmt || req.peer;
+	const rest = [];
+	if (req.name && idFmt) rest.push(idFmt);
+	if (primary !== req.peer) rest.push(req.peer);
+	if (nameEl) nameEl.textContent = primary;
+	if (detailEl) detailEl.textContent = rest.join(' · ');
+
+	if (pwEl) pwEl.textContent = req.hasPassword ? t('approve.pwOk') : t('approve.pwNone');
+
+	// The auto-deny countdown lives ON the Deny button now, e.g. "Reddet (20s)".
+	const setDeny = () => { if (denyCnt) denyCnt.textContent = '(' + countdownRemaining + 's)'; };
+	setDeny();
 
 	sheet.classList.add('open');
 	backdrop.classList.add('open');
@@ -270,7 +279,7 @@ function openApprovalSheet(req) {
 	clearInterval(countdownTimer);
 	countdownTimer = setInterval(() => {
 		countdownRemaining--;
-		if (cntEl) cntEl.textContent = countdownRemaining + 's';
+		setDeny();
 		if (countdownRemaining <= 0) {
 			clearInterval(countdownTimer);
 			countdownTimer = null;
@@ -596,26 +605,19 @@ function buildDOM(root) {
           text-transform:uppercase;color:var(--text-faint);margin-bottom:2px">
         ${t('approve.deviceId')}
       </div>
-      <div id="h-req-peer" class="mono"
-        style="font-size:15px;font-weight:600;color:var(--accent);word-break:break-all">
+      <div id="h-req-name"
+        style="font-size:15px;font-weight:600;color:var(--text);word-break:break-word">
         —
       </div>
+      <div id="h-req-detail" class="mono"
+        style="font-size:12.5px;color:var(--text-muted);word-break:break-all;margin-top:2px"></div>
     </div>
   </div>
 
-  <!-- Password status chip -->
-  <div id="h-req-pw-status" class="val-chip" style="align-self:flex-start">
+  <!-- Password status — plain text (no chip background), wraps on small screens -->
+  <div id="h-req-pw-status"
+    style="align-self:stretch;font-size:12.5px;color:var(--text-muted);line-height:1.4">
     ${t('approve.pwNone')}
-  </div>
-
-  <!-- Countdown -->
-  <div style="display:flex;align-items:center;justify-content:space-between;
-      font-size:12.5px;color:var(--text-faint)">
-    <span>${t('approve.autoDeny')}</span>
-    <span id="h-req-countdown" style="font-family:var(--font-mono);font-weight:700;
-        color:var(--warn);font-size:14px">
-      30s
-    </span>
   </div>
 
   <!-- Action buttons — stacked for thumb reach -->
@@ -634,7 +636,7 @@ function buildDOM(root) {
         <path d="M18 6 6 18M6 6l12 12" stroke="currentColor"
           stroke-width="2.2" stroke-linecap="round"/>
       </svg>
-      ${t('m.host.deny')}
+      ${t('m.host.deny')} <span id="h-req-deny-cnt" style="opacity:0.8;font-weight:600">(30s)</span>
     </button>
   </div>
 </div>
