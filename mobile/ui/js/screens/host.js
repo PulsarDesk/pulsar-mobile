@@ -57,6 +57,9 @@ let myAddr = '';
 
 /** Whether a go_online call is in flight */
 let going = false;
+// One-time guard: the a11y-sheet resume re-check listener is wired only once.
+let wiredA11yResume = false;
+let wiredNotifStop = false;
 
 /** Elapsed seconds counter for peer rows */
 let elapsedInterval = null;
@@ -301,23 +304,45 @@ function closeApprovalSheet() {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-// Tap "Go online": if the remote-control (accessibility) permission is OFF, show a
-// warning sheet first — the phone is still shareable (the peer sees the screen)
-// without it, but the peer can't TOUCH/control it. The user grants it or continues.
+// Tap "Go online": gate on BOTH permissions the remote-control experience needs —
+//   • accessibility  → lets the peer TOUCH/control (required for any control)
+//   • draw-over-apps  → shows the injected CURSOR on-screen (optional; captured into
+//                       the stream so the operator can aim)
+// Missing accessibility OR (missing cursor overlay and not yet dismissed) → show the
+// sheet so the user grants what's missing. Granting accessibility alone used to slip
+// straight online, never prompting for the cursor overlay — now it re-prompts for the
+// cursor. "Go online anyway" dismisses the cursor prompt so it never nags again.
 async function goOnline() {
 	if (going || isOnline) return;
-	let granted = false;
+	let a11y = false, overlay = false;
 	if (hasTauri) {
-		try { granted = await invoke('a11y_enabled', {}); } catch (_) {}
+		try { a11y = await invoke('a11y_enabled', {}); } catch (_) {}
+		try { overlay = await invoke('overlay_granted', {}); } catch (_) {}
 	}
-	if (!granted) { openA11ySheet(); return; }
+	const cursorDismissed = localStorage.getItem('pulsar.cursorPromptDismissed') === '1';
+	if (!a11y || (!overlay && !cursorDismissed)) { openA11ySheet(a11y, overlay); return; }
 	doGoOnline();
 }
 
-function openA11ySheet() {
+// Reflect the live permission state in the sheet: a ✓/✕ per row, and only surface the
+// grant button for a permission that's still missing. The cursor row/button stays hidden
+// unless accessibility is ALREADY granted and the overlay still isn't — on stock Android
+// enabling the accessibility service auto-grants draw-over-apps, so the cursor prompt is
+// only a fallback for OEMs that skip that auto-grant.
+function openA11ySheet(a11y = false, overlay = false) {
 	const sheet = $('h-a11y-sheet');
 	const backdrop = $('h-a11y-backdrop');
 	if (!sheet || !backdrop) { doGoOnline(); return; } // sheet missing → don't block
+	// Row status marks.
+	const ctlMark = $('h-a11y-ctl-mark');
+	if (ctlMark) { ctlMark.textContent = a11y ? '✓' : '✕'; ctlMark.style.color = a11y ? 'var(--ok)' : 'var(--danger)'; }
+	const curMark = $('h-a11y-cur-mark');
+	if (curMark) { curMark.textContent = overlay ? '✓' : '🖱️'; }
+	const needCursor = a11y && !overlay;
+	const curRow = $('h-a11y-cur-row'); if (curRow) curRow.style.display = needCursor ? 'flex' : 'none';
+	// Hide a grant button once its permission is granted (cursor: only in the fallback case).
+	const gA = $('h-a11y-grant');   if (gA) gA.style.display = a11y ? 'none' : '';
+	const gC = $('h-a11y-cursor');  if (gC) gC.style.display = needCursor ? '' : 'none';
 	sheet.classList.add('open');
 	backdrop.classList.add('open');
 }
@@ -333,6 +358,11 @@ async function doGoOnline() {
 	if (going) return;
 	going = true;
 	renderStatus();
+
+	// Android 13+: incoming-connection notifications need the POST_NOTIFICATIONS
+	// runtime grant; ask now (fires the system dialog once) so a backgrounded host
+	// can actually alert on connection requests.
+	if (hasTauri) invoke('notif_permission', {}).catch(() => {});
 
 	try {
 		// Read relay/name/netmode from localStorage (set by config screen).
@@ -653,18 +683,21 @@ function buildDOM(root) {
     <p class="msg" style="text-align:left;margin:0 0 12px">${t('a11y.warnLead')}</p>
     <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:4px">
       <div style="display:flex;align-items:center;gap:10px;font-size:14.5px">
-        <span style="color:var(--ok);font-weight:700;font-size:17px">✓</span>
-        <span>${t('a11y.warnWorks')}</span>
+        <span id="h-a11y-ctl-mark" style="font-weight:700;font-size:17px;min-width:18px;text-align:center;color:var(--danger)">✕</span>
+        <span>${t('a11y.rowControl')}</span>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;font-size:14.5px">
-        <span style="color:var(--danger);font-weight:700;font-size:17px">✕</span>
-        <span>${t('a11y.warnNoControl')}</span>
+      <div id="h-a11y-cur-row" style="display:none;align-items:center;gap:10px;font-size:14.5px">
+        <span id="h-a11y-cur-mark" style="font-weight:700;font-size:16px;min-width:18px;text-align:center">🖱️</span>
+        <span>${t('a11y.rowCursor')}</span>
       </div>
     </div>
   </div>
   <div style="display:flex;flex-direction:column;gap:10px">
     <button id="h-a11y-grant" class="btn btn-primary" style="font-size:16px;padding:15px">
       ${t('a11y.grant')}
+    </button>
+    <button id="h-a11y-cursor" class="btn btn-ghost full" style="font-size:15px;padding:13px">
+      ${t('a11y.grantCursor')}
     </button>
     <button id="h-a11y-continue" class="btn btn-ghost full" style="font-size:16px;padding:15px">
       ${t('a11y.goAnyway')}
@@ -694,18 +727,58 @@ function wireButtons() {
 	$('h-copy-otp-btn')?.addEventListener('click', copyOtp);
 	$('h-rotate-otp-btn')?.addEventListener('click', rotatePassword);
 
-	// Accessibility warning sheet (shown on Go online when control permission is off).
+	// Accessibility warning sheet (shown on Go online when a permission is off).
+	// Keep the sheet OPEN while the user is away in system settings: on return the
+	// visibilitychange handler re-queries + refreshes the ✓/✕ marks and hides this
+	// button once granted, then naturally surfaces the cursor-overlay grant next —
+	// instead of the old behaviour where pressing grant dismissed the sheet and the
+	// user slipped online having granted only accessibility.
 	$('h-a11y-grant')?.addEventListener('click', async () => {
-		closeA11ySheet();
 		try { await invoke('open_a11y_settings', {}); } catch (_) {}
-		// User grants in system settings, returns, and taps Go online again — now
-		// the gate sees it granted and goes online directly.
 	});
+	// Optional: grant the overlay ("draw over other apps") permission so the remote
+	// operator SEES a pointer on the phone (the injected cursor). Control still works
+	// without it — this only makes the cursor visible in the stream.
+	$('h-a11y-cursor')?.addEventListener('click', async () => {
+		try { await invoke('request_overlay', {}); } catch (_) {}
+	});
+	// Returning from a system settings screen (accessibility / draw-over): if the sheet is
+	// still open, re-query both permissions and refresh its ✓/✕ marks + grant buttons live,
+	// so the user sees what they just granted without re-opening the sheet.
+	if (!wiredA11yResume) {
+		wiredA11yResume = true;
+		document.addEventListener('visibilitychange', async () => {
+			if (document.visibilityState !== 'visible') return;
+			if (!$('h-a11y-sheet')?.classList.contains('open')) return;
+			let a11y = false, overlay = false;
+			if (hasTauri) {
+				try { a11y = await invoke('a11y_enabled', {}); } catch (_) {}
+				try { overlay = await invoke('overlay_granted', {}); } catch (_) {}
+			}
+			// Both granted (accessibility usually auto-grants the overlay) → done, go online.
+			if (a11y && overlay) { closeA11ySheet(); doGoOnline(); return; }
+			openA11ySheet(a11y, overlay);
+		});
+	}
 	$('h-a11y-continue')?.addEventListener('click', () => {
+		// "Go online anyway" = the user opted out of the cursor overlay; stop nagging for it
+		// on future go-onlines (accessibility is still re-checked each time — it's required).
+		try { localStorage.setItem('pulsar.cursorPromptDismissed', '1'); } catch (_) {}
 		closeA11ySheet();
 		doGoOnline();
 	});
 	$('h-a11y-backdrop')?.addEventListener('click', closeA11ySheet);
+
+	// "Stop sharing" action on the Android foreground-service notification: the
+	// Kotlin layer dispatches this window event (via evaluateJavascript) — kick every
+	// active session (ends the capture + service notification with it) but STAY online,
+	// so the device remains reachable for new requests.
+	if (!wiredNotifStop) {
+		wiredNotifStop = true;
+		window.addEventListener('pulsar-stop-host', () => {
+			for (const p of [...activePeers]) kickPeer(p.sid);
+		});
+	}
 
 	// Approval sheet.
 	$('h-req-allow')?.addEventListener('click', () => respondRequest(true));
@@ -772,48 +845,66 @@ function onVisible() {
 
 let mounted = false;
 
-function mount() {
-	if (mounted) return;
-	mounted = true;
+// Sheets that must live on <body> (see relocation note below), so they're removed +
+// recreated together on every (re)build.
+const HOST_SHEET_IDS = ['h-req-backdrop', 'h-req-sheet', 'h-a11y-backdrop', 'h-a11y-sheet'];
 
-	// Inject our DOM into the pre-existing #t-host section from index.html.
+// Build (or REBUILD) the tab's DOM + wire it + render current state. Re-runnable: the
+// template uses inline t(), so applyI18n (which only touches data-i18n nodes) can't
+// re-translate it on a language change — we rebuild the whole tab instead. Event
+// SUBSCRIPTIONS (Tauri events, visibilitychange, langchange) stay in mount() so they're
+// wired exactly once; this only rebuilds the view + re-attaches DOM click handlers to
+// the fresh elements (the old ones are discarded with the cleared container).
+function buildContent() {
 	const container = document.getElementById('t-host');
-	if (container) {
-		// Clear the static HTML stub that index.html contains.
-		container.innerHTML = '';
-		buildDOM(container);
-		// The approval sheet + backdrop are position:fixed viewport overlays.
-		// #t-host is a .tab carrying `animation: rise ... both` (transform
-		// keyframes) which makes it a containing block for fixed descendants —
-		// so left inside the tab the sheet positions relative to the tab, not the
-		// viewport, and shows inline at the bottom. Relocate both to <body> so
-		// they are true full-screen modals.
-		const reqBackdrop = document.getElementById('h-req-backdrop');
-		const reqSheet = document.getElementById('h-req-sheet');
-		if (reqBackdrop) document.body.appendChild(reqBackdrop);
-		if (reqSheet) document.body.appendChild(reqSheet);
-		// Same for the accessibility-warning sheet: without relocating to <body> the
-		// transformed #t-host is its containing block, so translateY(100%) doesn't
-		// hide it and it renders inline at the bottom (behind the nav) on mount.
-		const a11yBackdrop = document.getElementById('h-a11y-backdrop');
-		const a11ySheet = document.getElementById('h-a11y-sheet');
-		if (a11yBackdrop) document.body.appendChild(a11yBackdrop);
-		if (a11ySheet) document.body.appendChild(a11ySheet);
-	}
+	if (!container) return;
+	// Drop any previously-relocated sheets so a rebuild doesn't leave duplicates on <body>.
+	HOST_SHEET_IDS.forEach((id) => document.getElementById(id)?.remove());
+	// Clear the static HTML stub (index.html) / the prior build, then rebuild.
+	container.innerHTML = '';
+	buildDOM(container);
+	// The approval + accessibility sheets are position:fixed viewport overlays. #t-host is
+	// a .tab carrying `animation: rise …` (a transform), which makes it a containing block
+	// for fixed descendants — left inside the tab, translateY(100%) doesn't hide them and
+	// they render inline at the bottom. Relocate to <body> so they're true full-screen modals.
+	HOST_SHEET_IDS.forEach((id) => {
+		const el = document.getElementById(id);
+		if (el) document.body.appendChild(el);
+	});
 	wireButtons();
-
-	// Initial render.
 	renderStatus();
 	renderId();
 	renderOtp();
 	renderPeers();
+	applyUnattendedHost();
+}
 
-	// Subscribe to Tauri events.
+function mount() {
+	if (mounted) return;
+	mounted = true;
+
+	buildContent();
+
+	// Subscribe to Tauri events (once).
 	subscribeEvents();
 
 	// Refresh a11y status on first mount and on re-focus.
 	refreshA11y();
 	document.addEventListener('visibilitychange', onVisible);
+
+	// Re-translate on language change: the template is rendered with inline t(), so the
+	// only way to switch its language is to rebuild it (router re-runs onShow, not mount).
+	window.addEventListener('langchange', () => {
+		if (mounted) { buildContent(); refreshA11y(); }
+	});
+
+	// Game mode is a CLIENT-ONLY personality: switching into it must stop hosting —
+	// end every active session and go fully offline (unregister from the relay) so the
+	// device neither streams nor accepts new connection requests while gaming.
+	// (host.js is premounted at boot, so this listener is live from app start.)
+	window.__pulsarBus?.addEventListener('mode-changed', (e) => {
+		if (e.detail === 'game' && isOnline) goOffline();
+	});
 }
 
 function onShow() {

@@ -11,6 +11,16 @@
 
 /* ---- Resets ---- */
 *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+/* App chrome is not selectable — long-press/drag must gesture, not select text.
+   Real text entry stays selectable below. */
+body {
+	user-select: none;
+	-webkit-user-select: none;
+}
+input, textarea, [contenteditable="true"] {
+	user-select: text;
+	-webkit-user-select: text;
+}
 html { background: transparent; }
 /* No page-level overscroll bounce/glow — the app shell, not the browser, scrolls. */
 html, body { overscroll-behavior: none; }

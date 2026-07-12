@@ -54,6 +54,33 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn host_gesture(&self, _x1: f64, _y1: f64, _x2: f64, _y2: f64) -> crate::Result<AttachResponse> {
     Self::noop("no gesture injection on desktop")
   }
+  pub fn host_request_sync(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no host encoder on desktop")
+  }
+  pub fn host_pointer_abs(&self, _x: f64, _y: f64) -> crate::Result<AttachResponse> {
+    Self::noop("no cursor injection on desktop")
+  }
+  pub fn host_pointer_rel(&self, _dx: f64, _dy: f64) -> crate::Result<AttachResponse> {
+    Self::noop("no cursor injection on desktop")
+  }
+  pub fn host_pointer_button(&self, _down: bool) -> crate::Result<AttachResponse> {
+    Self::noop("no cursor injection on desktop")
+  }
+  pub fn host_scroll(&self, _dx: f64, _dy: f64) -> crate::Result<AttachResponse> {
+    Self::noop("no cursor injection on desktop")
+  }
+  pub fn host_key(&self, _code: u32, _down: bool) -> crate::Result<AttachResponse> {
+    Self::noop("no key injection on desktop")
+  }
+  pub fn host_char(&self, _text: &str) -> crate::Result<AttachResponse> {
+    Self::noop("no key injection on desktop")
+  }
+  pub fn overlay_granted(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no overlay permission on desktop")
+  }
+  pub fn request_overlay(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no overlay permission on desktop")
+  }
   pub fn open_a11y_settings(&self) -> crate::Result<AttachResponse> {
     Self::noop("no accessibility settings on desktop")
   }
@@ -62,6 +89,15 @@ impl<R: Runtime> PulsarVideo<R> {
   }
   pub fn notify_request(&self, _peer: &str) -> crate::Result<AttachResponse> {
     Self::noop("no request notification on desktop")
+  }
+  pub fn notif_permission(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no notification permission on desktop")
+  }
+  pub fn cancel_notify_request(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no request notification on desktop")
+  }
+  pub fn set_notif_lang(&self, _lang: &str) -> crate::Result<AttachResponse> {
+    Self::noop("no notifications on desktop")
   }
 
   // ---- W3-media-native no-ops (desktop has no native AudioTrack / SurfaceView) ----

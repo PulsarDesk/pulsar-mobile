@@ -9,6 +9,12 @@
     <!-- Touch haptics: navigator.vibrate() in the client input layer (long-press,
          double-tap, double-tap-drag) is a no-op without this. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Remote-control cursor: the injected pointer is drawn as a system overlay
+         (TYPE_APPLICATION_OVERLAY), captured by MediaProjection so the operator sees it
+         in the stream. Android only lists an app under "draw over other apps" if it
+         DECLARES this permission — without it canDrawOverlays is always false and the app
+         never appears in the settings list. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application>
         <!-- Client: keeps decode + sockets alive when backgrounded. -->

@@ -117,6 +117,73 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
+  /// Force an immediate IDR on the running host encoder (client keyframe request —
+  /// MediaNack([0]) — after an unrepairable packet loss).
+  pub fn host_request_sync(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("hostRequestSync", ()).map_err(Into::into)
+  }
+
+  /// Move the remote-control virtual cursor to an absolute normalized (0..1) point.
+  pub fn host_pointer_abs(&self, x: f64, y: f64) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("hostPointerAbs", PointerAbsArgs { x, y })
+      .map_err(Into::into)
+  }
+
+  /// Move the remote-control virtual cursor by a relative (evdev px) delta.
+  pub fn host_pointer_rel(&self, dx: f64, dy: f64) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("hostPointerRel", PointerRelArgs { dx, dy })
+      .map_err(Into::into)
+  }
+
+  /// Press/release the remote-control pointer (release dispatches the tap/swipe).
+  pub fn host_pointer_button(&self, down: bool) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("hostPointerButton", PointerBtnArgs { down })
+      .map_err(Into::into)
+  }
+
+  /// Mouse wheel → a swipe at the remote-control cursor.
+  pub fn host_scroll(&self, dx: f64, dy: f64) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("hostScroll", ScrollArgs { dx, dy })
+      .map_err(Into::into)
+  }
+
+  /// Keyboard key (evdev code) from the remote client. Special keys map to Android
+  /// navigation (Win→Home, Alt+Tab→Recents, Esc→Back); editing keys act on the
+  /// focused text field via the accessibility service.
+  pub fn host_key(&self, code: u32, down: bool) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("hostKey", KeyArgs { code, down })
+      .map_err(Into::into)
+  }
+
+  /// A resolved Unicode string to type verbatim into the focused text field.
+  pub fn host_char(&self, text: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("hostChar", CharArgs { text })
+      .map_err(Into::into)
+  }
+
+  /// `ok` reflects whether the "draw over other apps" overlay permission is granted
+  /// (gates the visible remote-control cursor).
+  pub fn overlay_granted(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("overlayGranted", ()).map_err(Into::into)
+  }
+
+  /// Open the system settings to grant the "draw over other apps" overlay permission.
+  pub fn request_overlay(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("requestOverlay", ()).map_err(Into::into)
+  }
+
   /// Open Android's Accessibility settings so the user can enable Pulsar control.
   pub fn open_a11y_settings(&self) -> crate::Result<AttachResponse> {
     self.0.run_mobile_plugin("openA11ySettings", ()).map_err(Into::into)
@@ -135,6 +202,25 @@ impl<R: Runtime> PulsarVideo<R> {
     self
       .0
       .run_mobile_plugin("notifyRequest", NotifyRequestArgs { peer })
+      .map_err(Into::into)
+  }
+
+  /// Ensure the POST_NOTIFICATIONS runtime permission (Android 13+); fires the
+  /// system dialog when missing. `ok` = already granted.
+  pub fn notif_permission(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("notifPermission", ()).map_err(Into::into)
+  }
+
+  /// Dismiss the incoming-request notification (request answered or expired).
+  pub fn cancel_notify_request(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("cancelNotifyRequest", ()).map_err(Into::into)
+  }
+
+  /// Set the app-UI language used for notification strings (tr/en/ru/kk).
+  pub fn set_notif_lang(&self, lang: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("setNotifLang", NotifLangArgs { lang })
       .map_err(Into::into)
   }
 
@@ -322,6 +408,40 @@ struct GestureArgs {
 }
 
 #[derive(Serialize)]
+struct PointerAbsArgs {
+  x: f64,
+  y: f64,
+}
+
+#[derive(Serialize)]
+struct PointerRelArgs {
+  dx: f64,
+  dy: f64,
+}
+
+#[derive(Serialize)]
+struct PointerBtnArgs {
+  down: bool,
+}
+
+#[derive(Serialize)]
+struct ScrollArgs {
+  dx: f64,
+  dy: f64,
+}
+
+#[derive(Serialize)]
+struct KeyArgs {
+  code: u32,
+  down: bool,
+}
+
+#[derive(Serialize)]
+struct CharArgs<'a> {
+  text: &'a str,
+}
+
+#[derive(Serialize)]
 struct HostArgs<'a> {
   port: u16,
   audio_port: u16,
@@ -335,6 +455,11 @@ struct HostArgs<'a> {
 #[derive(Serialize)]
 struct NotifyRequestArgs<'a> {
   peer: &'a str,
+}
+
+#[derive(Serialize)]
+struct NotifLangArgs<'a> {
+  lang: &'a str,
 }
 
 // ---- W5-native additions -------------------------------------------------------

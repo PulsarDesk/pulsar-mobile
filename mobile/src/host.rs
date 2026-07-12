@@ -447,6 +447,9 @@ async fn approval_race<R: Runtime>(
     // Remove from pending (may already be gone if oneshot was consumed by select).
     host_state.pending.lock().unwrap().remove(&req_id);
 
+    // Request answered (or auto-denied) — take the heads-up notification down with it.
+    let _ = app.pulsar_video().cancel_notify_request();
+
     if allowed {
         let _ = accept(sess).await;
     } else {
@@ -600,11 +603,59 @@ pub async fn go_online<R: Runtime>(
                         // Kept for the kick branch below (the video/audio forwarders move
                         // their own clones): a kicked client is told with an explicit Bye.
                         let bye_sender = sender.clone();
+                        // NACK retransmit: the client re-requests lost RTP seqs. Without this a
+                        // single dropped packet corrupted the frame's trailing slices (bottom
+                        // rows) until the next keyframe. Keep a small seq→datagram ring and resend
+                        // requested seqs. FEAT_NACK is advertised in StreamCaps below.
+                        let (nack_tx, mut nack_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<Vec<u16>>();
                         let vfwd = tauri::async_runtime::spawn(async move {
+                            const NACK_RING: usize = 512;
+                            let mut ring: std::collections::VecDeque<(u16, Vec<u8>)> =
+                                std::collections::VecDeque::with_capacity(NACK_RING);
                             let mut buf = vec![0u8; 4096];
-                            while let Ok((n, _)) = vsock.recv_from(&mut buf).await {
-                                if n > 0 {
-                                    let _ = vsender.send(&media::frame(media::TAG_VIDEO, &buf[..n])).await;
+                            loop {
+                                tokio::select! {
+                                    r = vsock.recv_from(&mut buf) => {
+                                        let Ok((n, _)) = r else { break };
+                                        if n < 13 || buf[0] >> 6 != 2 {
+                                            continue; // not plausible RTP v2
+                                        }
+                                        let rtp = &buf[..n];
+                                        if let Some(seq) = media::rtp_seq(rtp) {
+                                            if ring.len() == NACK_RING {
+                                                ring.pop_front();
+                                            }
+                                            ring.push_back((seq, rtp.to_vec()));
+                                        }
+                                        if vsender
+                                            .send(&media::frame(media::TAG_VIDEO, rtp))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break; // session gone
+                                        }
+                                    }
+                                    q = nack_rx.recv() => {
+                                        let Some(seqs) = q else { break };
+                                        // Peer controls `seqs` — de-dup into a set capped at the
+                                        // ring depth, then scan the ring ONCE (bounds CPU per NACK).
+                                        let mut want: std::collections::HashSet<u16> =
+                                            std::collections::HashSet::with_capacity(NACK_RING);
+                                        for s in seqs {
+                                            if want.len() >= NACK_RING {
+                                                break;
+                                            }
+                                            want.insert(s);
+                                        }
+                                        for (s, pkt) in ring.iter() {
+                                            if want.contains(s) {
+                                                let _ = vsender
+                                                    .send(&media::frame(media::TAG_VIDEO, pkt))
+                                                    .await;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -635,22 +686,75 @@ pub async fn go_online<R: Runtime>(
                         };
 
                         // ── Input handler ─────────────────────────────────────
+                        // Drive a virtual cursor on this phone: absolute moves (PointerMotion,
+                        // sent once on the client's click-in) and relative deltas (the desktop's
+                        // evdev-grab capture — its NATIVE renderer covers the canvas, so it can
+                        // only send relative motion) both accumulate into the cursor the plugin
+                        // renders as a system overlay + injects taps/swipes at. The old handler
+                        // ignored PointerRelative entirely, so after the first click the cursor
+                        // was stuck and nothing else could be tapped.
+                        //
+                        // Events go through a channel to a consumer task so the serve loop never
+                        // blocks on a JNI round-trip, and a burst of relative motion is coalesced
+                        // into one call to keep the JNI rate bounded.
                         let app_in = app3.clone();
-                        let mut last = (0f64, 0f64);
-                        let mut down_at: Option<(f64, f64)> = None;
-                        let on_input = move |ev: InputEvent| match ev {
-                            InputEvent::PointerMotion { x, y } => last = (x, y),
-                            InputEvent::PointerButton { down: true, .. } => down_at = Some(last),
-                            InputEvent::PointerButton { down: false, .. } => {
-                                if let Some((sx, sy)) = down_at.take() {
-                                    let (ex, ey) = last;
-                                    let app = app_in.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        let _ = app.pulsar_video().host_gesture(sx, sy, ex, ey);
-                                    });
+                        let (in_tx, mut in_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<InputEvent>();
+                        tauri::async_runtime::spawn(async move {
+                            while let Some(first) = in_rx.recv().await {
+                                let mut ev = first;
+                                loop {
+                                    match ev {
+                                        InputEvent::PointerMotion { x, y } => {
+                                            let _ = app_in.pulsar_video().host_pointer_abs(x, y);
+                                        }
+                                        InputEvent::PointerRelative { dx, dy } => {
+                                            // Coalesce a run of relative deltas into one move.
+                                            let (mut ax, mut ay) = (dx, dy);
+                                            let mut next = None;
+                                            while let Ok(p) = in_rx.try_recv() {
+                                                if let InputEvent::PointerRelative { dx, dy } = p {
+                                                    ax += dx;
+                                                    ay += dy;
+                                                } else {
+                                                    next = Some(p);
+                                                    break;
+                                                }
+                                            }
+                                            let _ = app_in.pulsar_video().host_pointer_rel(ax, ay);
+                                            if let Some(n) = next {
+                                                ev = n;
+                                                continue;
+                                            }
+                                        }
+                                        InputEvent::PointerButton { down, .. } => {
+                                            let _ = app_in.pulsar_video().host_pointer_button(down);
+                                        }
+                                        InputEvent::Scroll { dx, dy } => {
+                                            let _ = app_in.pulsar_video().host_scroll(dx, dy);
+                                        }
+                                        // Keyboard: special keys map to Android navigation
+                                        // (Win→Home, Alt+Tab→Recents, Esc→Back) and editing keys
+                                        // (Backspace/Enter/arrows) act on the focused text field;
+                                        // resolved characters are typed verbatim. Both were
+                                        // silently dropped before, so the client keyboard did
+                                        // nothing on a phone host.
+                                        InputEvent::Key { code, down } => {
+                                            let _ = app_in.pulsar_video().host_key(code, down);
+                                        }
+                                        InputEvent::Char(c) => {
+                                            let _ = app_in
+                                                .pulsar_video()
+                                                .host_char(c.encode_utf8(&mut [0u8; 4]));
+                                        }
+                                        _ => {}
+                                    }
+                                    break;
                                 }
                             }
-                            _ => {}
+                        });
+                        let on_input = move |ev: InputEvent| {
+                            let _ = in_tx.send(ev);
                         };
 
                         // ── Stream caps (W5-rust-host: dynamic codec list) ─────
@@ -669,10 +773,22 @@ pub async fn go_online<R: Runtime>(
                         };
 
                         let mut data = DataHandlers::default();
+                        // Feed client NACKs to the retransmit ring in the video forwarder above.
+                        // MediaNack([0]) is the KEYFRAME-REQUEST sentinel (mirrors the desktop
+                        // host): the client's retransmit repair failed, its reference chain is
+                        // broken — force an immediate IDR so the picture recovers now instead
+                        // of smearing until the scheduled keyframe (5 s GOP).
+                        let app_sync = app3.clone();
+                        data.on_nack = Box::new(move |seqs| {
+                            if seqs.contains(&0) {
+                                let _ = app_sync.pulsar_video().host_request_sync();
+                            }
+                            let _ = nack_tx.send(seqs);
+                        });
                         data.stream_caps = Box::new(move || StreamCaps {
                             codecs: probed_codecs.clone(),
                             encoders: vec!["mediacodec".to_string()],
-                            features: vec![media::FEAT_MOS.to_string()],
+                            features: vec![media::FEAT_MOS.to_string(), media::FEAT_NACK.to_string()],
                             ..Default::default()
                         });
 
@@ -834,4 +950,32 @@ pub async fn open_a11y_settings<R: Runtime>(app: AppHandle<R>) -> Result<bool, S
 #[tauri::command]
 pub async fn a11y_enabled<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     Ok(app.pulsar_video().a11y_enabled().map(|r| r.ok).unwrap_or(false))
+}
+
+/// Whether the "draw over other apps" overlay permission is granted — gates the
+/// visible remote-control cursor (injection works without it, just no pointer shown).
+#[tauri::command]
+pub async fn overlay_granted<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(app.pulsar_video().overlay_granted().map(|r| r.ok).unwrap_or(false))
+}
+
+/// Open the system settings to grant the overlay ("draw over other apps") permission.
+#[tauri::command]
+pub async fn request_overlay<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(app.pulsar_video().request_overlay().map(|r| r.ok).unwrap_or(false))
+}
+
+/// Push the app-UI language (tr/en/ru/kk) down to the Android layer so notification
+/// strings match the in-app language instead of the device locale.
+#[tauri::command]
+pub async fn set_notif_lang<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<bool, String> {
+    Ok(app.pulsar_video().set_notif_lang(&lang).map(|r| r.ok).unwrap_or(false))
+}
+
+/// Ensure the POST_NOTIFICATIONS runtime permission (Android 13+): without it the
+/// incoming-connection heads-up from `notify_request` is silently dropped. Fires the
+/// system dialog when missing; returns whether it was already granted.
+#[tauri::command]
+pub async fn notif_permission<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(app.pulsar_video().notif_permission().map(|r| r.ok).unwrap_or(false))
 }

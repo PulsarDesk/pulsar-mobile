@@ -158,6 +158,48 @@ class GestureArgs {
     var y2: Double = 0.0
 }
 
+// App-UI language for notification strings (tr/en/ru/kk).
+@InvokeArg
+class NotifLangArgs {
+    var lang: String? = null
+}
+
+// Remote-control cursor: the peer drives a virtual pointer we render as a system
+// overlay (captured by MediaProjection, so it shows in the stream) and inject gestures at.
+@InvokeArg
+class PointerAbsArgs {
+    var x: Double = 0.0
+    var y: Double = 0.0
+}
+
+@InvokeArg
+class PointerRelArgs {
+    var dx: Double = 0.0
+    var dy: Double = 0.0
+}
+
+@InvokeArg
+class PointerBtnArgs {
+    var down: Boolean = false
+}
+
+@InvokeArg
+class ScrollArgs {
+    var dx: Double = 0.0
+    var dy: Double = 0.0
+}
+
+@InvokeArg
+class KeyArgs {
+    var code: Int = 0
+    var down: Boolean = false
+}
+
+@InvokeArg
+class CharArgs {
+    var text: String = ""
+}
+
 @InvokeArg
 class SetAudioMutedArgs {
     var muted: Boolean = false
@@ -247,6 +289,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     val micBuffer = LinkedBlockingDeque<ByteArray>(50)
     /** Permission request code for RECORD_AUDIO. */
     private val MIC_PERM_CODE = 0x4D49 // 'MI'
+    private val NOTIF_PERM_CODE = 0x4E4F // 'NO'
 
     // --- mobile host (M16): MediaProjection → MediaCodec encoder → RTP → loopback UDP ---
     private var projection: MediaProjection? = null
@@ -259,9 +302,34 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var hFps = 30
     private var hKbps = 0
 
+    /** Whether OUR activity is currently resumed (foreground). Drives notifyRequest's
+     *  "only alert when the in-app sheet is invisible" gate. */
+    @Volatile private var appResumed = false
+
     override fun load(webView: WebView) {
         super.load(webView)
         this.webView = webView
+        // "Stop sharing" tapped on the foreground-service notification → tell the JS
+        // layer to go offline (it owns the host lifecycle; tears capture + service down).
+        HostService.onStopRequest = {
+            activity.runOnUiThread {
+                this.webView?.evaluateJavascript(
+                    "window.dispatchEvent(new Event('pulsar-stop-host'))", null
+                )
+            }
+        }
+        appResumed = true // load runs with the activity in the foreground
+        activity.application.registerActivityLifecycleCallbacks(
+            object : android.app.Application.ActivityLifecycleCallbacks {
+                override fun onActivityResumed(a: android.app.Activity) { if (a === activity) appResumed = true }
+                override fun onActivityPaused(a: android.app.Activity) { if (a === activity) appResumed = false }
+                override fun onActivityCreated(a: android.app.Activity, b: android.os.Bundle?) {}
+                override fun onActivityStarted(a: android.app.Activity) {}
+                override fun onActivityStopped(a: android.app.Activity) {}
+                override fun onActivitySaveInstanceState(a: android.app.Activity, b: android.os.Bundle) {}
+                override fun onActivityDestroyed(a: android.app.Activity) {}
+            }
+        )
     }
 
     // ---------------- commands ----------------
@@ -432,6 +500,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                     val mpm = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     projection = mpm.getMediaProjection(rc, data)
                     startCapture()
+                    registerRotationListener()
                     val r = JSObject(); r.put("ok", true); invoke.resolve(r)
                 } catch (e: SecurityException) {
                     if (tries++ < 40) { handler.postDelayed(this, 100); return }
@@ -449,12 +518,21 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun stopHost(invoke: Invoke) {
         activity.runOnUiThread {
+            unregisterRotationListener()
             hostEncoder?.stop(); hostEncoder = null
             try { projection?.stop() } catch (_: Exception) {}
             projection = null
+            hideCursor()
             activity.stopService(Intent(activity, HostService::class.java))
             val r = JSObject(); r.put("ok", true); invoke.resolve(r)
         }
+    }
+
+    /** Client keyframe request (MediaNack([0])): force an immediate IDR on the running encoder. */
+    @Command
+    fun hostRequestSync(invoke: Invoke) {
+        hostEncoder?.requestSyncFrame()
+        val r = JSObject(); r.put("ok", hostEncoder != null); invoke.resolve(r)
     }
 
     // Remote control (M16 polish): inject the peer's pointer via the AccessibilityService.
@@ -469,6 +547,225 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             (a.x2 * w).toFloat(), (a.y2 * h).toFloat()
         )
         val r = JSObject(); r.put("ok", PulsarA11yService.instance != null); invoke.resolve(r)
+    }
+
+    // ── Remote-control virtual cursor ──────────────────────────────────────────
+    // A PC (or any client) controls this phone by driving a virtual pointer. Since a
+    // phone has no OS cursor, we render one as a SYSTEM OVERLAY (TYPE_APPLICATION_OVERLAY)
+    // that MediaProjection composites into the captured frame — so the operator SEES the
+    // pointer in the video on their end and can aim. Motion arrives as absolute
+    // (PointerMotion, sent once on click-in) or relative deltas (evdev-grab, the desktop's
+    // native-render capture); we accumulate both into `cursorX/Y` in screen px. A press
+    // records the down point; the release dispatches a tap/swipe from down→current via the
+    // AccessibilityService. `displayMetrics` is re-read each event so the cursor + injection
+    // stay correct across rotation.
+    private var cursorX = 0f
+    private var cursorY = 0f
+    private var cursorSeeded = false
+    private var downX = 0f
+    private var downY = 0f
+    private var downTime = 0L
+    private var cursorView: View? = null
+    private var cursorParams: android.view.WindowManager.LayoutParams? = null
+
+    private inner class CursorView(ctx: Context) : View(ctx) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; style = Paint.Style.FILL
+        }
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#111111"); style = Paint.Style.STROKE
+            strokeWidth = 2.5f; strokeJoin = Paint.Join.ROUND
+        }
+        override fun onDraw(c: Canvas) {
+            // Classic arrow pointer, hotspot ≈ top-left corner.
+            val s = width.toFloat()
+            val p = android.graphics.Path()
+            p.moveTo(s * 0.06f, s * 0.04f)
+            p.lineTo(s * 0.06f, s * 0.80f)
+            p.lineTo(s * 0.27f, s * 0.60f)
+            p.lineTo(s * 0.41f, s * 0.92f)
+            p.lineTo(s * 0.55f, s * 0.85f)
+            p.lineTo(s * 0.41f, s * 0.55f)
+            p.lineTo(s * 0.70f, s * 0.53f)
+            p.close()
+            c.drawPath(p, fill)
+            c.drawPath(p, stroke)
+        }
+    }
+
+    // Cursor math + overlay placement + a11y injection all share the REAL display space so
+    // they stay aligned (esp. after rotation, when the backgrounded activity's own metrics
+    // can lag the physical display).
+    private fun screenSize(): Pair<Int, Int> = realDisplaySize()
+
+    /** Add the overlay cursor if allowed (needs "draw over other apps"); no-op without it. */
+    private fun ensureCursor() {
+        if (cursorView != null) return
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(activity)) return
+        val px = (22 * activity.resources.displayMetrics.density).toInt().coerceAtLeast(16)
+        val v = CursorView(activity)
+        @Suppress("DEPRECATION")
+        val overlayType = if (Build.VERSION.SDK_INT >= 26)
+            android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            android.view.WindowManager.LayoutParams.TYPE_PHONE
+        // FLAG_LAYOUT_IN_SCREEN is load-bearing: without it the overlay's (0,0) sits BELOW
+        // the status bar / display cutout, so the drawn cursor rode ~one-cutout-height lower
+        // than the injected touch point (the operator saw it "under" their mouse). With it,
+        // lp.x/y are true display coordinates — the same space MediaProjection captures and
+        // the AccessibilityService injects into.
+        @Suppress("DEPRECATION")
+        val lp = android.view.WindowManager.LayoutParams(
+            px, px,
+            overlayType,
+            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+        // Let the window extend into the cutout/notch band too — otherwise the system nudges
+        // it out of that area and the top-of-screen region stays unreachable/offset.
+        if (Build.VERSION.SDK_INT >= 28) {
+            lp.layoutInDisplayCutoutMode =
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.x = cursorX.toInt(); lp.y = cursorY.toInt()
+        try {
+            activity.windowManager.addView(v, lp)
+            cursorView = v; cursorParams = lp
+        } catch (e: Exception) {
+            Log.w(TAG, "cursor overlay add failed: ${e.message}")
+        }
+    }
+
+    private fun moveCursor() {
+        val v = cursorView ?: return
+        val lp = cursorParams ?: return
+        lp.x = cursorX.toInt(); lp.y = cursorY.toInt()
+        try { activity.windowManager.updateViewLayout(v, lp) } catch (_: Exception) {}
+    }
+
+    private fun hideCursor() {
+        cursorSeeded = false
+        val v = cursorView ?: return
+        cursorView = null; cursorParams = null
+        try { activity.windowManager.removeView(v) } catch (_: Exception) {}
+    }
+
+    /** Absolute pointer move (normalized 0..1), sent once on click-in. */
+    @Command
+    fun hostPointerAbs(invoke: Invoke) {
+        val a = invoke.parseArgs(PointerAbsArgs::class.java)
+        val (w, h) = screenSize()
+        cursorX = (a.x * w).toFloat().coerceIn(0f, w - 1f)
+        cursorY = (a.y * h).toFloat().coerceIn(0f, h - 1f)
+        cursorSeeded = true
+        activity.runOnUiThread {
+            ensureCursor(); moveCursor()
+            PulsarA11yService.instance?.takeIf { it.dragging }?.dragMove(cursorX, cursorY)
+        }
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /** Relative pointer move (evdev px deltas); accumulate into the virtual cursor. */
+    @Command
+    fun hostPointerRel(invoke: Invoke) {
+        val a = invoke.parseArgs(PointerRelArgs::class.java)
+        val (w, h) = screenSize()
+        if (!cursorSeeded) { cursorX = w * 0.5f; cursorY = h * 0.5f; cursorSeeded = true }
+        cursorX = (cursorX + a.dx.toFloat()).coerceIn(0f, w - 1f)
+        cursorY = (cursorY + a.dy.toFloat()).coerceIn(0f, h - 1f)
+        activity.runOnUiThread {
+            ensureCursor(); moveCursor()
+            PulsarA11yService.instance?.takeIf { it.dragging }?.dragMove(cursorX, cursorY)
+        }
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /**
+     * Press/release. API 26+: streamed as a live continued-stroke drag — the finger goes
+     * down on press, follows pointer moves in real time, lifts on release (so drags act
+     * WHILE dragging, not replayed after). Older API: fall back to the old replay of one
+     * anchor→cursor stroke on release.
+     */
+    @Command
+    fun hostPointerButton(invoke: Invoke) {
+        val a = invoke.parseArgs(PointerBtnArgs::class.java)
+        val (dw, dh) = screenSize()
+        Log.i(TAG, "pointerButton down=${a.down} cursor=${cursorX.toInt()},${cursorY.toInt()} display=${dw}x${dh}")
+        val svc = PulsarA11yService.instance
+        if (a.down) {
+            downX = cursorX; downY = cursorY; downTime = System.currentTimeMillis()
+            activity.runOnUiThread { svc?.dragStart(cursorX, cursorY) }
+        } else {
+            activity.runOnUiThread {
+                if (svc != null && svc.dragging) {
+                    svc.dragEnd(cursorX, cursorY)
+                } else {
+                    // Fallback (API<26 or the live stroke got cancelled): replay one stroke.
+                    val elapsed = (System.currentTimeMillis() - downTime).coerceIn(0L, 2000L)
+                    svc?.gesture(downX, downY, cursorX, cursorY, elapsed)
+                }
+            }
+        }
+        val r = JSObject(); r.put("ok", svc != null); invoke.resolve(r)
+    }
+
+    /** Mouse wheel → a short swipe at the cursor (content scrolls with the wheel direction). */
+    @Command
+    fun hostScroll(invoke: Invoke) {
+        val a = invoke.parseArgs(ScrollArgs::class.java)
+        val (_, h) = screenSize()
+        // Wheel dy>0 = scroll down → content moves up → finger swipes UP (sy decreases).
+        val amt = (a.dy.toFloat() * 40f).coerceIn(-h * 0.6f, h * 0.6f)
+        val sy = cursorY.coerceIn(h * 0.15f, h * 0.85f)
+        PulsarA11yService.instance?.gesture(cursorX, sy, cursorX, (sy - amt).coerceIn(0f, h - 1f), 110L)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /**
+     * Keyboard key (evdev code) from the remote client. Special keys map to Android
+     * navigation / editing actions via the accessibility service — arbitrary KeyEvent
+     * injection isn't possible without system permissions, so unmapped keys are dropped.
+     */
+    @Command
+    fun hostKey(invoke: Invoke) {
+        val a = invoke.parseArgs(KeyArgs::class.java)
+        val svc = PulsarA11yService.instance
+        activity.runOnUiThread { svc?.key(a.code, a.down) }
+        val r = JSObject(); r.put("ok", svc != null); invoke.resolve(r)
+    }
+
+    /** Type a resolved Unicode string into the focused text field (layout-independent). */
+    @Command
+    fun hostChar(invoke: Invoke) {
+        val a = invoke.parseArgs(CharArgs::class.java)
+        val svc = PulsarA11yService.instance
+        activity.runOnUiThread { svc?.typeText(a.text) }
+        val r = JSObject(); r.put("ok", svc != null); invoke.resolve(r)
+    }
+
+    /** Is the "draw over other apps" (overlay) permission granted? Gates the visible cursor. */
+    @Command
+    fun overlayGranted(invoke: Invoke) {
+        val ok = Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(activity)
+        val r = JSObject(); r.put("ok", ok); invoke.resolve(r)
+    }
+
+    /** Open the system "draw over other apps" settings so the user can grant the cursor overlay. */
+    @Command
+    fun requestOverlay(invoke: Invoke) {
+        try {
+            activity.startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:${activity.packageName}")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (_: Exception) {}
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
     }
 
     /** Open Android's Accessibility settings so the user can enable Pulsar control. */
@@ -769,13 +1066,18 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun notifyRequest(invoke: Invoke) {
         try {
-            // Short, locale-matched text: long copy overran the heads-up banner on
-            // narrow screens (e.g. the Galaxy Fold cover display). Follow the device
-            // language like the rest of the UI does.
-            val tr = java.util.Locale.getDefault().language == "tr"
-            val chanName = if (tr) "Bağlantı istekleri" else "Connection requests"
-            val title = if (tr) "Bağlantı isteği" else "Connection request"
-            val text = if (tr) "Onaylamak için dokun" else "Tap to approve"
+            // In-app approval sheet is visible (app foreground + screen on) → the
+            // notification would just duplicate it; skip.
+            val pm = activity.getSystemService(android.os.PowerManager::class.java)
+            if (appResumed && pm?.isInteractive != false) {
+                val r = JSObject(); r.put("ok", true); r.put("detail", "foreground_skip")
+                invoke.resolve(r); return
+            }
+            // Short text (long copy overran the heads-up banner on narrow screens, e.g.
+            // the Fold cover display), in the APP's language via NotifI18n.
+            val chanName = NotifI18n.t(activity, "chanRequests")
+            val title = NotifI18n.t(activity, "reqTitle")
+            val text = NotifI18n.t(activity, "reqText")
             val nm = activity.getSystemService(NotificationManager::class.java)
             val chan = "pulsar-request"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -791,13 +1093,21 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val n = NotificationCompat.Builder(activity, chan)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(activity.applicationInfo.icon)
                 .setContentTitle(title)
                 .setContentText(text)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setAutoCancel(true)
                 .setContentIntent(pi)
+                // Live 30s countdown (mirrors the approval sheet's auto-deny window)
+                // + auto-dismiss when it expires. `cancelNotifyRequest` removes it
+                // sooner when the request is answered.
+                .setWhen(System.currentTimeMillis() + 30_000L)
+                .setShowWhen(true)
+                .setUsesChronometer(true)
+                .setChronometerCountDown(true)
+                .setTimeoutAfter(30_000L)
                 .build()
             nm.notify(REQUEST_NOTIF_ID, n)
             val r = JSObject(); r.put("ok", true); invoke.resolve(r)
@@ -805,6 +1115,47 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             Log.e(TAG, "notifyRequest failed", e)
             val r = JSObject(); r.put("ok", false); invoke.resolve(r)
         }
+    }
+
+    /** Set the app-UI language for notification strings (persisted; services read it too). */
+    @Command
+    fun setNotifLang(invoke: Invoke) {
+        val a = invoke.parseArgs(NotifLangArgs::class.java)
+        NotifI18n.setLang(activity, a.lang ?: "")
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /** Dismiss the incoming-request notification (the request was answered or expired). */
+    @Command
+    fun cancelNotifyRequest(invoke: Invoke) {
+        try {
+            activity.getSystemService(NotificationManager::class.java).cancel(REQUEST_NOTIF_ID)
+        } catch (_: Exception) {}
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /**
+     * Ensure the POST_NOTIFICATIONS runtime permission (Android 13+). The manifest
+     * declares it, but without the runtime grant `notifyRequest`'s heads-up is
+     * silently dropped — so a backgrounded host phone never alerted the user of an
+     * incoming connection. Called when the host goes online (the moment notifications
+     * become relevant). Resolves ok=true if already granted; otherwise fires the
+     * system permission dialog and resolves ok=false (the grant applies from the
+     * next request on — no retry loop needed).
+     */
+    @Command
+    fun notifPermission(invoke: Invoke) {
+        val granted = Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIF_PERM_CODE
+            )
+        }
+        val r = JSObject(); r.put("ok", granted); invoke.resolve(r)
     }
 
     // ---- W4-mic commands --------------------------------------------------------
@@ -1045,10 +1396,16 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private fun startCapture() {
         val proj = projection ?: return
         // A re-stream (the desktop's adaptive re-request) calls this again mid-session. We
-        // capture at native res and ignore the client's params, so the running encoder is
-        // still correct — KEEP it (tearing it down + recreating glitched/froze the capture).
+        // capture at native res so the running encoder's GEOMETRY is still correct — KEEP it
+        // (tearing it down + recreating glitched/froze the capture). But the BITRATE must be
+        // applied live: the desktop's adaptive-bitrate loop steps the request down under
+        // packet loss, and ignoring it here meant the phone kept blasting the original
+        // bitrate forever → sustained 20-40% loss, corruption, stall spam (the ABR steps
+        // were visible in the desktop log while the phone logged "re-stream ignored").
         if (hostEncoder != null) {
-            Log.i(TAG, "startCapture: already running — re-stream ignored")
+            val kbps = minOf(if (hKbps > 0) hKbps else 6000, 8000)
+            Log.i(TAG, "startCapture: already running — applying re-stream bitrate ${kbps}k live")
+            hostEncoder?.setBitrate(kbps * 1000)
             return
         }
         val dm = activity.resources.displayMetrics
@@ -1056,8 +1413,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         // defaults). Downscale so the larger dim ≤ 1280: native 1080x2400 (2.6 MP) overloads a
         // software/emulator H.264 encoder + needs a high bitrate → glitchy macroblocks; a smaller
         // frame (same aspect → no distortion) is sharper per-bit + far lighter.
-        var w = dm.widthPixels
-        var h = dm.heightPixels
+        // Use the REAL display size (not the activity's metrics): while hosting the app is
+        // backgrounded / may be orientation-locked, but MediaProjection mirrors the physical
+        // display's CURRENT rotation — so the encoder must match that, not the app's frame.
+        val (rw, rh) = realDisplaySize()
+        var w = rw
+        var h = rh
         val maxDim = 1280
         if (maxOf(w, h) > maxDim) {
             val s = maxDim.toDouble() / maxOf(w, h)
@@ -1068,6 +1429,121 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val kbps = minOf(if (hKbps > 0) hKbps else 6000, 8000)
         Log.i(TAG, "startCapture native ${w}x${h}@$fps ${kbps}k mime=$hMime")
         HostEncoder(proj, hMime, w, h, fps, kbps * 1000, dm.densityDpi, hPort, hAudioPort).also { it.start(); hostEncoder = it }
+        lastCaptureDims = Pair(rw, rh)
+    }
+
+    /** The physical display's CURRENT size (accounts for rotation), independent of the
+     *  (possibly orientation-locked / backgrounded) host activity's own metrics. */
+    private fun realDisplaySize(): Pair<Int, Int> {
+        return try {
+            val disp = (activity.getSystemService(Context.DISPLAY_SERVICE)
+                as android.hardware.display.DisplayManager)
+                .getDisplay(android.view.Display.DEFAULT_DISPLAY)
+            val pt = android.graphics.Point()
+            @Suppress("DEPRECATION") disp.getRealSize(pt)
+            if (pt.x > 0 && pt.y > 0) Pair(pt.x, pt.y)
+            else { val dm = activity.resources.displayMetrics; Pair(dm.widthPixels, dm.heightPixels) }
+        } catch (_: Exception) {
+            val dm = activity.resources.displayMetrics
+            Pair(dm.widthPixels, dm.heightPixels)
+        }
+    }
+
+    // ── Rotation / display-size change → re-encode ─────────────────────────────
+    // The encoder + VirtualDisplay are fixed at the dims captured when the host started.
+    // When the display's real size changes — rotation, but ALSO a foldable folding or
+    // unfolding — MediaProjection mirrors the new-size display into the fixed surface →
+    // the client sees a squished frame that never rescales (the stream dims never change,
+    // so the client can't correct it). Watch for ANY real-size change and rebuild the
+    // encoder at the new native dims: the fresh SPS carries the new size, the client's
+    // decoder reconfigures + re-aspects. Brief (~200ms) freeze during the swap is fine.
+    private var displayListener: android.hardware.display.DisplayManager.DisplayListener? = null
+    private var lastCaptureDims: Pair<Int, Int>? = null
+    private val displayCheckHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var recheckQueued = false
+
+    /** Compare the DEFAULT display's current real size to what we're encoding; restart on drift. */
+    private fun maybeRestartOnResize() {
+        if (hostEncoder == null) return
+        val (rw, rh) = realDisplaySize()
+        val last = lastCaptureDims
+        if (last != null && (rw != last.first || rh != last.second)) {
+            Log.i(TAG, "display size ${last.first}x${last.second} → ${rw}x${rh}: restart capture")
+            restartCapture()
+        }
+    }
+
+    private fun registerRotationListener() {
+        if (displayListener != null) return
+        val dmgr = activity.getSystemService(Context.DISPLAY_SERVICE)
+            as android.hardware.display.DisplayManager
+        val l = object : android.hardware.display.DisplayManager.DisplayListener {
+            override fun onDisplayAdded(id: Int) {}
+            override fun onDisplayRemoved(id: Int) {}
+            override fun onDisplayChanged(id: Int) {
+                if (hostEncoder == null) return
+                Log.i(TAG, "onDisplayChanged id=$id last=$lastCaptureDims")
+                // Don't filter on the event's display id: foldables (e.g. Samsung) keep TWO
+                // internal logical displays (cover + inner) and a rotation while unfolded can
+                // report against the inner display's id, not DEFAULT_DISPLAY. What we act on
+                // is always the DEFAULT display's CURRENT real size, whoever the event names.
+                maybeRestartOnResize()
+                // Re-check shortly after: on some devices the changed event fires before
+                // getRealSize reflects the new size (fold transition / rotation settling).
+                if (!recheckQueued) {
+                    recheckQueued = true
+                    displayCheckHandler.postDelayed({
+                        recheckQueued = false
+                        maybeRestartOnResize()
+                    }, 500L)
+                }
+            }
+        }
+        dmgr.registerDisplayListener(l, displayCheckHandler)
+        displayListener = l
+    }
+
+    private fun unregisterRotationListener() {
+        val l = displayListener ?: return
+        displayListener = null
+        lastCaptureDims = null
+        try {
+            val dmgr = activity.getSystemService(Context.DISPLAY_SERVICE)
+                as android.hardware.display.DisplayManager
+            dmgr.unregisterDisplayListener(l)
+        } catch (_: Exception) {}
+    }
+
+    private fun restartCapture() {
+        activity.runOnUiThread {
+            val enc = hostEncoder ?: return@runOnUiThread
+            // Recompute encode dims from the CURRENT (rotated) real display, same as
+            // startCapture, then reconfigure the running encoder in place. We must NOT
+            // stop()+startCapture(): that would call MediaProjection.createVirtualDisplay a
+            // 2nd time, which Android 14+ rejects with SecurityException. reconfigure()
+            // repoints the existing VirtualDisplay at a fresh encoder instead.
+            val (rw, rh) = realDisplaySize()
+            // Remap the virtual cursor into the new coordinate space (rotation OR fold/unfold
+            // resize). Without this the stored px position (old space) survives into the new
+            // one — e.g. y=1007 on a now-904-px-tall screen — so the overlay sat off-screen
+            // and gestures injected outside the visible area until the next absolute move
+            // re-seeded it. Scale from the ACTUAL previous dims, not an assumed transpose.
+            val old = lastCaptureDims
+            if (cursorSeeded && rw > 0 && rh > 0 && old != null && old.first > 0 && old.second > 0) {
+                cursorX = (cursorX / old.first * rw).coerceIn(0f, rw - 1f)
+                cursorY = (cursorY / old.second * rh).coerceIn(0f, rh - 1f)
+                moveCursor()
+            }
+            var w = rw; var h = rh
+            val maxDim = 1280
+            if (maxOf(w, h) > maxDim) {
+                val s = maxDim.toDouble() / maxOf(w, h)
+                w = (w * s).toInt(); h = (h * s).toInt()
+            }
+            w = w and 1.inv(); h = h and 1.inv()
+            enc.reconfigure(w, h)
+            lastCaptureDims = Pair(rw, rh)
+        }
     }
 
     // ---------------- layout ----------------

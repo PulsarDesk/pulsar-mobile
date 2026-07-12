@@ -74,6 +74,18 @@ if (typeof document !== 'undefined') document.documentElement.lang = lang;
 
 const catalogs = { tr, en, ru, kk };
 
+// Push the active language to the Android layer so NOTIFICATION strings (incoming
+// request, screen-sharing service) match the app language, not the device locale.
+// Best-effort: no-op outside Tauri / on desktop.
+function syncNotifLang(l) {
+  try {
+    if (typeof window !== 'undefined' && window.__TAURI__) {
+      window.__TAURI__.core.invoke('set_notif_lang', { lang: l }).catch(() => {});
+    }
+  } catch (_) {}
+}
+syncNotifLang(lang); // boot-time sync (covers the "never changed language" case)
+
 /**
  * Switch the active language and persist the choice.
  *
@@ -107,6 +119,9 @@ export function setLang(l) {
       window.__TAURI__.core.invoke('set_config', { language: l }).catch(() => {});
     }
   }
+
+  // 2b. Keep Android notification strings in the same language
+  syncNotifLang(l);
 
   // 3. Update <html lang> attribute
   if (typeof document !== 'undefined') {

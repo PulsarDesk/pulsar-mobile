@@ -119,6 +119,10 @@ pub fn run() {
             host::host_codecs,
             host::open_a11y_settings,
             host::a11y_enabled,
+            host::overlay_granted,
+            host::request_overlay,
+            host::notif_permission,
+            host::set_notif_lang,
             // ── Config (config.rs) ────────────────────────────────────────────
             config::get_config,
             config::set_config,
