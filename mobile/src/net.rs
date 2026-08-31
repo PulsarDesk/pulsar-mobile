@@ -187,8 +187,9 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
 /// `lan_devices` call and reused thereafter. `None` until first use.
 ///
 /// Note: Android drops inbound multicast unless a `WifiManager.MulticastLock` is
-/// held — `MainActivity` acquires one at startup so `recv_loop` actually sees
-/// other devices' announces.
+/// held — `PulsarVideoPlugin.load()` (tracked, in `crates/tauri-plugin-pulsar-video/`;
+/// NOT the gitignored `gen/android/` MainActivity) acquires one at startup so
+/// `recv_loop` actually sees other devices' announces.
 #[derive(Default)]
 pub struct SharedDiscovery(pub Mutex<Option<Arc<Discovery>>>);
 

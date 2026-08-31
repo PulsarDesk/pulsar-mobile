@@ -306,9 +306,25 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
      *  "only alert when the in-app sheet is invisible" gate. */
     @Volatile private var appResumed = false
 
+    /**
+     * LAN discovery: Android drops INBOUND multicast (pulsar-core's Discovery on
+     * 239.255.71.21) unless this lock is held. Acquired once in [load] and held for
+     * the app's lifetime — the Tauri Plugin base class has no destroy lifecycle to
+     * release it in, the OS reclaims it with the process anyway, and the power cost
+     * of a MulticastLock on a screen-on device is negligible.
+     */
+    private var multicastLock: WifiManager.MulticastLock? = null
+
     override fun load(webView: WebView) {
         super.load(webView)
         this.webView = webView
+        // MulticastLock so Discovery's recv loop actually sees other devices' announces.
+        // try/catch: a missing/odd WifiManager (some TVs, emulators) must never kill init.
+        try {
+            val wm = activity.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            multicastLock = wm.createMulticastLock("pulsar-discovery").apply { setReferenceCounted(false); acquire() }
+            Log.i(TAG, "multicast lock acquired (LAN discovery receive)")
+        } catch (e: Exception) { Log.w(TAG, "multicast lock failed: ${e.message}") }
         // "Stop sharing" tapped on the foreground-service notification → tell the JS
         // layer to go offline (it owns the host lifecycle; tears capture + service down).
         HostService.onStopRequest = {

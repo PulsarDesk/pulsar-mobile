@@ -786,7 +786,8 @@ pub struct LanDevice {
 #[tauri::command]
 pub async fn lan_devices<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<LanDevice>, String> {
     // Start (or reuse) the multicast discovery beacon and return the peers it has
-    // heard. Requires the Android MulticastLock (acquired in MainActivity) to
+    // heard. Requires the Android MulticastLock (acquired in the pulsar-video
+    // plugin's load() — tracked code, not the gitignored gen/ MainActivity) to
     // receive announces; without it this returns an empty list (graceful degrade).
     let disc = crate::net::get_or_create_discovery(&app).await?;
     let our_pubkey = crate::identity::load_identity(&app).public_bytes();

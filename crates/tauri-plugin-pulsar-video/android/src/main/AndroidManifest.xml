@@ -4,6 +4,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- LAN discovery: pulsar-core's Discovery listens on UDP multicast 239.255.71.21.
+         Android drops INBOUND multicast unless the app holds a WifiManager.MulticastLock,
+         which requires CHANGE_WIFI_MULTICAST_STATE (+ ACCESS_WIFI_STATE to get the
+         WifiManager). Both are normal-level — no runtime prompt. The lock itself is
+         acquired in PulsarVideoPlugin.load(). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Host audio: MediaProjection playback-capture requires RECORD_AUDIO. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Touch haptics: navigator.vibrate() in the client input layer (long-press,
