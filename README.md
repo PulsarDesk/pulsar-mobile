@@ -3,9 +3,13 @@
 The **Android + iOS** app for [Pulsar](https://github.com/PulsarDesk) — the free,
 open-source remote-desktop + game-streaming platform.
 
-A thin, client-first **Tauri 2** shell (Path A: a transparent webview over a native
-video surface) that reuses the shared engine. Desktop-only pieces (SDL3, ffmpeg,
-gtk/x11, libmpv) deliberately stay out so the crate cross-compiles to mobile.
+A **Tauri 2** shell (Path A: a transparent webview over a native video surface)
+that reuses the shared engine. The phone is both a **client** and a **host**:
+it can share its own screen (MediaProjection capture + MediaCodec encode) and
+accept remote control (accessibility-service gesture injection). Desktop-only
+pieces (SDL3, ffmpeg, gtk/x11, libmpv) deliberately stay out so the crate
+cross-compiles to mobile. Android is the working target; iOS is scaffolding
+only for now. Android TV is supported (leanback launcher + D-pad navigation).
 
 ## Layout
 
