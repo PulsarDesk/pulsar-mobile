@@ -19,7 +19,7 @@
  *   bus.emit(name, detail)  — dispatch
  *   bus.on(name, cb)        — subscribe (cb receives detail)
  *   Standard events: 'mode-changed', 'session-started', 'session-ended',
- *                    'session-bg', 'gamepad-active', 'net-transport'
+ *                    'session-bg', 'net-transport'
  *
  * W2-shell-glue additions:
  *   - Import screens/connecting.js  (W2-connecting — self-registers)
@@ -349,11 +349,7 @@ function wireTouchForwarding() {
 	// Skip touches that land on Pulsar UI (control bar, FAB, overlay dock/backdrop,
 	// touch-mode button, sheets, bottom nav) — otherwise dragging the FAB or tapping
 	// the overlay leaks a click/drag to the host (looked like text selection).
-	// B1: the on-screen gamepad layer (game mode) sits over the video; its controls
-	// receive pointer events, but the window-level touch listeners below ALSO fire
-	// for the same touches and would forward them to the host as mouse clicks. Skip
-	// any touch that lands on the pad layer so it never leaks into the host pointer.
-	const SKIP_SEL = '.bar, .fab, .overlay-dock, .overlay-backdrop, .touch-mode-btn, .sheet, .sheet-overlay, .sheet-backdrop, nav.bottom, .gamepad-layer, #gamepad-layer';
+	const SKIP_SEL = '.bar, .fab, .overlay-dock, .overlay-backdrop, .touch-mode-btn, .sheet, .sheet-overlay, .sheet-backdrop, nav.bottom';
 	const MAX_ZOOM = 4;
 	const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 	const W = () => innerWidth, H = () => innerHeight;
@@ -441,13 +437,6 @@ function wireTouchForwarding() {
 		document.body.classList.contains('overlay-open') ||
 		document.body.classList.contains('fab-dragging') ||
 		(e.target && e.target.closest && e.target.closest(SKIP_SEL));
-
-	// B1: while the on-screen gamepad is active (game mode), every touch belongs to
-	// the pad — forwarding to the host too leaks spurious mouse input and ~doubles
-	// the send traffic (send_gamepad + send_pointer per touch). gamepad.js emits
-	// 'gamepad-active' on show/hide; gate the whole live touch path on it.
-	let gamepadActive = false;
-	if (bus && bus.on) bus.on('gamepad-active', (d) => { gamepadActive = !!(d && d.active); });
 
 	// Aspect-fit rect (zoom factor 1) for the current video + screen, CSS px.
 	const fitRect = () => {
@@ -643,7 +632,7 @@ function wireTouchForwarding() {
 	};
 
 	addEventListener('touchstart', (e) => {
-		if (!inSession() || !videoReady || gamepadActive || uiBlocked(e)) return; // gated until first frame
+		if (!inSession() || !videoReady || uiBlocked(e)) return; // gated until first frame
 		if (e.touches.length >= 2) {
 			// Two fingers → pinch-zoom / pan / scroll. Abort any pending 1-finger gesture.
 			g1 = null; clearTimeout(longTimer); longTimer = null;
@@ -692,7 +681,7 @@ function wireTouchForwarding() {
 	}, { passive: true });
 
 	addEventListener('touchmove', (e) => {
-		if (!inSession() || !videoReady || gamepadActive) return; // gated until first frame
+		if (!inSession() || !videoReady) return; // gated until first frame
 		if (multi) {
 			if (!g2 || e.touches.length < 2) return;
 			const a = e.touches[0], b = e.touches[1];
@@ -780,7 +769,6 @@ function wireTouchForwarding() {
 	}, { passive: true });
 
 	addEventListener('touchend', (e) => {
-		if (gamepadActive) return; // B1: gate while on-screen pad active
 		if (e.touches.length === 0) {
 			clearTimeout(longTimer); longTimer = null;
 			if (multi) {
