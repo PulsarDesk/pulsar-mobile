@@ -583,6 +583,7 @@ export default {
 	"m.gamepad.rstick": "Right analog stick",
 	"m.host.a11yOn": "Remote control is on — the other device can control by touch.",
 	"m.host.a11yOnBtn": "Control on ✓",
+	"m.host.viewOnlyBuild": "This build shares the screen only — the other device cannot touch or control this phone. Remote control needs the host-control APK from the GitHub release, installed over adb: Google Play Protect blocks browser installs of any app that declares an accessibility service.",
 	"m.hud.ariaDecode": "{n} milliseconds decode",
 	"m.hud.ariaFps": "{n} FPS",
 	"m.hud.ariaMbps": "{n} megabits per second",

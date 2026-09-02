@@ -47,11 +47,30 @@ cargo check -p pulsar-mobile
 ## Releases
 
 CI compile-checks every push/PR. `release.yml` cuts a **tag + GitHub Release** from
-Conventional Commits (no commit-back). Attaching a built **APK** is opt-in — set repo
-variable `ENABLE_MOBILE_RELEASE=true` and provide an Android signing keystore
-(`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`,
-`ANDROID_STORE_PASSWORD`). **iOS** store builds need a macOS runner + Apple signing and
-are done manually for now.
+Conventional Commits (no commit-back) — but only **after** the Android APKs have built:
+the version is computed in a dry run, both APKs are built with it stamped in and
+verified (signature, version, manifest), and the release is created last with the
+APKs attached. A failed build means no release, not an empty one.
+
+Every release carries two APKs, named without a version so
+`releases/latest/download/<name>` is a stable link:
+
+| APK | What it is |
+| --- | --- |
+| `Pulsar-android.apk` | **The one to install.** Client + phone-as-host screen sharing. No accessibility service. |
+| `Pulsar-android-hostcontrol.apk` | The same app **plus `PulsarA11yService`**, so a connected peer can *touch and control* this phone. |
+
+Why two: Google Play Protect refuses to install an app downloaded through a browser
+(or a messenger / file manager) when its manifest declares an **accessibility
+service** — "this app can access sensitive information" — and offers no override. The
+default APK therefore strips the service (`mobile/scripts/patch-android-no-a11y.py`)
+and the host screen says so; the host-control APK keeps it and is installed with
+`adb install Pulsar-android-hostcontrol.apk`.
+
+Signing needs the repo secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`,
+`ANDROID_KEY_PASSWORD`, `ANDROID_STORE_PASSWORD`; the build fails loudly without
+them. **iOS** store builds need a macOS runner + Apple signing and are done manually
+for now.
 
 ## License
 

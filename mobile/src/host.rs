@@ -966,6 +966,14 @@ pub async fn a11y_enabled<R: Runtime>(app: AppHandle<R>) -> Result<bool, String>
     Ok(app.pulsar_video().a11y_enabled().map(|r| r.ok).unwrap_or(false))
 }
 
+/// Whether the control AccessibilityService exists in this build at all. `false` in the
+/// default release APK, which strips it so Play Protect lets the app install from a
+/// browser; the host screen then offers screen sharing only and says why.
+#[tauri::command]
+pub async fn a11y_available<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(app.pulsar_video().a11y_available().map(|r| r.ok).unwrap_or(false))
+}
+
 /// Whether the "draw over other apps" overlay permission is granted — gates the
 /// visible remote-control cursor (injection works without it, just no pointer shown).
 #[tauri::command]

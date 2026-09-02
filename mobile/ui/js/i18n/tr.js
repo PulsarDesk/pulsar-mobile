@@ -583,6 +583,7 @@ export default {
 	"m.gamepad.rstick": "Sağ analog çubuk",
 	"m.host.a11yOn": "Uzaktan kontrol açık — karşı cihaz dokunarak kontrol edebilir.",
 	"m.host.a11yOnBtn": "Kontrol açık ✓",
+	"m.host.viewOnlyBuild": "Bu sürüm yalnızca ekranı paylaşır — karşı cihaz bu telefona dokunamaz, kontrol edemez. Uzaktan kontrol için GitHub sürümündeki host-control APK'sı gerekir ve adb ile kurulur: Google Play Protect, erişilebilirlik servisi bildiren uygulamaların tarayıcıdan kurulmasını engelliyor.",
 	"m.hud.ariaDecode": "{n} milisaniye çözme",
 	"m.hud.ariaFps": "{n} FPS",
 	"m.hud.ariaMbps": "{n} megabit/saniye",

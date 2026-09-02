@@ -315,6 +315,10 @@ function closeApprovalSheet() {
 // cursor. "Go online anyway" dismisses the cursor prompt so it never nags again.
 async function goOnline() {
 	if (going || isOnline) return;
+	// A build without the accessibility service (the default release APK — see
+	// a11yAvailable in the plugin) has no control permission to ask for: the cursor
+	// overlay only matters for control too, so go straight online, screen-share only.
+	if (hasTauri && !(await a11yAvailable())) { doGoOnline(); return; }
 	let a11y = false, overlay = false;
 	if (hasTauri) {
 		try { a11y = await invoke('a11y_enabled', {}); } catch (_) {}
@@ -447,8 +451,25 @@ async function respondRequest(allow) {
 	} catch (_) {}
 }
 
+// Whether this build carries the control AccessibilityService at all. Fixed for the
+// life of the process (it is a manifest property), so asked once and cached; `true`
+// when the command is missing (older backend) so nothing is hidden by mistake.
+let a11yAvail = null;
+async function a11yAvailable() {
+	if (a11yAvail === null) {
+		try { a11yAvail = await invoke('a11y_available', {}); } catch (_) { a11yAvail = true; }
+	}
+	return a11yAvail;
+}
+
 async function refreshA11y() {
 	if (!hasTauri) return;
+	const note = $('h-viewonly-note');
+	if (!(await a11yAvailable())) {
+		if (note) note.style.display = '';
+		return;
+	}
+	if (note) note.style.display = 'none';
 	try {
 		const on = await invoke('a11y_enabled', {});
 		const statusEl = $('ctrl-status');
@@ -592,6 +613,11 @@ function buildDOM(root) {
     <button id="h-online-btn" class="btn btn-primary">
       ${t('m.host.goOnline')}
     </button>
+    <!-- Shown only by the release APK that ships without the accessibility service
+         (refreshA11y): screen sharing works, remote touch does not, and here is why. -->
+    <p id="h-viewonly-note" class="msg" style="display:none;text-align:left;margin:12px 0 0;font-size:13px">
+      ${t('m.host.viewOnlyBuild')}
+    </p>
   </div>
 
   <!-- Connected peers (only meaningful while online) -->

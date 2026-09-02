@@ -798,6 +798,30 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
+     * Is the control AccessibilityService even DECLARED in this build?
+     *
+     * The default release APK strips it from the manifest (`scripts/patch-android-no-a11y.py`):
+     * Google Play Protect refuses to install an app downloaded from a browser when its
+     * manifest declares an accessibility service, so an APK that keeps it cannot be
+     * installed the normal way at all. The "host control" APK keeps the service and is
+     * installed over adb. The class itself is still compiled into both — only the manifest
+     * entry differs — so this asks the package manager rather than checking for the class.
+     */
+    @Command
+    fun a11yAvailable(invoke: Invoke) {
+        val r = JSObject(); r.put("ok", isA11yDeclared()); invoke.resolve(r)
+    }
+
+    private fun isA11yDeclared(): Boolean = try {
+        activity.packageManager.getServiceInfo(
+            ComponentName(activity, PulsarA11yService::class.java), 0
+        )
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    /**
      * True if the user has enabled Pulsar's AccessibilityService in system settings.
      * Checks the persisted GRANTED state (ENABLED_ACCESSIBILITY_SERVICES) rather than
      * `PulsarA11yService.instance != null` (whether the service is bound THIS instant):
