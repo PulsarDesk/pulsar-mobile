@@ -17,7 +17,7 @@
 
 import { invoke } from '../tauri.js';
 import { t } from '../i18n.js';
-import { relay, netmode, deviceName } from '../store/config.js';
+import { relay, netmode, deviceName, relayTotp } from '../store/config.js';
 
 let _overlay = null; // live overlay root (null when closed)
 
@@ -100,6 +100,7 @@ export function openGamesFetch(target, slot = 0) {
     password: '',
     netmode: netmode(),
     name: deviceName(),
+    relayTotp: relayTotp() || null,
   })
     .then((games) => renderGames(el, games || [], pick))
     .catch((e) => renderError(el, String(e && e.message ? e.message : e)));

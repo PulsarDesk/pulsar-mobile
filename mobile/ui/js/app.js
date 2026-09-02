@@ -33,7 +33,7 @@
 // screens render, so there's no light→dark flash on boot.
 import './theme.js';
 import { lang, setLang, t, applyI18n } from './i18n.js';
-import { getConfig, netmode } from './store/config.js';
+import { getConfig, netmode, relayTotp } from './store/config.js';
 import { getPref, setPref } from './store/prefs.js';
 import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill, setNetPillMode } from './router.js';
 import * as tauri            from './tauri.js';
@@ -296,6 +296,7 @@ function wireSessionBar() {
 				height:  0,
 				quality: 'balanced',
 				hdr:     false,
+				relayTotp: relayTotp() || null,
 			}).catch((e) => console.warn('[app] split connect error', e));
 		}
 	});

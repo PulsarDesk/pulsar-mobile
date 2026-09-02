@@ -51,6 +51,11 @@ pub struct MobileConfig {
     pub unattended_access: bool,
     /// Optional standing connect password (empty = OTP-only).
     pub connect_password: String,
+    /// Password for a relay that requires one (v4 relay auth). Stored so reconnects
+    /// don't re-prompt; empty for the public/open relay. Never sent as-is (the client
+    /// sends a nonce-bound proof). 2FA/TOTP is NOT stored (one-time per connect).
+    #[serde(default)]
+    pub relay_password: String,
     /// Preferred codec: `"auto"` / `"h265"` / `"h264"`.
     #[serde(default = "default_codec")]
     pub codec_pref: String,
@@ -104,6 +109,7 @@ impl From<&Config> for MobileConfig {
             language,
             unattended_access: c.unattended_access,
             connect_password: c.connect_password.clone(),
+            relay_password: c.relay_password.clone(),
             // Codec and quality are mobile-only fields not stored in core Config;
             // we default them here. W3-quality will persist them once that wave
             // adds a per-mobile config layer.
@@ -141,6 +147,7 @@ pub async fn set_config<R: Runtime>(
     language: Option<String>,
     unattended_access: Option<bool>,
     connect_password: Option<String>,
+    relay_password: Option<String>,
     codec_pref: Option<String>,
     quality_pref: Option<String>,
     node_port: Option<u16>,
@@ -177,6 +184,9 @@ pub async fn set_config<R: Runtime>(
     }
     if let Some(v) = connect_password {
         cfg.connect_password = v;
+    }
+    if let Some(v) = relay_password {
+        cfg.relay_password = v;
     }
     if let Some(v) = node_port {
         cfg.node_port = v;

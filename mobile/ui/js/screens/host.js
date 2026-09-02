@@ -29,7 +29,7 @@
 import { registerScreen } from '../router.js';
 import { invoke, listen, hasTauri, clipboard, share } from '../tauri.js';
 import { t } from '../i18n.js';
-import { getConfig } from '../store/config.js';
+import { getConfig, relayTotp, clearRelayTotp } from '../store/config.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -369,7 +369,8 @@ async function doGoOnline() {
 		const relay   = localStorage.getItem('pulsar.relay')   || '';
 		const name    = localStorage.getItem('pulsar.name')    || '';
 		const netmode = localStorage.getItem('pulsar.netmode') || 'auto';
-		const r = await invoke('go_online', { relay, name, netmode });
+		const r = await invoke('go_online', { relay, name, netmode, relayTotp: relayTotp() || null });
+		clearRelayTotp();
 		if (r && r.ok) {
 			isOnline = true;
 			myId = r.id;
@@ -383,7 +384,11 @@ async function doGoOnline() {
 			showToast(t('m.error'));
 		}
 	} catch (e) {
-		showToast(t('m.error') + ': ' + String(e));
+		clearRelayTotp();
+		const msg = String(e);
+		if (msg.includes('RELAY_AUTH_REQUIRED')) showToast(t('m.settings.relayAuthNeeded'));
+		else if (msg.includes('RELAY_AUTH_FAILED')) showToast(t('m.settings.relayAuthFailed'));
+		else showToast(t('m.error') + ': ' + msg);
 	} finally {
 		going = false;
 		renderStatus();

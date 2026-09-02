@@ -475,6 +475,7 @@ pub async fn go_online<R: Runtime>(
     relay: String,
     name: String,
     netmode: String,
+    relay_totp: Option<String>,
 ) -> Result<OnlineResult, String> {
     // ── Config fallback ───────────────────────────────────────────────────────
     let cfg = load_config(&app);
@@ -521,7 +522,8 @@ pub async fn go_online<R: Runtime>(
     // misroute inbound connections to a client node with no accept loop — the
     // incoming-request popup then never fired. See `net.rs`. Re-running go_online
     // reuses this node (only the OTP + accept loop are refreshed).
-    let (node, id) = crate::net::get_or_create_node(&app, relay_addr, mode, dev_name).await?;
+    let creds = crate::net::relay_creds(&cfg, relay_totp);
+    let (node, id) = crate::net::get_or_create_node(&app, relay_addr, mode, dev_name, creds).await?;
     // Capture the bound port now — `node` is moved into the accept loop below, so grab it
     // here for the offline-mode `ip:port` we return at the end.
     let node_port = node.local_addr().map(|a| a.port()).unwrap_or(0);

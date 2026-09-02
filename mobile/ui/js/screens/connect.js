@@ -24,7 +24,7 @@
 import { registerScreen }                                  from '../router.js';
 import { invoke, listen, hasTauri }                        from '../tauri.js';
 import { t }                                               from '../i18n.js';
-import { relay, netmode, deviceName, codec, quality, getConfig } from '../store/config.js';
+import { relay, netmode, deviceName, codec, quality, getConfig, relayTotp, clearRelayTotp } from '../store/config.js';
 import { isSaved, savedPeers }                              from '../store/peers.js';
 import { getPeerMeta, setPeerName, setPeerImage }          from '../store/peerMeta.js';
 import { getPref }                                         from '../store/prefs.js';
@@ -141,6 +141,8 @@ const CONN_TIMEOUT_MARKER = 'connect-timed-out';
  */
 function friendlyConnectError(raw) {
 	const m = String(raw).toLowerCase();
+	if (m.includes('relay_auth_required'))                    return t('m.settings.relayAuthNeeded');
+	if (m.includes('relay_auth_failed'))                      return t('m.settings.relayAuthFailed');
 	if (m.includes(CONN_TIMEOUT_MARKER))                      return t('connErr.timeout');
 	if (m.includes('relay did not respond'))                  return t('connErr.relayDown');
 	if (m.includes('could not be reached via the relay'))     return t('connErr.peerUnreachable');
@@ -636,7 +638,9 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 			// Game-mode: the host-side game to launch before streaming ('' = Desktop /
 			// whole screen). Undefined in remote mode → host streams the desktop.
 			gameId:      gameId ?? '',
+			relayTotp:   relayTotp() || null,
 		});
+		clearRelayTotp();
 
 		if (connectBtn) connectBtn.disabled = false;
 

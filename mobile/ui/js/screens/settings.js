@@ -26,7 +26,7 @@
 import { registerScreen }           from '../router.js';
 import { t, setLang, lang }         from '../i18n.js';
 import { theme, setTheme }          from '../theme.js';
-import { getConfig, setConfig }     from '../store/config.js';
+import { getConfig, setConfig, setRelayTotp } from '../store/config.js';
 import { getPref, setPref, gamepadTarget, setGamepadTarget } from '../store/prefs.js';
 import { invoke }                   from '../tauri.js';
 import { resolveFrameRate, refreshHz, resolveResolution } from './connect.js';
@@ -141,6 +141,21 @@ function buildSettingsDom(section) {
           placeholder="relay.pulsardesk.com:21116"
         />
         <span class="settings-field-hint" data-i18n="settings.relayDesc">${t('settings.relayDesc')}</span>
+        <div id="s-relay-e2e-badge" class="e2e-badge" style="display:none" data-i18n="settings.relayE2e">${t('settings.relayE2e')}</div>
+      </div>
+
+      <div class="field">
+        <label for="s-relay-pw" data-i18n="settings.relayPw">${t('settings.relayPw')}</label>
+        <input id="s-relay-pw" class="input" type="password" autocomplete="off" autocorrect="off"
+               autocapitalize="none" spellcheck="false" aria-label="${t('settings.relayPw')}" />
+        <span class="settings-field-hint" data-i18n="settings.relayPwDesc">${t('settings.relayPwDesc')}</span>
+      </div>
+
+      <div class="field">
+        <label for="s-relay-totp" data-i18n="settings.relay2fa">${t('settings.relay2fa')}</label>
+        <input id="s-relay-totp" class="input mono" type="text" inputmode="numeric" maxlength="8"
+               autocomplete="one-time-code" placeholder="000000" aria-label="${t('settings.relay2fa')}" />
+        <span class="settings-field-hint" data-i18n="settings.relay2faDesc">${t('settings.relay2faDesc')}</span>
       </div>
 
       <div class="field">
@@ -179,6 +194,30 @@ function buildSettingsDom(section) {
         <label for="s-relay-port" data-i18n="m.settings.localRelayPort">${t('m.settings.localRelayPort')}</label>
         <input id="s-relay-port" class="input mono" type="number" inputmode="numeric" min="1" max="65535" placeholder="21116" />
         <span class="settings-field-hint" data-i18n="m.settings.localRelayPortHint">${t('m.settings.localRelayPortHint')}</span>
+      </div>
+      <div class="field" style="margin-top:14px">
+        <label for="s-relay-host-pw" data-i18n="m.settings.hostRelayPw">${t('m.settings.hostRelayPw')}</label>
+        <input id="s-relay-host-pw" class="input" type="password" autocomplete="off" autocorrect="off"
+               autocapitalize="none" spellcheck="false" aria-label="${t('m.settings.hostRelayPw')}" />
+        <span class="settings-field-hint" data-i18n="m.settings.hostRelayPwHint">${t('m.settings.hostRelayPwHint')}</span>
+      </div>
+      <div class="field" style="margin-top:14px">
+        <label for="s-relay-host-totp" data-i18n="m.settings.hostRelay2fa">${t('m.settings.hostRelay2fa')}</label>
+        <input id="s-relay-host-totp" class="input mono" type="text" autocomplete="off" autocorrect="off"
+               autocapitalize="characters" spellcheck="false" placeholder="JBSWY3DPEHPK3PXP"
+               aria-label="${t('m.settings.hostRelay2fa')}" />
+        <span class="settings-field-hint" data-i18n="m.settings.hostRelay2faHint">${t('m.settings.hostRelay2faHint')}</span>
+      </div>
+      <div class="setting" style="margin-top:14px">
+        <div>
+          <div class="lbl" data-i18n="m.settings.hostRelayE2e">${t('m.settings.hostRelayE2e')}</div>
+          <div class="settings-field-hint" data-i18n="m.settings.hostRelayE2eHint">${t('m.settings.hostRelayE2eHint')}</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="s-relay-host-e2e" aria-label="${t('m.settings.hostRelayE2e')}" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
       </div>
       <div class="field" id="s-relay-addr-field" style="margin-top:14px;display:none">
         <label data-i18n="m.settings.localRelayAddr">${t('m.settings.localRelayAddr')}</label>
@@ -626,6 +665,32 @@ function renderControllers() {
 // Keep the Settings list live as controllers connect/disconnect.
 if (typeof window !== 'undefined') window.addEventListener('pulsar-pads-changed', renderControllers);
 
+/** Auth args for the relay this phone hosts, read from the client-only prefs. */
+function hostRelayAuthArgs() {
+  const pw = String(getPref('hostRelayPw') || '').trim();
+  const totp = String(getPref('hostRelayTotp') || '').trim();
+  const e2e = getPref('hostRelayE2e') === true;
+  return { password: pw || null, totp: totp || null, requireE2e: e2e };
+}
+
+/** If the local relay is live, stop + restart it so a changed port/auth takes effect. */
+async function restartLocalRelayIfRunning() {
+  const toggle = document.getElementById('s-local-relay');
+  if (!toggle || !toggle.checked) return;
+  const portEl = document.getElementById('s-relay-port');
+  let port = parseInt(portEl && portEl.value, 10);
+  if (!Number.isFinite(port) || port < 1 || port > 65535) port = 0;
+  try {
+    await invoke('stop_local_relay');
+    const st = await invoke('start_local_relay', { port, ...hostRelayAuthArgs() });
+    applyRelayStatus(st);
+    showToast(t('m.settings.localRelayStarted'));
+  } catch (e) {
+    if (String(e).includes('base32')) showToast(t('m.settings.hostRelay2faBad'));
+    else showToast(t('m.settings.localRelayFailed'));
+  }
+}
+
 function wireFields(section) {
   // ── Relay input: save on blur ──
   const relayEl = document.getElementById('s-relay');
@@ -635,6 +700,26 @@ function wireFields(section) {
       if (v) save({ relay: v });
     });
   }
+
+  // ── Relay password (v4 relay auth): persist on blur (empty = open relay) ──
+  const relayPwEl = document.getElementById('s-relay-pw');
+  if (relayPwEl) {
+    relayPwEl.addEventListener('blur', () => save({ relayPassword: relayPwEl.value }));
+  }
+  // ── Relay 2FA/TOTP: one-shot, NOT persisted — held in the config store, consumed by
+  // the next connect/go_online. ──
+  const relayTotpEl = document.getElementById('s-relay-totp');
+  if (relayTotpEl) {
+    relayTotpEl.addEventListener('input', () => setRelayTotp(relayTotpEl.value));
+  }
+  // ── Host-relay auth (for the relay THIS phone hosts): client-only prefs, applied when
+  // the local relay is (re)started. ──
+  const hostPwEl = document.getElementById('s-relay-host-pw');
+  if (hostPwEl) hostPwEl.addEventListener('blur', () => { setPref('hostRelayPw', hostPwEl.value); restartLocalRelayIfRunning(); });
+  const hostTotpEl = document.getElementById('s-relay-host-totp');
+  if (hostTotpEl) hostTotpEl.addEventListener('blur', () => { setPref('hostRelayTotp', hostTotpEl.value.trim()); restartLocalRelayIfRunning(); });
+  const hostE2eEl = document.getElementById('s-relay-host-e2e');
+  if (hostE2eEl) hostE2eEl.addEventListener('change', () => { setPref('hostRelayE2e', hostE2eEl.checked); restartLocalRelayIfRunning(); });
 
   // ── Network mode seg ──
   const netmodeSeg = document.getElementById('s-netmode');
@@ -729,14 +814,14 @@ function wireFields(section) {
         let port = parseInt(portEl && portEl.value, 10);
         if (!Number.isFinite(port) || port < 1 || port > 65535) port = 0; // 0 → rust default 21116
         try {
-          const st = await invoke('start_local_relay', { port });
+          const st = await invoke('start_local_relay', { port, ...hostRelayAuthArgs() });
           applyRelayStatus(st);
           showToast(t('m.settings.localRelayStarted'));
         } catch (e) {
           console.warn('[settings] start_local_relay error', e);
           relayToggle.checked = false;
           applyRelayStatus({ running: false });
-          showToast(t('m.settings.localRelayFailed'));
+          showToast(String(e).includes('base32') ? t('m.settings.hostRelay2faBad') : t('m.settings.localRelayFailed'));
         }
       } else {
         try { await invoke('stop_local_relay'); } catch (_) {}
@@ -757,7 +842,7 @@ function wireFields(section) {
       if (relayToggle && relayToggle.checked) {
         try {
           await invoke('stop_local_relay');
-          const st = await invoke('start_local_relay', { port: n });
+          const st = await invoke('start_local_relay', { port: n, ...hostRelayAuthArgs() });
           applyRelayStatus(st);
           showToast(t('m.settings.localRelayStarted'));
         } catch (e) {
@@ -924,6 +1009,22 @@ async function syncFieldsFromConfig() {
   if (devnameEl  && cfg.deviceName)  devnameEl.value = cfg.deviceName;
   if (unattendedEl)                { unattendedEl.checked = !!cfg.unattendedAccess; applyUnattendedUi(!!cfg.unattendedAccess); }
   if (cpwEl)                         cpwEl.value = cfg.connectPassword || '';
+  const relayPwEl2 = document.getElementById('s-relay-pw');
+  if (relayPwEl2)                    relayPwEl2.value = cfg.relayPassword || '';
+  // Host-relay auth (client-only prefs for the relay this phone hosts).
+  const hostPwEl2   = document.getElementById('s-relay-host-pw');
+  const hostTotpEl2 = document.getElementById('s-relay-host-totp');
+  const hostE2eEl2  = document.getElementById('s-relay-host-e2e');
+  if (hostPwEl2)   hostPwEl2.value   = String(getPref('hostRelayPw') || '');
+  if (hostTotpEl2) hostTotpEl2.value = String(getPref('hostRelayTotp') || '');
+  if (hostE2eEl2)  hostE2eEl2.checked = getPref('hostRelayE2e') === true;
+  // E2E-required badge: show it when the relay we're registered with forces E2E (v4).
+  const e2eBadge = document.getElementById('s-relay-e2e-badge');
+  if (e2eBadge) {
+    invoke('relay_e2e_status')
+      .then((on) => { e2eBadge.style.display = on ? '' : 'none'; })
+      .catch(() => {});
+  }
   if (nodePortEl) {
     nodePortEl.value = cfg.nodePort ? String(cfg.nodePort) : '';
     // Placeholder shows the live bound port (the random one currently in use), like

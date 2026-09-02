@@ -73,6 +73,11 @@ async fn lan_ip() -> String {
 pub async fn start_local_relay<R: Runtime>(
     app: AppHandle<R>,
     port: Option<u16>,
+    // v4: optional auth policy for the relay THIS phone hosts. All default to none/off, so
+    // an unconfigured local relay stays open exactly as before.
+    password: Option<String>,
+    totp: Option<String>,
+    require_e2e: Option<bool>,
 ) -> Result<RelayStatus, String> {
     let state = app.state::<LocalRelay>();
     let mut guard = state.0.lock().await;
@@ -84,9 +89,25 @@ pub async fn start_local_relay<R: Runtime>(
 
     let p = port.filter(|p| *p != 0).unwrap_or(DEFAULT_RELAY_PORT);
     let addr = SocketAddr::from(([0, 0, 0, 0], p));
+    // Build the optional auth policy. A base32 2FA secret is decoded up front so a typo
+    // fails here instead of silently rejecting every login.
+    let totp_secret = match totp.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(
+            pulsar_relay::base32_decode(s)
+                .filter(|b| !b.is_empty())
+                .ok_or_else(|| "2FA secret geçersiz (base32 olmalı)".to_string())?,
+        ),
+        None => None,
+    };
+    let auth = pulsar_relay::RelayAuth {
+        password: password.filter(|s| !s.is_empty()),
+        totp_secret,
+        require_e2e: require_e2e.unwrap_or(false),
+    };
     let relay = pulsar_relay::Relay::bind(addr)
         .await
-        .map_err(|e| format!("relay bind {addr} failed: {e}"))?;
+        .map_err(|e| format!("relay bind {addr} failed: {e}"))?
+        .with_auth(auth);
     // Use the actually-bound port (matters if the caller passed 0 explicitly via
     // a future "ephemeral" path; with our default it equals `p`).
     let bound = relay.local_addr().map(|a| a.port()).unwrap_or(p);

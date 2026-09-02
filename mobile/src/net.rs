@@ -24,7 +24,7 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::Mutex;
 
 use pulsar_core::proto::DeviceId;
-use pulsar_core::{Discovery, NetworkMode, Node};
+use pulsar_core::{ConnError, Discovery, NetworkMode, Node, RelayCreds};
 
 use crate::identity::load_identity;
 
@@ -111,6 +111,30 @@ pub struct SharedNodeInner {
     /// core `Node`'s relay address is immutable once bound, so a change means a rebuild.
     pub relay_addr: SocketAddr,
     pub mode: NetworkMode,
+    /// The relay's advertised E2E policy learned at registration (v4). Pulsar always
+    /// encrypts; this drives the "E2E zorunlu" UI indicator only.
+    pub e2e_required: bool,
+}
+
+/// Build [`RelayCreds`] from the persisted relay password plus a one-shot TOTP code the
+/// UI supplies for this connect (both optional). Empty strings map to `None`.
+pub(crate) fn relay_creds(cfg: &pulsar_core::Config, totp: Option<String>) -> RelayCreds {
+    RelayCreds {
+        password: Some(cfg.relay_password.clone()).filter(|s| !s.is_empty()),
+        totp: totp.filter(|s| !s.trim().is_empty()),
+    }
+}
+
+/// Map a registration error into the wire string the JS layer recognises: relay-auth
+/// signals get a stable prefix so the UI can prompt; everything else is passed through.
+fn map_register_err(e: ConnError) -> String {
+    match e {
+        ConnError::RelayAuthRequired { password, totp } => {
+            format!("RELAY_AUTH_REQUIRED:{password}:{totp}")
+        }
+        ConnError::RelayAuthFailed => "RELAY_AUTH_FAILED".to_string(),
+        other => format!("{other}"),
+    }
 }
 
 /// Return the shared node, binding + registering it on the FIRST call. Later callers
@@ -131,6 +155,7 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
     relay_addr: SocketAddr,
     mode: NetworkMode,
     dev_name: String,
+    creds: RelayCreds,
 ) -> Result<(Arc<Node>, DeviceId), String> {
     let shared = app.state::<SharedNode>();
     let mut g = shared.0.lock().await;
@@ -140,8 +165,20 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
             // retry registration now — the relay may have come back — so a second
             // go_online upgrades offline → online WITHOUT a rebind.
             if inner.my_id.0 < DeviceId::MIN {
-                if let Ok(id) = inner.node.register().await {
-                    inner.my_id = id;
+                // Update the credentials (a Settings password change or a fresh 2FA code)
+                // before retrying so a relay that requires auth can now be satisfied.
+                inner.node.set_relay_creds(creds);
+                match inner.node.register().await {
+                    Ok(id) => {
+                        inner.my_id = id;
+                        inner.e2e_required = inner.node.relay_e2e_required().await;
+                    }
+                    Err(e @ (ConnError::RelayAuthRequired { .. } | ConnError::RelayAuthFailed)) => {
+                        return Err(map_register_err(e));
+                    }
+                    Err(e) => {
+                        log::info!("pulsar: relay register retry failed ({e:?}) — staying offline");
+                    }
                 }
             }
             return Ok((inner.node.clone(), inner.my_id));
@@ -157,7 +194,7 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
         .parse()
         .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
     let identity = load_identity(app);
-    let node = Node::bind_with_identity(local, relay_addr, mode, dev_name, identity)
+    let node = Node::bind_with_identity_creds(local, relay_addr, mode, dev_name, identity, creds)
         .await
         .map_err(|e| format!("bind failed: {e}"))?;
     // Register is BEST-EFFORT: if the relay is unreachable we still keep the node bound +
@@ -166,11 +203,24 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
     // marks "no relay id yet"; a later go_online retries registration (see the reuse path
     // above). Previously a register failure `?`-returned here and dropped the node, so a
     // relay outage killed even relay-less direct connects + hosting.
-    let my_id = match node.register().await {
-        Ok(id) => id,
+    let (my_id, e2e_required) = match node.register().await {
+        Ok(id) => (id, node.relay_e2e_required().await),
+        Err(e @ (ConnError::RelayAuthRequired { .. } | ConnError::RelayAuthFailed)) => {
+            // The relay REQUIRES auth and we couldn't satisfy it. Keep the bound node so a
+            // retry (with a password/2FA the user then enters) reuses it via the offline
+            // path above, but surface the auth signal so the UI prompts.
+            *g = Some(SharedNodeInner {
+                node: node.clone(),
+                my_id: DeviceId(0),
+                relay_addr,
+                mode,
+                e2e_required: false,
+            });
+            return Err(map_register_err(e));
+        }
         Err(e) => {
             log::info!("pulsar: relay unreachable ({e:?}) — offline mode, node still bound + serving");
-            DeviceId(0)
+            (DeviceId(0), false)
         }
     };
     *g = Some(SharedNodeInner {
@@ -178,6 +228,7 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
         my_id,
         relay_addr,
         mode,
+        e2e_required,
     });
     Ok((node, my_id))
 }
@@ -244,4 +295,14 @@ pub(crate) async fn stop_announcing<R: Runtime>(app: &AppHandle<R>) {
     if let Some(d) = app.state::<SharedDiscovery>().0.lock().await.as_ref() {
         d.set_paused(true);
     }
+}
+
+/// Whether the relay this device last registered with advertised E2E-required (v4).
+/// Pulsar sessions are always end-to-end encrypted, so this is a UI indicator only.
+/// JS: `invoke('relay_e2e_status')` → bool.
+#[tauri::command]
+pub async fn relay_e2e_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    let shared = app.state::<SharedNode>();
+    let g = shared.0.lock().await;
+    Ok(g.as_ref().map(|i| i.e2e_required).unwrap_or(false))
 }
