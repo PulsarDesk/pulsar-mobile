@@ -34,7 +34,7 @@ const LS_KEY = 'pulsar.config.v1';
 // Defaults (must match Rust defaults: DEFAULT_RELAY, NetworkMode::Auto, etc.)
 // ---------------------------------------------------------------------------
 const DEFAULTS = {
-  relay: '127.0.0.1:21116',
+  relay: 'relay.pulsardesk.com:21116',
   networkMode: 'auto',
   deviceName: 'Pulsar Cihazı',
   language: 'tr',
@@ -182,7 +182,7 @@ export async function setConfig(patch) {
 // Call getConfig() (awaited) on app boot to warm the cache before using these.
 // ---------------------------------------------------------------------------
 
-/** @returns {string} relay host:port — e.g. "127.0.0.1:21116" */
+/** @returns {string} relay host:port — e.g. "relay.pulsardesk.com:21116" */
 export function relay() {
   return _cache ? _cache.relay : DEFAULTS.relay;
 }

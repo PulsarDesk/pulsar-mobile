@@ -138,7 +138,7 @@ function buildSettingsDom(section) {
           spellcheck="false"
           data-i18n-aria="settings.relayAria"
           aria-label="${t('settings.relayAria')}"
-          placeholder="127.0.0.1:21116"
+          placeholder="relay.pulsardesk.com:21116"
         />
         <span class="settings-field-hint" data-i18n="settings.relayDesc">${t('settings.relayDesc')}</span>
       </div>
