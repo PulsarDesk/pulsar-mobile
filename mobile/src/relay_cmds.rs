@@ -11,6 +11,7 @@
 //!   - `start_local_relay { port? }` → RelayStatus   (idempotent; default port 21116)
 //!   - `stop_local_relay`           → RelayStatus
 //!   - `local_relay_status`         → RelayStatus
+//!   - `generate_relay_totp`        → TotpEnrollment (2FA enrollment: QR + manual code)
 //!
 //! The running task is held in [`LocalRelay`] managed state and stopped by
 //! aborting it (which drops the UDP socket).
@@ -134,6 +135,60 @@ pub async fn stop_local_relay<R: Runtime>(app: AppHandle<R>) -> Result<RelayStat
         log::info!("[relay] local relay stopped");
     }
     Ok(RelayStatus::stopped())
+}
+
+/// A 2FA enrollment for the relay this phone hosts: what to scan, what to type when a
+/// QR can't be scanned, and the secret the relay must run with.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TotpEnrollment {
+    /// Base32 shared secret — what `start_local_relay`'s `totp` argument takes.
+    pub secret: String,
+    /// The same secret in 4-character groups, for manual entry into an authenticator.
+    pub secret_grouped: String,
+    /// `otpauth://totp/…` URI (what the QR encodes).
+    pub uri: String,
+    /// The URI rendered as a scannable QR — a complete inline SVG document.
+    pub qr_svg: String,
+}
+
+/// Mint (or re-display) a TOTP enrollment for the phone-hosted relay.
+///
+/// With a non-empty `existing` base32 secret this re-renders THAT secret's QR, so a user
+/// who lost the code can recover it without invalidating devices already enrolled;
+/// otherwise a fresh 160-bit secret is minted. Nothing is stored here — the caller decides
+/// whether to start the relay with the returned secret.
+///
+/// JS: `invoke('generate_relay_totp', { label, existing })` → [`TotpEnrollment`].
+#[tauri::command]
+pub async fn generate_relay_totp(
+    label: Option<String>,
+    existing: Option<String>,
+) -> Result<TotpEnrollment, String> {
+    // Label the authenticator entry with the address peers actually dial, so a user
+    // hosting relays on several devices can tell the entries apart.
+    let label = match label.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(l) => l,
+        None => match lan_ip().await {
+            ip if !ip.is_empty() => format!("{ip}:{DEFAULT_RELAY_PORT}"),
+            _ => "Pulsar relay".to_string(),
+        },
+    };
+    let e = match existing.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => {
+            pulsar_relay::base32_decode(s)
+                .filter(|b| !b.is_empty())
+                .ok_or_else(|| "2FA secret geçersiz (base32 olmalı)".to_string())?;
+            pulsar_relay::enrollment_from_secret(s, &label, "Pulsar")
+        }
+        None => pulsar_relay::generate_totp(&label, "Pulsar"),
+    };
+    Ok(TotpEnrollment {
+        secret: e.secret,
+        secret_grouped: e.secret_grouped,
+        uri: e.uri,
+        qr_svg: e.qr_svg,
+    })
 }
 
 /// Current local-relay status (for the Settings toggle to reflect on mount).

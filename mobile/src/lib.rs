@@ -130,6 +130,7 @@ pub fn run() {
             relay_cmds::start_local_relay,
             relay_cmds::stop_local_relay,
             relay_cmds::local_relay_status,
+            relay_cmds::generate_relay_totp,
             net::relay_e2e_status,
             // ── Side-channel data (W4-rust-data, datachan.rs) ─────────────────
             datachan::send_clipboard,

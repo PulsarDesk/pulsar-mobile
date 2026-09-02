@@ -207,6 +207,8 @@ function buildSettingsDom(section) {
                autocapitalize="characters" spellcheck="false" placeholder="JBSWY3DPEHPK3PXP"
                aria-label="${t('m.settings.hostRelay2fa')}" />
         <span class="settings-field-hint" data-i18n="m.settings.hostRelay2faHint">${t('m.settings.hostRelay2faHint')}</span>
+        <button class="btn btn-ghost totp-gen-btn" id="s-relay-totp-gen"
+                data-i18n="m.settings.totpGen">${t('m.settings.totpGen')}</button>
       </div>
       <div class="setting" style="margin-top:14px">
         <div>
@@ -593,6 +595,91 @@ function confirmUnattended() {
 }
 
 /**
+ * 2FA (TOTP) enrollment bottom sheet for the relay THIS phone hosts.
+ *
+ * Without this the user would have to invent a base32 secret by hand. Here they get the
+ * two things an authenticator setup actually needs: a QR to scan, and the same secret as
+ * a typed code for when scanning isn't possible (no camera, the QR is on this very
+ * screen, etc.). The generated secret is written into the host-relay 2FA field, so
+ * starting the relay uses it.
+ *
+ * `existing` (the secret currently in the field) re-displays THAT enrollment instead of
+ * rotating it — losing the QR must not force every already-enrolled device to re-enroll.
+ */
+async function openTotpEnrollment() {
+  const totpEl = document.getElementById('s-relay-host-totp');
+  const raw = String((totpEl && totpEl.value) || '').trim();
+  // Only treat the field as an existing enrollment when it's plausibly base32. Garbage in
+  // the field was never a working secret (the relay refuses to start with it), so minting
+  // a fresh one is right — and it stops a typo from dead-ending the "generate" button on a
+  // validation error the user can't clear from here.
+  const existing = /^[A-Za-z2-7= -]+$/.test(raw) ? raw : '';
+  // Label the authenticator entry with the address peers already see (shown once the
+  // relay is running); otherwise let Rust fall back to this device's LAN IP.
+  const addr = document.getElementById('s-relay-addr');
+  const label = (addr ? addr.textContent.trim() : '') || null;
+
+  let enroll;
+  try {
+    enroll = await invoke('generate_relay_totp', { label, existing: existing || null });
+  } catch (e) {
+    showToast(String(e).includes('base32') ? t('m.settings.hostRelay2faBad') : t('m.settings.totpGenFailed'));
+    return;
+  }
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheet-backdrop';
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet totp-sheet';
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-modal', 'true');
+  // NOTE: `qrSvg` is injected as markup on purpose. It is NOT user input — it is an SVG
+  // document generated in our own Rust (the `qrcode` crate) from an otpauth URI we built,
+  // never from anything the network or another device supplied. Everything else below is
+  // interpolated as text.
+  sheet.innerHTML = `
+    <div class="sheet-handle"></div>
+    <div style="font-size:17px;font-weight:700;margin:2px 2px 6px;">${t('m.settings.totpTitle')}</div>
+    <div style="font-size:13px;color:var(--text-muted);line-height:1.45;margin:0 2px 14px;">${t('m.settings.totpScanHint')}</div>
+    <div class="totp-qr" id="totp-qr">${enroll.qrSvg}</div>
+    <div style="font-size:13px;color:var(--text-muted);line-height:1.45;margin:14px 2px 6px;">${t('m.settings.totpManual')}</div>
+    <div id="totp-code" class="relay-addr mono" role="button" tabindex="0"
+         aria-label="${t('m.settings.totpCopy')}"></div>
+    <div style="font-size:12.5px;color:var(--text-muted);line-height:1.45;margin:12px 2px 16px;">${t('m.settings.totpNote')}</div>
+    <button class="btn" style="width:100%" id="totp-done">${t('m.settings.totpDone')}</button>`;
+  document.body.appendChild(backdrop);
+  document.body.appendChild(sheet);
+  // Text content, not markup — the secret goes in as data.
+  const codeEl = sheet.querySelector('#totp-code');
+  codeEl.textContent = enroll.secretGrouped;
+  requestAnimationFrame(() => { backdrop.classList.add('open'); sheet.classList.add('open'); });
+
+  const close = () => {
+    backdrop.classList.remove('open'); sheet.classList.remove('open');
+    setTimeout(() => { backdrop.remove(); sheet.remove(); }, 280);
+  };
+  const copy = async () => {
+    try {
+      if (navigator.clipboard) await navigator.clipboard.writeText(enroll.secret);
+    } catch (_) {}
+    if (navigator.vibrate) { try { navigator.vibrate(20); } catch (_) {} }
+    showToast(t('m.settings.totpCopied'));
+  };
+  codeEl.addEventListener('click', copy);
+  codeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copy(); } });
+  sheet.querySelector('#totp-done').addEventListener('click', close);
+  backdrop.addEventListener('click', close);
+
+  // Adopt the secret: fill the field, persist it, and restart a running relay so the
+  // enrollment the user just scanned is the one the relay actually enforces.
+  if (totpEl && enroll.secret !== existing) {
+    totpEl.value = enroll.secret;
+    setPref('hostRelayTotp', enroll.secret);
+    restartLocalRelayIfRunning();
+  }
+}
+
+/**
  * Open-source licenses bottom sheet. Loads `licenses.json` (every Rust dependency
  * + its SPDX license, generated from `cargo metadata`) and renders them grouped by
  * license, under the project's own GPLv3 line.
@@ -718,6 +805,9 @@ function wireFields(section) {
   if (hostPwEl) hostPwEl.addEventListener('blur', () => { setPref('hostRelayPw', hostPwEl.value); restartLocalRelayIfRunning(); });
   const hostTotpEl = document.getElementById('s-relay-host-totp');
   if (hostTotpEl) hostTotpEl.addEventListener('blur', () => { setPref('hostRelayTotp', hostTotpEl.value.trim()); restartLocalRelayIfRunning(); });
+  // "2FA oluştur": mint (or re-show) an enrollment — QR to scan + code to type.
+  const totpGenEl = document.getElementById('s-relay-totp-gen');
+  if (totpGenEl) totpGenEl.addEventListener('click', () => { openTotpEnrollment(); });
   const hostE2eEl = document.getElementById('s-relay-host-e2e');
   if (hostE2eEl) hostE2eEl.addEventListener('change', () => { setPref('hostRelayE2e', hostE2eEl.checked); restartLocalRelayIfRunning(); });
 
@@ -1240,6 +1330,25 @@ registerScreen({
       mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='9' y='9' width='11' height='11' rx='2'/><path d='M5 15V5a2 2 0 0 1 2-2h10'/></svg>") center/contain no-repeat;
       opacity: 0.7;
     }
+    /* 2FA enrollment: the generate button + the QR/manual-code sheet. */
+    .totp-gen-btn {
+      align-self: flex-start;
+      margin-top: 10px;
+      padding: 8px 14px;
+      font-size: 14px;
+    }
+    .totp-sheet { max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .totp-qr {
+      display: flex;
+      justify-content: center;
+      background: oklch(1 0 0);
+      border: 1px solid var(--border, oklch(0.9 0.01 270));
+      border-radius: var(--r-md, 12px);
+      padding: 12px;
+    }
+    /* The QR renders at its natural size; clamp it to the sheet width and keep it crisp
+       (no smoothing across module edges). */
+    .totp-qr svg { width: 100%; max-width: 260px; height: auto; image-rendering: pixelated; }
     .licenses-sheet { max-height: 82vh; display: flex; flex-direction: column; }
     .licenses-list { overflow-y: auto; flex: 1; min-height: 0; -webkit-overflow-scrolling: touch; padding-bottom: 8px; }
     .lic-self { font-weight: 700; color: var(--brand); margin-bottom: 4px; }
