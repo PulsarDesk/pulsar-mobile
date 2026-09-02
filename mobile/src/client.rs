@@ -1010,6 +1010,7 @@ pub async fn list_remote_games<R: Runtime>(
     password: String,
     netmode: String,
     name: String,
+    relay_password: Option<String>,
     relay_totp: Option<String>,
 ) -> Result<Vec<GameDto>, String> {
     // Cancel any stale read loop on the fetch slot before binding.
@@ -1028,8 +1029,9 @@ pub async fn list_remote_games<R: Runtime>(
     };
     let net_mode = if netmode.is_empty() { cfg.network_mode } else { parse_mode(&netmode) };
 
+    let creds = crate::net::relay_creds(&cfg, &relay_str, relay_password, relay_totp);
     let (node, _my_id) =
-        crate::net::get_or_create_node(&app, relay_addr, net_mode, dev_name, crate::net::relay_creds(&cfg, relay_totp)).await?;
+        crate::net::get_or_create_node(&app, relay_addr, &relay_str, net_mode, dev_name, creds).await?;
 
     // Connect (relay ID or IP:port), inside the overall connect budget.
     let mut sess = timeout(CONNECT_TIMEOUT, async {
@@ -1096,8 +1098,11 @@ pub async fn connect_host<R: Runtime>(
     // game-mode: host-side id to launch before streaming ("" / "desktop" = whole
     // screen). Option so an older JS caller omitting it still deserializes.
     game_id: Option<String>,
-    // v4 relay auth: a one-shot TOTP/2FA code the UI supplies for this connect (the relay
-    // password comes from the persisted config). Option so an older JS caller still decodes.
+    // v5 relay auth: ONE-SHOT credentials from the connect-time prompt, used for this
+    // registration only and never stored — the relay's durable access key (kept in the
+    // core config) is what authenticates later connects. Option so an older JS caller
+    // omitting them still decodes.
+    relay_password: Option<String>,
     relay_totp: Option<String>,
 ) -> Result<ConnectResult, String> {
     let game_id = game_id.unwrap_or_default();
@@ -1150,7 +1155,15 @@ pub async fn connect_host<R: Runtime>(
     // incoming-request popup never fired. `get_or_create_node` binds+registers once
     // and is reused by both roles.
     let (node, my_id) =
-        crate::net::get_or_create_node(&app, relay_addr, net_mode, dev_name.clone(), crate::net::relay_creds(&cfg, relay_totp)).await?;
+        crate::net::get_or_create_node(
+            &app,
+            relay_addr,
+            &relay_str,
+            net_mode,
+            dev_name.clone(),
+            crate::net::relay_creds(&cfg, &relay_str, relay_password, relay_totp),
+        )
+        .await?;
 
     let connect_result = timeout(CONNECT_TIMEOUT, async {
         // ── W2-ipconnect: branch on DeviceId vs SocketAddr ───────────────────

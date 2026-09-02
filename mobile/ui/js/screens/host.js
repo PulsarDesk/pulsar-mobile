@@ -29,7 +29,8 @@
 import { registerScreen } from '../router.js';
 import { invoke, listen, hasTauri, clipboard, share } from '../tauri.js';
 import { t } from '../i18n.js';
-import { getConfig, relayTotp, clearRelayTotp } from '../store/config.js';
+import { getConfig } from '../store/config.js';
+import { withRelayAuth } from '../relay-auth.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -369,8 +370,11 @@ async function doGoOnline() {
 		const relay   = localStorage.getItem('pulsar.relay')   || '';
 		const name    = localStorage.getItem('pulsar.name')    || '';
 		const netmode = localStorage.getItem('pulsar.netmode') || 'auto';
-		const r = await invoke('go_online', { relay, name, netmode, relayTotp: relayTotp() || null });
-		clearRelayTotp();
+		// A relay that demands credentials prompts HERE (once per device); afterwards its
+		// access key registers us silently.
+		const r = await withRelayAuth(relay, (creds) =>
+			invoke('go_online', { relay, name, netmode, ...creds })
+		);
 		if (r && r.ok) {
 			isOnline = true;
 			myId = r.id;
@@ -384,10 +388,10 @@ async function doGoOnline() {
 			showToast(t('m.error'));
 		}
 	} catch (e) {
-		clearRelayTotp();
 		const msg = String(e);
-		if (msg.includes('RELAY_AUTH_REQUIRED')) showToast(t('m.settings.relayAuthNeeded'));
-		else if (msg.includes('RELAY_AUTH_FAILED')) showToast(t('m.settings.relayAuthFailed'));
+		// The user dismissed the relay-auth sheet — that's a choice, not an error.
+		if (e && e.cancelled) { /* stay quiet */ }
+		else if (msg.includes('RELAY_AUTH_FAILED')) showToast(t('m.relayAuth.failed'));
 		else showToast(t('m.error') + ': ' + msg);
 	} finally {
 		going = false;

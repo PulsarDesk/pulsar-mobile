@@ -17,7 +17,8 @@
 
 import { invoke } from '../tauri.js';
 import { t } from '../i18n.js';
-import { relay, netmode, deviceName, relayTotp } from '../store/config.js';
+import { relay, netmode, deviceName } from '../store/config.js';
+import { withRelayAuth } from '../relay-auth.js';
 
 let _overlay = null; // live overlay root (null when closed)
 
@@ -94,16 +95,19 @@ export function openGamesFetch(target, slot = 0) {
   // Fetch the host library. Password '' — if the host needs an OTP the auth-prompt
   // sheet fires (session.js, keyed on the reserved fetch slot) exactly like a
   // normal connect.
-  invoke('list_remote_games', {
-    relay: relay(),
-    target,
-    password: '',
-    netmode: netmode(),
-    name: deviceName(),
-    relayTotp: relayTotp() || null,
-  })
+  withRelayAuth(relay(), (creds) =>
+    invoke('list_remote_games', {
+      relay: relay(),
+      target,
+      password: '',
+      netmode: netmode(),
+      name: deviceName(),
+      ...creds,
+    })
+  )
     .then((games) => renderGames(el, games || [], pick))
-    .catch((e) => renderError(el, String(e && e.message ? e.message : e)));
+    // A dismissed relay-auth sheet is a cancel: leave the panel as-is, don't shout.
+    .catch((e) => { if (!(e && e.cancelled)) renderError(el, String(e && e.message ? e.message : e)); });
 }
 
 /** Render the fetched library: pinned Desktop card + one card per game. */

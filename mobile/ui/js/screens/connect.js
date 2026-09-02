@@ -24,7 +24,8 @@
 import { registerScreen }                                  from '../router.js';
 import { invoke, listen, hasTauri }                        from '../tauri.js';
 import { t }                                               from '../i18n.js';
-import { relay, netmode, deviceName, codec, quality, getConfig, relayTotp, clearRelayTotp } from '../store/config.js';
+import { relay, netmode, deviceName, codec, quality, getConfig } from '../store/config.js';
+import { withRelayAuth } from '../relay-auth.js';
 import { isSaved, savedPeers }                              from '../store/peers.js';
 import { getPeerMeta, setPeerName, setPeerImage }          from '../store/peerMeta.js';
 import { getPref }                                         from '../store/prefs.js';
@@ -141,8 +142,9 @@ const CONN_TIMEOUT_MARKER = 'connect-timed-out';
  */
 function friendlyConnectError(raw) {
 	const m = String(raw).toLowerCase();
-	if (m.includes('relay_auth_required'))                    return t('m.settings.relayAuthNeeded');
-	if (m.includes('relay_auth_failed'))                      return t('m.settings.relayAuthFailed');
+	// relay_auth_required never reaches here any more — withRelayAuth turns it into the
+	// credential prompt. A `failed` that escapes means the user gave up on the sheet.
+	if (m.includes('relay_auth_failed'))                      return t('m.relayAuth.failed');
 	if (m.includes(CONN_TIMEOUT_MARKER))                      return t('connErr.timeout');
 	if (m.includes('relay did not respond'))                  return t('connErr.relayDown');
 	if (m.includes('could not be reached via the relay'))     return t('connErr.peerUnreachable');
@@ -618,7 +620,9 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 	const codecPref = codec();
 
 	try {
-		const r = await invoke('connect_host', {
+		// A relay demanding credentials prompts HERE (once per device); its access key
+		// registers us silently afterwards.
+		const r = await withRelayAuth(relay(), (creds) => invoke('connect_host', {
 			relay:       relayAddr,
 			target:      normTarget,
 			// Always start with no password; if the host requires one it replies
@@ -638,9 +642,8 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 			// Game-mode: the host-side game to launch before streaming ('' = Desktop /
 			// whole screen). Undefined in remote mode → host streams the desktop.
 			gameId:      gameId ?? '',
-			relayTotp:   relayTotp() || null,
-		});
-		clearRelayTotp();
+			...creds,
+		}));
 
 		if (connectBtn) connectBtn.disabled = false;
 
@@ -692,6 +695,8 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 		// Clear in-session state so the user can try again
 		document.body.classList.remove('in-session');
 		try { cancelConnecting(false); } catch (_) {}
+		// Dismissing the relay-auth sheet is a deliberate cancel, not a failure to report.
+		if (e && e.cancelled) return;
 		const raw = e && e.message ? e.message : String(e);
 		const msg = friendlyConnectError(raw);
 		say(msg, true);

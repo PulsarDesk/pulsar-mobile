@@ -181,8 +181,9 @@ fn normalise_codec_name(raw: &str) -> String {
 ///   - `PulsarVideo::host_codecs(&self)` to both `mobile.rs` and `desktop.rs`
 ///     (`desktop.rs` returns `noop("no MediaCodecList on desktop")`).
 ///
-/// Once those additions are present, replace the stub body below with:
-/// ```rust
+/// Once those additions are present, replace the stub body below with (a sketch of code
+/// that does not exist yet, so rustdoc must not try to compile it):
+/// ```ignore
 /// let raw_codecs: Vec<String> = match app.pulsar_video().host_codecs() {
 ///     Ok(resp) if resp.ok && !resp.detail.is_empty() => {
 ///         parse_string_array(&resp.detail)
@@ -468,13 +469,16 @@ async fn approval_race<R: Runtime>(
 ///
 /// `relay`, `name`, and `netmode` fall back to the persisted [`Config`] when empty.
 ///
-/// JS: `invoke('go_online', { relay, name, netmode })` → `OnlineResult`
+/// JS: `invoke('go_online', { relay, name, netmode, relayPassword, relayTotp })` →
+/// `OnlineResult`. The two credential args are ONE-SHOT values from the relay-auth
+/// prompt; they are never stored (the relay's access key is, see `net::relay_creds`).
 #[tauri::command]
 pub async fn go_online<R: Runtime>(
     app: AppHandle<R>,
     relay: String,
     name: String,
     netmode: String,
+    relay_password: Option<String>,
     relay_totp: Option<String>,
 ) -> Result<OnlineResult, String> {
     // ── Config fallback ───────────────────────────────────────────────────────
@@ -500,9 +504,14 @@ pub async fn go_online<R: Runtime>(
     }
 
     // ── Build fresh OTP / HostState ───────────────────────────────────────────
-    let password = if unattended && !connect_password.is_empty() {
-        // Unattended with standing password: surface that password on the screen.
-        connect_password.clone()
+    // Unattended access means NO authentication at all — no approval prompt and no
+    // password — matching the desktop app and what this screen already shows (the OTP row
+    // is replaced by a warning banner while it's on). The stored connect password is
+    // deliberately NOT used as a standing credential here: the two apps disagreed, the
+    // setting's own description promises "without approval", and a password the UI never
+    // displays is one nobody can actually use.
+    let password = if unattended {
+        String::new()
     } else {
         gen_password()
     };
@@ -522,8 +531,9 @@ pub async fn go_online<R: Runtime>(
     // misroute inbound connections to a client node with no accept loop — the
     // incoming-request popup then never fired. See `net.rs`. Re-running go_online
     // reuses this node (only the OTP + accept loop are refreshed).
-    let creds = crate::net::relay_creds(&cfg, relay_totp);
-    let (node, id) = crate::net::get_or_create_node(&app, relay_addr, mode, dev_name, creds).await?;
+    let creds = crate::net::relay_creds(&cfg, &relay_str, relay_password, relay_totp);
+    let (node, id) =
+        crate::net::get_or_create_node(&app, relay_addr, &relay_str, mode, dev_name, creds).await?;
     // Capture the bound port now — `node` is moved into the accept loop below, so grab it
     // here for the offline-mode `ip:port` we return at the end.
     let node_port = node.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -563,8 +573,10 @@ pub async fn go_online<R: Runtime>(
                             .unwrap_or_else(|| "?.?.?.?".to_string());
 
                         // ── Auth ──────────────────────────────────────────────
-                        let authed = if unatt && cpw.is_empty() {
-                            // Unattended with no password: auto-accept, skip OTP.
+                        let authed = if unatt {
+                            // Unattended: auto-accept, skip both the OTP and the approval
+                            // prompt. Unconditional — a stored connect password does not
+                            // turn this back into a gated path (see the note above).
                             let _ = recv_auth(&mut sess).await;
                             let _ = accept(&mut sess).await;
                             true

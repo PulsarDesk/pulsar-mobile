@@ -26,7 +26,7 @@
 import { registerScreen }           from '../router.js';
 import { t, setLang, lang }         from '../i18n.js';
 import { theme, setTheme }          from '../theme.js';
-import { getConfig, setConfig, setRelayTotp } from '../store/config.js';
+import { getConfig, setConfig } from '../store/config.js';
 import { getPref, setPref, gamepadTarget, setGamepadTarget } from '../store/prefs.js';
 import { invoke }                   from '../tauri.js';
 import { resolveFrameRate, refreshHz, resolveResolution } from './connect.js';
@@ -138,24 +138,18 @@ function buildSettingsDom(section) {
           spellcheck="false"
           data-i18n-aria="settings.relayAria"
           aria-label="${t('settings.relayAria')}"
-          placeholder="relay.pulsardesk.com:21116"
+          placeholder="relay.pulsardesk.com"
         />
         <span class="settings-field-hint" data-i18n="settings.relayDesc">${t('settings.relayDesc')}</span>
         <div id="s-relay-e2e-badge" class="e2e-badge" style="display:none" data-i18n="settings.relayE2e">${t('settings.relayE2e')}</div>
       </div>
 
+      <!-- Relay auth STATUS only. Credentials are asked for by a prompt at connect time
+           and never stored; the relay's durable access key (backend-only) is what makes
+           later connects silent. So there is deliberately no password/2FA field here. -->
       <div class="field">
-        <label for="s-relay-pw" data-i18n="settings.relayPw">${t('settings.relayPw')}</label>
-        <input id="s-relay-pw" class="input" type="password" autocomplete="off" autocorrect="off"
-               autocapitalize="none" spellcheck="false" aria-label="${t('settings.relayPw')}" />
-        <span class="settings-field-hint" data-i18n="settings.relayPwDesc">${t('settings.relayPwDesc')}</span>
-      </div>
-
-      <div class="field">
-        <label for="s-relay-totp" data-i18n="settings.relay2fa">${t('settings.relay2fa')}</label>
-        <input id="s-relay-totp" class="input mono" type="text" inputmode="numeric" maxlength="8"
-               autocomplete="one-time-code" placeholder="000000" aria-label="${t('settings.relay2fa')}" />
-        <span class="settings-field-hint" data-i18n="settings.relay2faDesc">${t('settings.relay2faDesc')}</span>
+        <label data-i18n="settings.relayAuth">${t('settings.relayAuth')}</label>
+        <div id="s-relay-auth-state" class="settings-field-hint" data-i18n="settings.relayAuthNone">${t('settings.relayAuthNone')}</div>
       </div>
 
       <div class="field">
@@ -788,17 +782,6 @@ function wireFields(section) {
     });
   }
 
-  // ── Relay password (v4 relay auth): persist on blur (empty = open relay) ──
-  const relayPwEl = document.getElementById('s-relay-pw');
-  if (relayPwEl) {
-    relayPwEl.addEventListener('blur', () => save({ relayPassword: relayPwEl.value }));
-  }
-  // ── Relay 2FA/TOTP: one-shot, NOT persisted — held in the config store, consumed by
-  // the next connect/go_online. ──
-  const relayTotpEl = document.getElementById('s-relay-totp');
-  if (relayTotpEl) {
-    relayTotpEl.addEventListener('input', () => setRelayTotp(relayTotpEl.value));
-  }
   // ── Host-relay auth (for the relay THIS phone hosts): client-only prefs, applied when
   // the local relay is (re)started. ──
   const hostPwEl = document.getElementById('s-relay-host-pw');
@@ -1099,8 +1082,14 @@ async function syncFieldsFromConfig() {
   if (devnameEl  && cfg.deviceName)  devnameEl.value = cfg.deviceName;
   if (unattendedEl)                { unattendedEl.checked = !!cfg.unattendedAccess; applyUnattendedUi(!!cfg.unattendedAccess); }
   if (cpwEl)                         cpwEl.value = cfg.connectPassword || '';
-  const relayPwEl2 = document.getElementById('s-relay-pw');
-  if (relayPwEl2)                    relayPwEl2.value = cfg.relayPassword || '';
+  // Relay auth status: "this device is authorized" once an access key is held for the
+  // configured relay (the key itself stays in the backend).
+  const authStateEl = document.getElementById('s-relay-auth-state');
+  if (authStateEl) {
+    invoke('relay_authorized')
+      .then((ok) => { authStateEl.textContent = t(ok ? 'settings.relayAuthorized' : 'settings.relayAuthNone'); })
+      .catch(() => {});
+  }
   // Host-relay auth (client-only prefs for the relay this phone hosts).
   const hostPwEl2   = document.getElementById('s-relay-host-pw');
   const hostTotpEl2 = document.getElementById('s-relay-host-totp');

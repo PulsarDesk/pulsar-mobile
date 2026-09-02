@@ -34,13 +34,12 @@ const LS_KEY = 'pulsar.config.v1';
 // Defaults (must match Rust defaults: DEFAULT_RELAY, NetworkMode::Auto, etc.)
 // ---------------------------------------------------------------------------
 const DEFAULTS = {
-  relay: 'relay.pulsardesk.com:21116',
+  relay: 'relay.pulsardesk.com',
   networkMode: 'auto',
   deviceName: 'Pulsar Cihazı',
   language: 'tr',
   unattendedAccess: false,
   connectPassword: '',
-  relayPassword: '',
   codecPref: 'auto',
   qualityPref: 'balanced',
   nodePort: 0,
@@ -100,7 +99,6 @@ function _normalise(raw) {
     language:         typeof raw.language === 'string'         ? raw.language         : DEFAULTS.language,
     unattendedAccess: typeof raw.unattendedAccess === 'boolean' ? raw.unattendedAccess : DEFAULTS.unattendedAccess,
     connectPassword:  typeof raw.connectPassword === 'string'  ? raw.connectPassword  : DEFAULTS.connectPassword,
-    relayPassword:    typeof raw.relayPassword === 'string'    ? raw.relayPassword    : DEFAULTS.relayPassword,
     codecPref:        typeof raw.codecPref === 'string'        ? raw.codecPref        : DEFAULTS.codecPref,
     qualityPref:      typeof raw.qualityPref === 'string'      ? raw.qualityPref      : DEFAULTS.qualityPref,
     nodePort:         Number.isFinite(raw.nodePort)            ? (raw.nodePort | 0)   : DEFAULTS.nodePort,
@@ -184,31 +182,16 @@ export async function setConfig(patch) {
 // Call getConfig() (awaited) on app boot to warm the cache before using these.
 // ---------------------------------------------------------------------------
 
-/** @returns {string} relay host:port — e.g. "relay.pulsardesk.com:21116" */
+/** @returns {string} relay address; the port is optional (default 21116 is implied). */
 export function relay() {
   return _cache ? _cache.relay : DEFAULTS.relay;
 }
 
-/** @returns {string} stored relay password (v4 relay auth; "" for an open relay) */
-export function relayPassword() {
-  return _cache ? _cache.relayPassword : DEFAULTS.relayPassword;
-}
-
-// One-shot relay 2FA/TOTP code (v4). NOT persisted — held in memory only, entered in
-// Settings and consumed by the next connect/go_online. Cleared after each use.
-let _relayTotp = '';
-/** @returns {string} the pending one-shot relay 2FA code (or "") */
-export function relayTotp() {
-  return _relayTotp;
-}
-/** Set the pending one-shot relay 2FA code. */
-export function setRelayTotp(v) {
-  _relayTotp = typeof v === 'string' ? v.trim() : '';
-}
-/** Clear the pending one-shot relay 2FA code (call after a connect attempt). */
-export function clearRelayTotp() {
-  _relayTotp = '';
-}
+// NOTE (v5): there is deliberately no relay password / 2FA state here any more. Relay
+// credentials are collected by the connect-time prompt (`relay-auth.js`), passed straight
+// into the one invoke that needs them, and never stored. What persists is the relay's
+// durable ACCESS KEY, which lives in the core config on the Rust side and is never
+// exposed to JS.
 
 /** @returns {"auto"|"p2p-only"|"relay-only"} */
 export function netmode() {

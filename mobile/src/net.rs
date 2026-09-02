@@ -116,12 +116,41 @@ pub struct SharedNodeInner {
     pub e2e_required: bool,
 }
 
-/// Build [`RelayCreds`] from the persisted relay password plus a one-shot TOTP code the
-/// UI supplies for this connect (both optional). Empty strings map to `None`.
-pub(crate) fn relay_creds(cfg: &pulsar_core::Config, totp: Option<String>) -> RelayCreds {
+/// Build [`RelayCreds`] for a registration against `relay_label` (the relay address as
+/// the user configured it — the key store is keyed by it).
+///
+/// The normal case is the stored ACCESS KEY alone: a device that authenticated once
+/// re-registers silently forever after. `password`/`totp` are ONE-SHOT values the
+/// connect-time prompt collected for this attempt only — neither is ever persisted, and
+/// the key the relay issues in return is (see [`persist_issued_key`]).
+pub(crate) fn relay_creds(
+    cfg: &pulsar_core::Config,
+    relay_label: &str,
+    password: Option<String>,
+    totp: Option<String>,
+) -> RelayCreds {
+    let one_shot = |v: Option<String>| v.filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
     RelayCreds {
-        password: Some(cfg.relay_password.clone()).filter(|s| !s.is_empty()),
-        totp: totp.filter(|s| !s.trim().is_empty()),
+        key: cfg.relay_key_for(relay_label).map(str::to_string),
+        password: one_shot(password),
+        totp: one_shot(totp),
+    }
+}
+
+/// Store the durable access key a relay just issued, so this device is never prompted
+/// again (until the operator rotates the relay's credentials, which invalidates it).
+/// Best-effort: a save failure is logged, not surfaced — the session itself is fine, the
+/// user would just be prompted again next launch.
+async fn persist_issued_key<R: Runtime>(app: &AppHandle<R>, relay_label: &str, node: &Node) {
+    let Some(key) = node.issued_relay_key().await else {
+        return;
+    };
+    let path = crate::config::config_path(app);
+    let mut cfg = pulsar_core::Config::load(&path);
+    cfg.set_relay_key(relay_label, Some(key));
+    match cfg.save(&path) {
+        Ok(()) => log::info!("pulsar: relay access key stored — this device won't be prompted again"),
+        Err(e) => log::warn!("pulsar: could not persist the relay access key: {e}"),
     }
 }
 
@@ -153,6 +182,7 @@ fn map_register_err(e: ConnError) -> String {
 pub(crate) async fn get_or_create_node<R: Runtime>(
     app: &AppHandle<R>,
     relay_addr: SocketAddr,
+    relay_label: &str,
     mode: NetworkMode,
     dev_name: String,
     creds: RelayCreds,
@@ -172,6 +202,7 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
                     Ok(id) => {
                         inner.my_id = id;
                         inner.e2e_required = inner.node.relay_e2e_required().await;
+                        persist_issued_key(app, relay_label, &inner.node).await;
                     }
                     Err(e @ (ConnError::RelayAuthRequired { .. } | ConnError::RelayAuthFailed)) => {
                         return Err(map_register_err(e));
@@ -204,7 +235,10 @@ pub(crate) async fn get_or_create_node<R: Runtime>(
     // above). Previously a register failure `?`-returned here and dropped the node, so a
     // relay outage killed even relay-less direct connects + hosting.
     let (my_id, e2e_required) = match node.register().await {
-        Ok(id) => (id, node.relay_e2e_required().await),
+        Ok(id) => {
+            persist_issued_key(app, relay_label, &node).await;
+            (id, node.relay_e2e_required().await)
+        }
         Err(e @ (ConnError::RelayAuthRequired { .. } | ConnError::RelayAuthFailed)) => {
             // The relay REQUIRES auth and we couldn't satisfy it. Keep the bound node so a
             // retry (with a password/2FA the user then enters) reuses it via the offline
@@ -305,4 +339,14 @@ pub async fn relay_e2e_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, Str
     let shared = app.state::<SharedNode>();
     let g = shared.0.lock().await;
     Ok(g.as_ref().map(|i| i.e2e_required).unwrap_or(false))
+}
+
+/// Does this device hold an access key for the CONFIGURED relay — i.e. has it already
+/// authenticated there? Drives the Settings status line ("Bu cihaz yetkili"). Reports only
+/// the boolean: the key itself never leaves the backend.
+/// JS: `invoke('relay_authorized')` → bool.
+#[tauri::command]
+pub async fn relay_authorized<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    let cfg = crate::config::load_config(&app);
+    Ok(cfg.relay_key_for(&cfg.relay).is_some())
 }

@@ -33,7 +33,8 @@
 // screens render, so there's no light→dark flash on boot.
 import './theme.js';
 import { lang, setLang, t, applyI18n } from './i18n.js';
-import { getConfig, netmode, relayTotp } from './store/config.js';
+import { getConfig, netmode } from './store/config.js';
+import { withRelayAuth } from './relay-auth.js';
 import { getPref, setPref } from './store/prefs.js';
 import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill, setNetPillMode } from './router.js';
 import * as tauri            from './tauri.js';
@@ -281,8 +282,9 @@ function wireSessionBar() {
 		const idEl = document.getElementById('id');
 		const idVal = idEl ? idEl.value.replace(/\D/g, '') : '';
 		if (idVal.length === 9) {
-			invoke('connect_host', {
-				relay:   localStorage.getItem('pulsar.relay') || '',
+			const splitRelay = localStorage.getItem('pulsar.relay') || '';
+			withRelayAuth(splitRelay, (creds) => invoke('connect_host', {
+				relay:   splitRelay,
 				target:  idVal,
 				password: '', // host prompts via 'auth-prompt' → OTP sheet if needed
 				slot:    1,
@@ -296,8 +298,8 @@ function wireSessionBar() {
 				height:  0,
 				quality: 'balanced',
 				hdr:     false,
-				relayTotp: relayTotp() || null,
-			}).catch((e) => console.warn('[app] split connect error', e));
+				...creds,
+			})).catch((e) => { if (!(e && e.cancelled)) console.warn('[app] split connect error', e); });
 		}
 	});
 
