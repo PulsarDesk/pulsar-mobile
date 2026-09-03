@@ -149,6 +149,8 @@ class HostArgs {
     var height: Int = 0
     var fps: Int = 0
     var bitrate_kbps: Int = 0
+    // "normal" / "short_gop" / "intra_refresh" (adaptive streaming loss recovery).
+    var loss_recovery: String? = null
 }
 
 @InvokeArg
@@ -478,12 +480,17 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     // ---------------- mobile host (M16) ----------------
 
+    // Loss-recovery mode the client asked for ("normal" / "short_gop" / "intra_refresh");
+    // applied when the encoder is created — a running MediaCodec keeps its GOP.
+    private var hRecovery: String = "normal"
+
     @Command
     fun startHost(invoke: Invoke) {
         val a = invoke.parseArgs(HostArgs::class.java)
         hPort = a.port; hAudioPort = a.audio_port
         hMime = if (a.codec == "h265" || a.codec == "hevc") "video/hevc" else "video/avc"
         hW = a.width; hH = a.height; hFps = if (a.fps > 0) a.fps else 30; hKbps = a.bitrate_kbps
+        hRecovery = a.loss_recovery ?: "normal"
         if (projection != null) {
             activity.runOnUiThread { startCapture() }
             val r = JSObject(); r.put("ok", true); invoke.resolve(r); return
@@ -1485,7 +1492,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         // were visible in the desktop log while the phone logged "re-stream ignored").
         if (hostEncoder != null) {
             val kbps = minOf(if (hKbps > 0) hKbps else 6000, 8000)
-            Log.i(TAG, "startCapture: already running — applying re-stream bitrate ${kbps}k live")
+            Log.i(TAG, "startCapture: already running — applying re-stream bitrate ${kbps}k live (recovery=$hRecovery kept: GOP can't change live)")
             hostEncoder?.setBitrate(kbps * 1000)
             return
         }
@@ -1509,7 +1516,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val fps = minOf(if (hFps > 0) hFps else 30, 30)
         val kbps = minOf(if (hKbps > 0) hKbps else 6000, 8000)
         Log.i(TAG, "startCapture native ${w}x${h}@$fps ${kbps}k mime=$hMime")
-        HostEncoder(proj, hMime, w, h, fps, kbps * 1000, dm.densityDpi, hPort, hAudioPort).also { it.start(); hostEncoder = it }
+        HostEncoder(proj, hMime, w, h, fps, kbps * 1000, dm.densityDpi, hPort, hAudioPort, hRecovery).also { it.start(); hostEncoder = it }
         lastCaptureDims = Pair(rw, rh)
     }
 

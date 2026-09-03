@@ -45,7 +45,8 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn decoder_failed(&self, _slot: u8) -> crate::Result<bool> {
     Ok(false)
   }
-  pub fn start_host(&self, _port: u16, _audio_port: u16, _codec: &str, _w: u32, _h: u32, _fps: u32, _kbps: u32) -> crate::Result<AttachResponse> {
+  #[allow(clippy::too_many_arguments)]
+  pub fn start_host(&self, _port: u16, _audio_port: u16, _codec: &str, _w: u32, _h: u32, _fps: u32, _kbps: u32, _loss_recovery: &str) -> crate::Result<AttachResponse> {
     Self::noop("no screen capture host on desktop")
   }
   pub fn stop_host(&self) -> crate::Result<AttachResponse> {

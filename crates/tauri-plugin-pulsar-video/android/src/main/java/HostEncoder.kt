@@ -39,6 +39,10 @@ class HostEncoder(
     private val densityDpi: Int,
     private val port: Int,
     private val audioPort: Int,
+    // Adaptive streaming loss recovery: "normal" (5 s GOP + IDR on request), "short_gop"
+    // (keyframe every ~0.5 s) or "intra_refresh" (rolling intra wave, API 24+). Applied at
+    // creation — MediaCodec can't change its GOP live.
+    private val recovery: String = "normal",
 ) {
     private val TAG = "PulsarHost"
     private var encoder: MediaCodec? = null
@@ -66,7 +70,21 @@ class HostEncoder(
             // corruption source. Loss repair is NACK retransmit; an unrepairable hole makes
             // the client send MediaNack([0]) → requestSyncFrame() → immediate IDR. So the
             // scheduled keyframe cadence can be long, like Sunshine/Moonlight.
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
+            when (recovery) {
+                "short_gop" -> {
+                    // A keyframe at least every ~0.5 s so a lost reference heals fast. Float
+                    // intervals are honoured from API 25; older encoders get 1 s.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) setFloat(MediaFormat.KEY_I_FRAME_INTERVAL, 0.5f)
+                    else setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                }
+                "intra_refresh" -> {
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
+                    // Rolling intra refresh over half a second (best effort: encoders that
+                    // don't support it ignore the key).
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, maxOf(1, fps / 2))
+                }
+                else -> setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
+            }
             // Repeat SPS/PPS on EVERY keyframe (every 1s). The desktop's ffmpeg/pulsar-render
             // demuxer can't decode ("unspecified size") until it sees the parameter sets; if its
             // renderer starts late or restarts on a re-stream it misses the one-shot SPS and

@@ -623,10 +623,21 @@ pub async fn go_online<R: Runtime>(
                         // requested seqs. FEAT_NACK is advertised in StreamCaps below.
                         let (nack_tx, mut nack_rx) =
                             tokio::sync::mpsc::unbounded_channel::<Vec<u16>>();
+                        // FEC (adaptive streaming Phase 2.1): parity ratio in ‰ sized from the
+                        // client's reported loss (`on_stats`), sent only when the client asked
+                        // (`StreamReq::fec` / `fec_rs`, learned in `on_stream`). 0 = off.
+                        let fec_ratio = Arc::new(std::sync::atomic::AtomicU16::new(0));
+                        // 0 = none, 1 = XOR groups, 2 = Reed-Solomon per frame.
+                        let fec_kind = Arc::new(std::sync::atomic::AtomicU8::new(0));
+                        let fec_ratio_fwd = fec_ratio.clone();
+                        let fec_kind_fwd = fec_kind.clone();
                         let vfwd = tauri::async_runtime::spawn(async move {
                             const NACK_RING: usize = 512;
                             let mut ring: std::collections::VecDeque<(u16, Vec<u8>)> =
                                 std::collections::VecDeque::with_capacity(NACK_RING);
+                            let mut fec_xor = media::FecEncoder::new(0);
+                            let mut fec_rs = media::RsFecEncoder::new(0.0);
+                            let mut fec_logged: u16 = 0;
                             let mut buf = vec![0u8; 4096];
                             loop {
                                 tokio::select! {
@@ -648,6 +659,38 @@ pub async fn go_online<R: Runtime>(
                                             .is_err()
                                         {
                                             break; // session gone
+                                        }
+                                        // FEC parity behind the frame / group (zero-RTT repair).
+                                        let kind = fec_kind_fwd.load(Ordering::Relaxed);
+                                        let milli = fec_ratio_fwd.load(Ordering::Relaxed);
+                                        if kind != 0 {
+                                            if milli != fec_logged {
+                                                fec_logged = milli;
+                                                log::info!("pulsar host: fec parity {}% (kind {kind})", milli as f32 / 10.0);
+                                            }
+                                            if let Some(seq) = media::rtp_seq(rtp) {
+                                                if kind == 2 {
+                                                    let want = milli as f32 / 1000.0;
+                                                    if (want - fec_rs.ratio()).abs() > 1e-4 {
+                                                        fec_rs.set_ratio(want);
+                                                    }
+                                                    for parity in fec_rs.push(seq, rtp) {
+                                                        if vsender.send(&parity).await.is_err() {
+                                                            break;
+                                                        }
+                                                    }
+                                                } else {
+                                                    let n: u8 = if milli == 0 { 0 } else { (1000 / milli.max(1)).clamp(5, 32) as u8 };
+                                                    if n != fec_xor.n() {
+                                                        fec_xor.set_n(n);
+                                                    }
+                                                    if let Some(parity) = fec_xor.push(seq, rtp) {
+                                                        if vsender.send(&parity).await.is_err() {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     q = nack_rx.recv() => {
@@ -686,16 +729,31 @@ pub async fn go_online<R: Runtime>(
                         let app4 = app3.clone();
                         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let started_s = started.clone();
+                        let fec_kind_stream = fec_kind.clone();
                         let on_stream = move |req: pulsar_core::service::StreamReq, _addr: SocketAddr| {
                             if !started_s.swap(true, Ordering::SeqCst) {
                                 ACTIVE_STREAMS.fetch_add(1, Ordering::SeqCst);
                             }
+                            // What parity the client can decode (Reed-Solomon preferred).
+                            fec_kind_stream.store(
+                                if req.fec_rs { 2 } else if req.fec { 1 } else { 0 },
+                                Ordering::Relaxed,
+                            );
                             let app5 = app4.clone();
                             let codec = req.codec.clone();
                             let (w, h, fps, kbps) = (req.width, req.height, req.fps, req.bitrate_kbps);
                             let aport = if req.transmit_audio { audio_port } else { 0 };
+                            // Loss-recovery mode for the encoder (applied when the encoder is
+                            // (re)created; a running MediaCodec keeps its GOP — see the plugin).
+                            let recovery = match req.loss_recovery {
+                                pulsar_core::service::LossRecovery::Normal => "normal",
+                                pulsar_core::service::LossRecovery::ShortGop => "short_gop",
+                                pulsar_core::service::LossRecovery::IntraRefresh => "intra_refresh",
+                            };
                             tauri::async_runtime::spawn(async move {
-                                let _ = app5.pulsar_video().start_host(video_port, aport, &codec, w, h, fps, kbps);
+                                let _ = app5
+                                    .pulsar_video()
+                                    .start_host(video_port, aport, &codec, w, h, fps, kbps, recovery);
                             });
                         };
 
@@ -802,9 +860,33 @@ pub async fn go_online<R: Runtime>(
                         data.stream_caps = Box::new(move || StreamCaps {
                             codecs: probed_codecs.clone(),
                             encoders: vec!["mediacodec".to_string()],
-                            features: vec![media::FEAT_MOS.to_string(), media::FEAT_NACK.to_string()],
+                            features: vec![
+                                media::FEAT_MOS.to_string(),
+                                media::FEAT_NACK.to_string(),
+                                media::FEAT_FEC.to_string(),
+                                media::FEAT_FEC_RS.to_string(),
+                            ],
                             ..Default::default()
                         });
+                        // The client's per-window feedback sizes the parity (Phase 2.4).
+                        data.on_stats = {
+                            let fec_ratio = fec_ratio.clone();
+                            let mut clean_windows = 0u32;
+                            Box::new(move |cs| {
+                                let prev = fec_ratio.load(Ordering::Relaxed) as f32 / 1000.0;
+                                if cs.loss < pulsar_core::adapt::fec_policy::OFF_BELOW {
+                                    clean_windows += 1;
+                                } else {
+                                    clean_windows = 0;
+                                }
+                                let ratio = pulsar_core::adapt::fec_policy::parity_ratio(cs.loss, prev, clean_windows);
+                                fec_ratio.store((ratio * 1000.0).round() as u16, Ordering::Relaxed);
+                                log::info!(
+                                    "pulsar host: client stats loss={:.1}% rtt={:.0} kbps={} point={} recovery={:?} fec_ok={} → parity {:.0}%",
+                                    cs.loss * 100.0, cs.rtt_ms, cs.kbps, cs.point, cs.recovery, cs.fec_ok, ratio * 100.0
+                                );
+                            })
+                        };
 
                         // ── Serve (race against kick) ──────────────────────────
                         let kick2 = kick.clone();

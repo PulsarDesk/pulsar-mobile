@@ -6,6 +6,7 @@
 //! the webview draws the UI, and (from M2 on) a native plugin draws HW-decoded
 //! video on a surface BEHIND a transparent webview. `pulsar-core` is added at M4.
 
+mod adapt_memory;
 mod client;
 mod config;
 mod datachan;

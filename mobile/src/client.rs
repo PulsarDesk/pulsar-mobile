@@ -1186,8 +1186,13 @@ pub async fn connect_host<R: Runtime>(
         if auto_rate { AUTO_CAP_KBPS } else { bitrate_kbps },
     );
     acfg.native = (eff_width, eff_height, fps);
-    acfg.start_kbps = if auto_rate { AUTO_START_KBPS } else { 0 };
+    // Start near the peer's last known-good rate (60 % of it), else the auto start.
+    let peer_key = target.clone();
+    let hint = crate::adapt_memory::hint(&app, &peer_key).map(|k| (k * 3 / 5).max(adapt::FLOOR_KBPS));
+    acfg.start_kbps = if auto_rate { hint.unwrap_or(AUTO_START_KBPS).min(AUTO_CAP_KBPS) } else { 0 };
     acfg.ir_capable = false;
+    // Size/fps are fixed for the session (settings / screen); only the bitrate adapts.
+    acfg.ladder = false;
     let ctl = Controller::new(acfg);
     let start_point = ctl.point();
     let req = StreamReq {
@@ -1214,8 +1219,10 @@ pub async fn connect_host<R: Runtime>(
         adapt: None,
         audio_layout: pulsar_core::audio::ChannelLayout::Stereo,
         loss_recovery: LossRecovery::Normal,
-        // XOR parity (Phase 2.1): the host sends it only once we report loss.
+        // FEC parity (Phase 2.1): the host sends it only once we report loss — Reed-Solomon
+        // (several losses per frame) preferred, XOR for older hosts.
         fec: mos,
+        fec_rs: mos,
     };
 
     timeout(POST_AUTH_TIMEOUT, request_stream(&mut sess, &req))
@@ -1324,11 +1331,12 @@ pub async fn connect_host<R: Runtime>(
             .unwrap_or_else(Instant::now);
         let mut framed: Vec<u8> = Vec::new();
         let mut last_abr = Instant::now();
-        let mut rtt_ms: f64 = 0.0;
         let mut rtt_samples: Vec<f32> = Vec::with_capacity(8);
         // FEC parity decoding (Phase 2.1) + per-frame delay sampling (Phase 3).
         let mut fec_dec = service::media::FecDecoder::default();
+        let mut fec_rs = service::media::RsFecDecoder::default();
         let mut win_fec_ok: u32 = 0;
+        let mut remembered_kbps: u32 = 0;
         let epoch = Instant::now();
         let mono_ms = move || epoch.elapsed().as_secs_f64() * 1000.0;
         let mut frame_ts: Option<u32> = None;
@@ -1426,8 +1434,10 @@ pub async fn connect_host<R: Runtime>(
                         );
                         acfg.native = (new_req.width, new_req.height, new_req.fps);
                         acfg.ir_capable = false;
+                        acfg.ladder = false;
                         ctl = Controller::new(acfg);
                         fec_dec.reset();
+                        fec_rs.reset();
                         frame_ts = None;
                         last_abr = Instant::now();
                         let new_codec = new_req.codec.clone();
@@ -1459,16 +1469,29 @@ pub async fn connect_host<R: Runtime>(
                             for bytes in &batch {
                                 let byte_len = bytes.len() as u64;
                                 if let Some((tag, rtp)) = service::media::parse(bytes) {
-                                    if tag == service::media::TAG_FEC {
-                                        // Parity (Phase 2.1): rebuild the group's single missing
-                                        // packet with zero round-trips and feed it like a late
-                                        // arrival; the group size is deducted from the encoder rate.
+                                    if tag == service::media::TAG_FEC_RS {
+                                        // Reed-Solomon parity (Phase 2.1): rebuild the frame's
+                                        // missing packets with zero round-trips and feed them like
+                                        // late arrivals; the parity share is deducted from the
+                                        // encoder rate.
+                                        for (seq, pkt) in fec_rs.on_parity(rtp) {
+                                            reorder.push(seq, &pkt, &mut nack_seqs);
+                                            win_fec_ok += 1;
+                                        }
+                                        let r = fec_rs.last_ratio();
+                                        if (r - ctl.fec_overhead()).abs() > 1e-3 {
+                                            ctl.set_fec_overhead(r);
+                                        }
+                                    } else if tag == service::media::TAG_FEC {
+                                        // XOR parity (older hosts): one loss per group.
                                         if let Some((seq, pkt)) = fec_dec.on_parity(rtp) {
                                             reorder.push(seq, &pkt, &mut nack_seqs);
                                             win_fec_ok += 1;
                                         }
-                                        if fec_dec.last_n() != ctl.fec_n() {
-                                            ctl.set_fec_n(fec_dec.last_n());
+                                        let n = fec_dec.last_n();
+                                        let r = if n == 0 { 0.0 } else { 1.0 / n as f32 };
+                                        if (r - ctl.fec_overhead()).abs() > 1e-3 {
+                                            ctl.set_fec_overhead(r);
                                         }
                                     } else if tag == service::media::TAG_VIDEO {
                                         frames += 1;
@@ -1488,6 +1511,7 @@ pub async fn connect_host<R: Runtime>(
                                         // blocked head can't stall past its hold window).
                                         if let Some(seq) = service::media::rtp_seq(rtp) {
                                             fec_dec.on_packet(seq, rtp);
+                                            fec_rs.on_packet(seq, rtp);
                                             if rtp.len() >= 8 {
                                                 let ts = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
                                                 let now_ms = mono_ms();
@@ -1523,7 +1547,6 @@ pub async fn connect_host<R: Runtime>(
                                     // climbing over the baseline, with ~zero packet loss).
                                     if let Some(t0) = ping_at.take() {
                                         let sample = t0.elapsed().as_secs_f64() * 1000.0;
-                                        rtt_ms = sample;
                                         rtt_samples.push(sample as f32);
                                         reorder.set_rtt_ms(sample);
                                         emit_play_rtt(&app2, slot, sample);
@@ -1739,11 +1762,17 @@ pub async fn connect_host<R: Runtime>(
                         }
                         if d.is_change() {
                             log::info!(
-                                "pulsar: ABR slot={slot} loss={:.1}% rtt={:.0}ms(+{:.0}) delay={:?} target={} kbps={} point={} ceiling={} fec_n={} recovery={:?}: {}",
+                                "pulsar: ABR slot={slot} loss={:.1}% rtt={:.0}ms(+{:.0}) delay={:?} target={} kbps={} point={} ceiling={} fec={:.0}% recovery={:?}: {}",
                                 sig.loss * 100.0, sig.rtt_ms, sig.excess_ms, sig.delay, ctl.target_kbps(),
-                                cur_req.bitrate_kbps, ctl.point().label(), ctl.ceiling(), ctl.fec_n(),
+                                cur_req.bitrate_kbps, ctl.point().label(), ctl.ceiling(), ctl.fec_overhead() * 100.0,
                                 cur_req.loss_recovery, d.reason
                             );
+                        }
+                        // Per-peer memory: the rate that stayed clean 30 s seeds the next session.
+                        let good = ctl.last_good_kbps();
+                        if good > 0 && good != remembered_kbps {
+                            remembered_kbps = good;
+                            crate::adapt_memory::remember(&app2, &peer_key, good);
                         }
                         // Client → host feedback (the host sizes its FEC parity from the loss).
                         let stats = ClientStats {

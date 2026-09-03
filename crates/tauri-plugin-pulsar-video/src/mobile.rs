@@ -97,10 +97,13 @@ impl<R: Runtime> PulsarVideo<R> {
 
   /// Mobile HOST (M16): capture this device's screen (MediaProjection), encode
   /// (MediaCodec), packetize to RTP, and send it to `port` on loopback.
-  pub fn start_host(&self, port: u16, audio_port: u16, codec: &str, width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> crate::Result<AttachResponse> {
+  /// `loss_recovery`: `normal` / `short_gop` / `intra_refresh` — applied when the encoder
+  /// is created (a running MediaCodec keeps its GOP; recovery there is the on-demand IDR).
+  #[allow(clippy::too_many_arguments)]
+  pub fn start_host(&self, port: u16, audio_port: u16, codec: &str, width: u32, height: u32, fps: u32, bitrate_kbps: u32, loss_recovery: &str) -> crate::Result<AttachResponse> {
     self
       .0
-      .run_mobile_plugin("startHost", HostArgs { port, audio_port, codec, width, height, fps, bitrate_kbps })
+      .run_mobile_plugin("startHost", HostArgs { port, audio_port, codec, width, height, fps, bitrate_kbps, loss_recovery })
       .map_err(Into::into)
   }
 
@@ -468,6 +471,7 @@ struct HostArgs<'a> {
   height: u32,
   fps: u32,
   bitrate_kbps: u32,
+  loss_recovery: &'a str,
 }
 
 #[derive(Serialize)]

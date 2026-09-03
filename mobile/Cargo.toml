@@ -22,6 +22,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-pulsar-video = { path = "../crates/tauri-plugin-pulsar-video" }
 # W4-files-js: OS document-picker for file upload (send_file command)
