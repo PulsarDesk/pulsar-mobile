@@ -127,6 +127,8 @@ export default {
 	"a11y.rowControl": "Uzaktan dokunma / kontrol",
 	"a11y.rowCursor": "Ekranda imleci göster (karşı taraf nişan alabilsin)",
 	"a11y.goAnyway": "Yine de çevrimiçi ol",
+	"a11y.restrictedHint": "Uygulama mağazadan kurulmadığı için Android, Erişilebilirlik'te Pulsar'ı \"Kısıtlı ayar\" olarak gösterir. Tek seferlik: Uygulama bilgisini aç, sağ üstte ⋮ → \"Kısıtlı ayarlara izin ver\", sonra dön ve kontrol iznini ver.",
+	"a11y.openAppInfo": "1. adım: Uygulama bilgisini aç",
 	"m.host.peerList": "Bağlı cihazlar",
 	"m.host.noPeers": "Şu an bağlı cihaz yok.",
 	"m.host.reqTitle": "Bağlantı isteği",

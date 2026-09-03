@@ -348,6 +348,13 @@ function openA11ySheet(a11y = false, overlay = false) {
 	// Hide a grant button once its permission is granted (cursor: only in the fallback case).
 	const gA = $('h-a11y-grant');   if (gA) gA.style.display = a11y ? 'none' : '';
 	const gC = $('h-a11y-cursor');  if (gC) gC.style.display = needCursor ? '' : 'none';
+	// The restricted-settings step (App info first) only while control is still missing
+	// and only on installs Android actually locks; resolved async, hidden until known.
+	const rs = $('h-a11y-restricted');
+	if (rs) {
+		rs.style.display = 'none';
+		if (!a11y && hasTauri) a11yRestricted().then((r) => { if (r && $('h-a11y-sheet')?.classList.contains('open')) rs.style.display = ''; });
+	}
 	sheet.classList.add('open');
 	backdrop.classList.add('open');
 }
@@ -460,6 +467,18 @@ async function a11yAvailable() {
 		try { a11yAvail = await invoke('a11y_available', {}); } catch (_) { a11yAvail = true; }
 	}
 	return a11yAvail;
+}
+
+// Android 13+ shows "Restricted setting" instead of a switch for the accessibility
+// service when the app was not installed by a store (browser download). The unlock is
+// one tap in App info (⋮ → Allow restricted settings); the sheet walks the user there
+// first. Fixed for the install, so asked once; `false` when the command is missing.
+let a11yRestr = null;
+async function a11yRestricted() {
+	if (a11yRestr === null) {
+		try { a11yRestr = await invoke('a11y_restricted', {}); } catch (_) { a11yRestr = false; }
+	}
+	return a11yRestr;
 }
 
 async function refreshA11y() {
@@ -728,6 +747,14 @@ function buildDOM(root) {
     </div>
   </div>
   <div style="display:flex;flex-direction:column;gap:10px">
+    <!-- Android 13+, non-store install: the accessibility switch is locked behind
+         "Allow restricted settings" in App info. Shown by openA11ySheet when it applies. -->
+    <div id="h-a11y-restricted" style="display:none;flex-direction:column;gap:8px">
+      <p class="msg" style="text-align:left;margin:0;font-size:13px">${t('a11y.restrictedHint')}</p>
+      <button id="h-a11y-appinfo" class="btn btn-ghost full" style="font-size:15px;padding:13px">
+        ${t('a11y.openAppInfo')}
+      </button>
+    </div>
     <button id="h-a11y-grant" class="btn btn-primary" style="font-size:16px;padding:15px">
       ${t('a11y.grant')}
     </button>
@@ -770,6 +797,10 @@ function wireButtons() {
 	// user slipped online having granted only accessibility.
 	$('h-a11y-grant')?.addEventListener('click', async () => {
 		try { await invoke('open_a11y_settings', {}); } catch (_) {}
+	});
+	// Step before the grant on locked installs: App info → ⋮ → Allow restricted settings.
+	$('h-a11y-appinfo')?.addEventListener('click', async () => {
+		try { await invoke('open_app_info', {}); } catch (_) {}
 	});
 	// Optional: grant the overlay ("draw over other apps") permission so the remote
 	// operator SEES a pointer on the phone (the injected cursor). Control still works

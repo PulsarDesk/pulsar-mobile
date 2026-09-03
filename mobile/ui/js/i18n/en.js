@@ -127,6 +127,8 @@ export default {
 	"a11y.rowControl": "Remote touch / control",
 	"a11y.rowCursor": "Show a cursor on screen (so the operator can aim)",
 	"a11y.goAnyway": "Go online anyway",
+	"a11y.restrictedHint": "Android shows \"Restricted setting\" for Pulsar in Accessibility because the app was not installed from a store. One-time unlock: open App info, tap ⋮ at the top right → \"Allow restricted settings\", then come back and grant control.",
+	"a11y.openAppInfo": "Step 1: Open App info",
 	"m.host.peerList": "Connected devices",
 	"m.host.noPeers": "No devices connected right now.",
 	"m.host.reqTitle": "Connection request",

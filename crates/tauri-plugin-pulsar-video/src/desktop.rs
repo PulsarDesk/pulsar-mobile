@@ -90,6 +90,12 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn a11y_available(&self) -> crate::Result<AttachResponse> {
     Self::noop("no accessibility on desktop")
   }
+  pub fn a11y_restricted(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no restricted settings on desktop")
+  }
+  pub fn open_app_info(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no app info page on desktop")
+  }
   pub fn notify_request(&self, _peer: &str) -> crate::Result<AttachResponse> {
     Self::noop("no request notification on desktop")
   }

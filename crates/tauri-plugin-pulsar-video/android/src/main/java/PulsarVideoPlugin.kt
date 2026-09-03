@@ -34,6 +34,7 @@ import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
@@ -819,6 +820,36 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun a11yAvailable(invoke: Invoke) {
         val r = JSObject(); r.put("ok", isA11yDeclared()); invoke.resolve(r)
+    }
+
+    /**
+     * Will Android refuse to let the user switch the accessibility service on until they
+     * unlock "restricted settings" for this app? Android 13+ locks accessibility (and
+     * notification-listener) access for apps installed by anything other than an app
+     * store — a browser download, a file manager — and the accessibility settings then
+     * show "Restricted setting" instead of a switch. The unlock is a one-time action in
+     * the app's App info page (⋮ → Allow restricted settings), which openAppInfo opens.
+     * adb-installed apps (installer null) and Play-installed apps are exempt. Heuristic:
+     * a stale answer only costs an extra, harmless step in the permission sheet.
+     */
+    @Command
+    fun a11yRestricted(invoke: Invoke) {
+        val restricted = Build.VERSION.SDK_INT >= 33 && try {
+            val installer = activity.packageManager
+                .getInstallSourceInfo(activity.packageName).installingPackageName
+            installer != null && installer != "com.android.vending"
+        } catch (_: Exception) { false }
+        val r = JSObject(); r.put("ok", restricted); invoke.resolve(r)
+    }
+
+    /** Open this app's App info page (where "Allow restricted settings" lives). */
+    @Command
+    fun openAppInfo(invoke: Invoke) {
+        activity.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + activity.packageName))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
     }
 
     private fun isA11yDeclared(): Boolean = try {

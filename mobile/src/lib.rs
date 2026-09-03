@@ -120,6 +120,8 @@ pub fn run() {
             host::open_a11y_settings,
             host::a11y_enabled,
             host::a11y_available,
+            host::a11y_restricted,
+            host::open_app_info,
             host::overlay_granted,
             host::request_overlay,
             host::notif_permission,

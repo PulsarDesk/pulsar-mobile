@@ -201,6 +201,17 @@ impl<R: Runtime> PulsarVideo<R> {
     self.0.run_mobile_plugin("a11yAvailable", ()).map_err(Into::into)
   }
 
+  /// `ok` when Android 13+ will show "Restricted setting" for the accessibility service
+  /// until the user allows restricted settings in App info (non-store install).
+  pub fn a11y_restricted(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("a11yRestricted", ()).map_err(Into::into)
+  }
+
+  /// Open this app's App info page (where "Allow restricted settings" lives).
+  pub fn open_app_info(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("openAppInfo", ()).map_err(Into::into)
+  }
+
   /// W6-host-notify: post a high-priority heads-up notification for an incoming
   /// connection request, so the user is alerted even when the app is backgrounded
   /// or the screen is off (the in-app approval sheet is invisible then). Called

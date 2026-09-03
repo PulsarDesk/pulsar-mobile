@@ -974,6 +974,19 @@ pub async fn a11y_available<R: Runtime>(app: AppHandle<R>) -> Result<bool, Strin
     Ok(app.pulsar_video().a11y_available().map(|r| r.ok).unwrap_or(false))
 }
 
+/// Whether Android 13+ will show "Restricted setting" for the accessibility service until
+/// the user allows restricted settings in App info (the app was not installed by a store).
+#[tauri::command]
+pub async fn a11y_restricted<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(app.pulsar_video().a11y_restricted().map(|r| r.ok).unwrap_or(false))
+}
+
+/// Open this app's App info page (⋮ → "Allow restricted settings").
+#[tauri::command]
+pub async fn open_app_info<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(app.pulsar_video().open_app_info().map(|r| r.ok).unwrap_or(false))
+}
+
 /// Whether the "draw over other apps" overlay permission is granted — gates the
 /// visible remote-control cursor (injection works without it, just no pointer shown).
 #[tauri::command]
