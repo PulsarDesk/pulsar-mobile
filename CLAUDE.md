@@ -57,11 +57,12 @@ Standalone debug APK: `tauri android build --debug`, install the **universal**
 variant (`arm64`-only can carry a stale cached devUrl). `tauri android dev`
 always bakes a live devUrl — the APK breaks when you kill the dev process.
 
-Releases: build-first — semantic-release dry-runs the version, both APKs are built
-with it (`--config '{"version":…}'`, tauri.conf.json is never rewritten) and
-verified, THEN the tag + release is cut with the APKs attached. Two APKs:
-`Pulsar-android.apk` has the accessibility service STRIPPED (Play Protect blocks
-browser installs of apps that declare one — `scripts/patch-android-no-a11y.py`;
-the plugin's `a11yAvailable` tells the host screen), `Pulsar-android-hostcontrol.apk`
-keeps it (adb install). The launcher icon must be re-branded after
-`tauri android init` (`tauri icon app-icon.png`) or the APK ships Tauri's icon.
+Releases: build-first — semantic-release dry-runs the version, the APK is built with
+it (`--config '{"version":…}'`, tauri.conf.json is never rewritten) and verified, THEN
+the tag + release is cut with `Pulsar-android.apk` attached. **`PulsarA11yService` is
+declared `android:enabled="false"` in the plugin manifest — load-bearing:** Play
+Protect blocks browser installs of apps that declare an accessibility service, but
+not a disabled one (verified on a phone 2026-09-03); `openA11ySettings` enables the
+component at runtime. CI's verify step fails the release if the attribute goes. The
+launcher icon must be re-branded after `tauri android init` (`tauri icon
+app-icon.png`) or the APK ships Tauri's icon.

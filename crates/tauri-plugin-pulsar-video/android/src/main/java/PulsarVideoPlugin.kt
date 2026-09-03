@@ -787,6 +787,17 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     /** Open Android's Accessibility settings so the user can enable Pulsar control. */
     @Command
     fun openA11ySettings(invoke: Invoke) {
+        // The service ships DISABLED in the manifest (android:enabled="false") so Play
+        // Protect lets the APK install from a browser — see the plugin's AndroidManifest.
+        // Android only lists enabled components in the accessibility settings, so switch
+        // it on right before opening them. The package manager persists the state.
+        try {
+            activity.packageManager.setComponentEnabledSetting(
+                ComponentName(activity, PulsarA11yService::class.java),
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                PackageManager.DONT_KILL_APP
+            )
+        } catch (e: Exception) { Log.w(TAG, "enable a11y component: $e") }
         activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val r = JSObject(); r.put("ok", true); invoke.resolve(r)
     }
@@ -798,14 +809,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
-     * Is the control AccessibilityService even DECLARED in this build?
-     *
-     * The default release APK strips it from the manifest (`scripts/patch-android-no-a11y.py`):
-     * Google Play Protect refuses to install an app downloaded from a browser when its
-     * manifest declares an accessibility service, so an APK that keeps it cannot be
-     * installed the normal way at all. The "host control" APK keeps the service and is
-     * installed over adb. The class itself is still compiled into both — only the manifest
-     * entry differs — so this asks the package manager rather than checking for the class.
+     * Is the control AccessibilityService DECLARED in this build? Always true for the
+     * release APK (it ships the service disabled, not absent), but a build that strips the
+     * service from the manifest gets a host screen that offers screen sharing only instead
+     * of a permission prompt for something that cannot be granted. Asks the package manager
+     * (matching disabled components) rather than checking for the class, which is always
+     * compiled in.
      */
     @Command
     fun a11yAvailable(invoke: Invoke) {
@@ -814,7 +823,8 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun isA11yDeclared(): Boolean = try {
         activity.packageManager.getServiceInfo(
-            ComponentName(activity, PulsarA11yService::class.java), 0
+            ComponentName(activity, PulsarA11yService::class.java),
+            PackageManager.MATCH_DISABLED_COMPONENTS
         )
         true
     } catch (_: PackageManager.NameNotFoundException) {

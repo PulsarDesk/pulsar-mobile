@@ -34,9 +34,19 @@
             android:name=".HostService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
-        <!-- Host control (M16 polish): inject the remote peer's taps/swipes. -->
+        <!-- Host control (M16 polish): inject the remote peer's taps/swipes.
+
+             android:enabled="false" is load-bearing. Google Play Protect refuses to install
+             an app downloaded through a browser when its manifest declares an accessibility
+             service ("can access sensitive information", no override) — but, verified on a
+             real phone 2026-09-03, it does not count one that is declared DISABLED. So the
+             service ships switched off, and openA11ySettings() enables the component
+             (setComponentEnabledSetting, persisted by the package manager) right before
+             opening the accessibility settings, which only list enabled components. Do not
+             remove this attribute or the release APK becomes uninstallable. -->
         <service
             android:name=".PulsarA11yService"
+            android:enabled="false"
             android:exported="false"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
