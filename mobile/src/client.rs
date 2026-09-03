@@ -46,10 +46,11 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use pulsar_core::proto::DeviceId;
+use pulsar_core::adapt::{self, Controller};
 use pulsar_core::service::{
     self, query_stream_caps, recv_host_auth, request_games, request_launch, request_stream,
-    send_auth, send_bye, send_data_via, send_input_via, AuthOutcome, DataMsg, GameInfo, HostAuth,
-    InputEvent, StreamReq,
+    send_auth, send_bye, send_data_via, send_input_via, AuthOutcome, ClientStats, DataMsg,
+    GameInfo, HostAuth, InputEvent, LossRecovery, StreamReq,
 };
 use pulsar_core::{NetworkMode, QualityPref, SessionSender, Transport};
 
@@ -362,203 +363,18 @@ fn emit_auth_prompt<R: Runtime>(app: &AppHandle<R>, slot: u8, peer: &str) {
     let _ = app.emit("auth-prompt", AuthPromptPayload { slot, peer: peer.to_string() });
 }
 
-// ── Adaptive-bitrate (AIMD) controller ───────────────────────────────────────
-// Ported from the desktop play/hold.rs model, then made DELAY-AWARE. The original
-// was loss-only: it stepped the host bitrate down on RTP seq-gap loss and additively
-// up after a clean stretch. That is blind to wifi BUFFERBLOAT — a high-motion CBR
-// stream fills the link, the excess queues in the host UDP send buffer / the AP, and
-// latency climbs with essentially ZERO packet loss. The loss-only controller then sees
-// a "clean" window and ramps the bitrate UP, driving the link harder (observed live:
-// `loss=0.0% 8000->...->13500 kbps` while motion lagged). The delay path below reacts
-// to keepalive RTT rising over its baseline and (a) cuts immediately, (b) forbids the
-// additive increase while elevated — the way Moonlight/WebRTC keep the pipe near empty.
+// ── Adaptive streaming ──────────────────────────────────────────────────────
+// The controller lives in `pulsar_core::adapt` (shared with the desktop app, Phase 1 of
+// pulsar-core/docs/adaptive-streaming.md): loss + keepalive RTT + a per-frame delay-gradient
+// estimator → target rate, operating point (resolution × fps ladder), encoder bitrate net
+// of FEC, and the host's loss-recovery mode. This file measures and actuates only.
 
-// 3 Mbit (was 2): at 1080p60 HEVC the 2 Mbit floor was visible mush ("parça pinçik");
-// 3 Mbit is still safely streamable on a congested wifi downlink.
-const ADAPT_MIN_KBPS: u32 = 3_000;
-const ADAPT_LOSS_DOWN: f32 = 0.03;
-const ADAPT_LOSS_SEVERE: f32 = 0.15;
-const ADAPT_LOSS_CLEAN: f32 = 0.005;
-const ADAPT_CLEAN_WINDOWS: u32 = 2; // ramp up after 2 clean seconds (4 kept it pinned at the floor)
-const ADAPT_COOLDOWN_S: u64 = 5;
-/// ABR cadence. 1 s (was 2 s) so a motion-onset bloat is cut within ~1–2 s, not ~3–9 s.
-const ABR_TICK: Duration = Duration::from_millis(1000);
-/// Keepalive RTT this far OVER the rolling baseline = a queue is building in the link
-/// (bufferbloat). Cut the bitrate even though loss is ~0.
-const ADAPT_RTT_EXCESS_MS: f64 = 35.0;
-/// RTT excess past this = severe bloat → halve instead of the gentle ×0.7 cut.
-const ADAPT_RTT_EXCESS_BAD_MS: f64 = 90.0;
-/// Only ADDITIVELY INCREASE while RTT excess is under this — a deadband below the cut
-/// threshold so the controller doesn't ramp up, bloat, cut, ramp up… around 35 ms.
-// 25 (was 15): ordinary wifi RTT jitter regularly exceeds 15 ms over baseline, which
-// reset the clean-window counter every tick and permanently blocked the ramp-up —
-// the bitrate never recovered from a cut. Still well under the 35 ms cut threshold.
-const ADAPT_RTT_OK_MS: f64 = 25.0;
-/// FAST reflex: RTT excess past this triggers an immediate cut on the NEXT keepalive
-/// (~350 ms) instead of waiting for the 1 s ABR tick — the AP wifi-downlink queue fills
-/// in well under a second under motion, so the slow tick reacts after the spike is felt.
-const ADAPT_RTT_PANIC_MS: f64 = 55.0;
-/// Reflex excess past this = the link is badly bloated → cut straight to the floor.
-const ADAPT_RTT_PANIC_FLOOR_MS: f64 = 140.0;
+/// Decision cadence (the controller works on 2 s windows).
+const ABR_TICK: Duration = Duration::from_millis(2000);
+/// Auto-rate cap / start (kbit/s) when the user did not pick a bitrate.
+const AUTO_CAP_KBPS: u32 = 12_000;
+const AUTO_START_KBPS: u32 = 8_000;
 
-/// One ABR window's measurements (pure inputs — no I/O, so this is unit-testable).
-struct AbrSample {
-    recv: u32,
-    lost: u32,
-    /// Most recent keepalive round-trip (ms). 0 = no sample yet (delay path disabled).
-    rtt_ms: f64,
-    /// Slow min-tracking baseline of `rtt_ms` (ms). 0 = not primed yet.
-    rtt_baseline_ms: f64,
-}
-
-/// Mutable AIMD controller state carried across windows.
-struct AbrState {
-    cur_kbps: u32,
-    /// Ceiling (the user's pick, or the "auto" default).
-    base_kbps: u32,
-    probe_ceiling: u32,
-    clean_windows: u32,
-    over_windows: u32,
-    /// Wall-seconds since the last applied step (for the gentle-down cooldown).
-    secs_since_step: u64,
-}
-
-/// Decide the next bitrate for one ABR window. Returns `Some(new_kbps)` when a restream
-/// is needed, `None` to hold. DELAY-FIRST: bufferbloat (RTT ≫ baseline, usually zero
-/// loss) cuts immediately and blocks additive-increase; otherwise the loss-based AIMD
-/// (halve >15%, ×0.7 >3% after a cooldown, +1 Mbit after a clean stretch) runs as before.
-fn abr_decide(s: &mut AbrState, m: &AbrSample) -> Option<u32> {
-    let total = m.recv + m.lost;
-    let loss = if total > 0 { m.lost as f32 / total as f32 } else { 0.0 };
-    // Only trust the delay signal once the baseline is primed and we have a fresh sample.
-    let rtt_excess = if m.rtt_baseline_ms > 0.0 && m.rtt_ms > 0.0 {
-        m.rtt_ms - m.rtt_baseline_ms
-    } else {
-        0.0
-    };
-    let bloated = rtt_excess >= ADAPT_RTT_EXCESS_MS;
-
-    // ── Delay-aware path FIRST (bufferbloat = rising RTT, ~zero loss) ─────────
-    if bloated && s.cur_kbps > ADAPT_MIN_KBPS {
-        s.clean_windows = 0;
-        s.over_windows = 0;
-        s.probe_ceiling = s.cur_kbps; // converge back just under what bloated the link
-        let cut = if rtt_excess >= ADAPT_RTT_EXCESS_BAD_MS {
-            s.cur_kbps / 2 // severe → halve
-        } else {
-            s.cur_kbps * 7 / 10 // mild → ×0.7
-        };
-        return Some(cut.max(ADAPT_MIN_KBPS));
-    }
-
-    // ── Loss-based AIMD (original model) ─────────────────────────────────────
-    if total > 100 && loss > ADAPT_LOSS_SEVERE && s.cur_kbps > ADAPT_MIN_KBPS {
-        s.probe_ceiling = s.cur_kbps;
-        s.clean_windows = 0;
-        s.over_windows = 0;
-        return Some((s.cur_kbps / 2).max(ADAPT_MIN_KBPS));
-    }
-    if total > 100 && loss > ADAPT_LOSS_DOWN {
-        s.over_windows += 1;
-        s.clean_windows = 0;
-        if s.over_windows >= 2 && s.secs_since_step >= ADAPT_COOLDOWN_S && s.cur_kbps > ADAPT_MIN_KBPS {
-            s.probe_ceiling = s.cur_kbps;
-            s.over_windows = 0;
-            return Some((s.cur_kbps * 7 / 10).max(ADAPT_MIN_KBPS));
-        }
-        return None;
-    }
-    // Clean AND RTT close to baseline → additive increase. The deadband guard is the fix:
-    // never ramp UP while the link is already queuing (the old bug); [OK, EXCESS) holds.
-    if loss < ADAPT_LOSS_CLEAN && total > 0 && rtt_excess < ADAPT_RTT_OK_MS {
-        s.over_windows = 0;
-        s.clean_windows += 1;
-        if s.clean_windows >= ADAPT_CLEAN_WINDOWS {
-            let cap = s
-                .base_kbps
-                .min(s.probe_ceiling.saturating_mul(9) / 10)
-                .max(ADAPT_MIN_KBPS);
-            s.clean_windows = 0;
-            // Proportional step (¼ of current, ≥1 Mbit): a fixed +1 Mbit took ~24 clean
-            // seconds to climb from the floor back to 8 Mbit — on jittery wifi that
-            // clean stretch never happened and quality stayed at the floor forever.
-            let step = (s.cur_kbps / 4).max(1_000);
-            if s.cur_kbps + 500 <= cap {
-                return Some((s.cur_kbps + step).min(cap));
-            } else if s.probe_ceiling < s.base_kbps {
-                s.probe_ceiling = (s.probe_ceiling + step).min(s.base_kbps);
-                return Some((s.cur_kbps + step).min(s.base_kbps));
-            }
-        }
-        return None;
-    }
-    // Elevated-but-not-yet-bloated, or a single transient blip → hold.
-    s.over_windows = 0;
-    s.clean_windows = 0;
-    None
-}
-
-#[cfg(test)]
-mod abr_tests {
-    use super::*;
-
-    fn state(cur: u32) -> AbrState {
-        AbrState { cur_kbps: cur, base_kbps: 12_000, probe_ceiling: 12_000, clean_windows: 0, over_windows: 0, secs_since_step: 10 }
-    }
-
-    #[test]
-    fn bufferbloat_zero_loss_cuts_bitrate() {
-        // The live bug: loss=0 but RTT far over baseline. Old loss-only ABR ramped UP;
-        // the delay path must CUT instead.
-        let mut s = state(13_500);
-        let out = abr_decide(&mut s, &AbrSample { recv: 5_000, lost: 0, rtt_ms: 180.0, rtt_baseline_ms: 20.0 });
-        assert_eq!(out, Some(13_500 / 2)); // excess 160ms ≥ BAD → halve
-    }
-
-    #[test]
-    fn mild_bloat_gentle_cut() {
-        let mut s = state(10_000);
-        let out = abr_decide(&mut s, &AbrSample { recv: 5_000, lost: 0, rtt_ms: 70.0, rtt_baseline_ms: 20.0 });
-        assert_eq!(out, Some(10_000 * 7 / 10)); // excess 50ms in [35,90) → ×0.7
-    }
-
-    #[test]
-    fn deadband_rtt_holds_no_increase_no_cut() {
-        // Excess 25ms ∈ [OK 15, EXCESS 35): clean loss + 4 clean windows would normally
-        // step UP, but the deadband must HOLD (don't ramp into the bloat, don't cut yet).
-        let mut s = state(8_000);
-        s.clean_windows = 3; // next clean window would otherwise trigger the +1 Mbit step
-        let out = abr_decide(&mut s, &AbrSample { recv: 5_000, lost: 0, rtt_ms: 45.0, rtt_baseline_ms: 20.0 });
-        assert_eq!(out, None);
-    }
-
-    #[test]
-    fn clean_link_low_rtt_ramps_up() {
-        let mut s = state(8_000);
-        s.clean_windows = 3;
-        let out = abr_decide(&mut s, &AbrSample { recv: 5_000, lost: 0, rtt_ms: 22.0, rtt_baseline_ms: 20.0 });
-        assert_eq!(out, Some(10_000)); // +cur/4 = +2 Mbit proportional step, under the 12_000 cap
-    }
-
-    #[test]
-    fn severe_loss_halves() {
-        let mut s = state(10_000);
-        let out = abr_decide(&mut s, &AbrSample { recv: 1_000, lost: 300, rtt_ms: 0.0, rtt_baseline_ms: 0.0 });
-        assert_eq!(out, Some(5_000)); // 30% loss > SEVERE → halve (delay path off: no RTT)
-    }
-
-    #[test]
-    fn never_cuts_below_floor() {
-        let mut s = state(ADAPT_MIN_KBPS);
-        let out = abr_decide(&mut s, &AbrSample { recv: 5_000, lost: 0, rtt_ms: 300.0, rtt_baseline_ms: 20.0 });
-        assert_eq!(out, None); // already at floor → hold
-    }
-}
-
-// ── Input commands (existing, unchanged) ─────────────────────────────────────
-
-/// Forward an absolute pointer position (normalized 0..1 within the video) to the
-/// host of session `slot`. Called from the webview's touch handlers.
 #[tauri::command]
 pub async fn send_pointer<R: Runtime>(
     app: AppHandle<R>,
@@ -1362,18 +1178,30 @@ pub async fn connect_host<R: Runtime>(
     // gaming feel isn't reachable through a phone decoder + relay anyway.
     let fps = if fps == 0 { 60 } else { fps.min(60) };
 
+    // The shared adaptive controller: the phone's requested size is the ladder's top rung
+    // (the host scales its capture down to it); the mobile depacketizer waits for an IDR
+    // after a loss, so it asks for the short-GOP recovery (not intra refresh).
+    let mut acfg = adapt::Config::new(
+        adapt::codec_from_wire(&resolved_codec),
+        if auto_rate { AUTO_CAP_KBPS } else { bitrate_kbps },
+    );
+    acfg.native = (eff_width, eff_height, fps);
+    acfg.start_kbps = if auto_rate { AUTO_START_KBPS } else { 0 };
+    acfg.ir_capable = false;
+    let ctl = Controller::new(acfg);
+    let start_point = ctl.point();
     let req = StreamReq {
         port: 0, // unused with media-over-session
         codec: resolved_codec.clone(),
         encoder: "auto".into(),
-        width: eff_width,
-        height: eff_height,
-        fps,
+        width: start_point.width,
+        height: start_point.height,
+        fps: start_point.fps,
         audio_port: if transmit_audio { 1 } else { 0 },
         transmit_audio,
         mute_host: false,
         game_mode,
-        bitrate_kbps,
+        bitrate_kbps: ctl.encoder_kbps(),
         quality: quality_pref,
         hdr,
         yuv444: false,
@@ -1385,6 +1213,9 @@ pub async fn connect_host<R: Runtime>(
         window_hwnd: None,
         adapt: None,
         audio_layout: pulsar_core::audio::ChannelLayout::Stereo,
+        loss_recovery: LossRecovery::Normal,
+        // XOR parity (Phase 2.1): the host sends it only once we report loss.
+        fec: mos,
     };
 
     timeout(POST_AUTH_TIMEOUT, request_stream(&mut sess, &req))
@@ -1478,62 +1309,30 @@ pub async fn connect_host<R: Runtime>(
         // clean stretch, and NACK missing seqs for retransmit. Plus a burst-backlog
         // drop in the recv arm (feed only the newest frame + request an IDR) so a
         // queue spike can't make us decode stale frames forever.
-        // ABR tuning + the pure `abr_decide()` controller now live at module scope
-        // (ADAPT_*, ABR_TICK) so they're unit-tested — see `mod abr_tests`.
         let data_sender = sess.sender();
         let host_nack = feat_nack;
         let mut cur_req = abr_req0;
-        // Ceiling: the requested bitrate, or a sane default when "auto" (0) so ABR
-        // still has a ramp range. cur starts at the ceiling, ramps down on loss.
-        // "auto" ceiling: realistic for FHD over wifi. The delay-aware ABR probes up to
-        // this only while RTT stays near baseline, so a high ceiling no longer means a
-        // big latency spike on every motion burst (it used to ramp to 15 Mbit on loss=0).
-        let mut base_kbps: u32 = if auto_rate { 12_000 } else { cur_req.bitrate_kbps.max(1) };
-        let adapt_enabled = cur_req.media_over_session && base_kbps > 0;
-        // AIMD (additive-increase / multiplicative-decrease, like TCP / Moonlight). START
-        // CONSERVATIVE and ramp UP — opening at the ceiling instantly overshoots the link →
-        // >15% loss → halve → ramp → re-overshoot = the bitrate oscillation that froze/lagged
-        // the stream ("as if no ABR"). `probe_ceiling` remembers the bitrate that last caused
-        // loss so the additive increase converges just UNDER it instead of overshooting again.
-        //
-        // Seed cur from the bitrate we ACTUALLY sent the host in the initial StreamReq
-        // (`cur_req.bitrate_kbps`): the conservative 8 Mbit "auto" open, or the user's
-        // explicit pick. A blind `base_kbps.min(8_000)` left the controller believing
-        // 8 Mbit while an explicit >8 Mbit pick had the host encoding at the full rate —
-        // so the first ABR step (e.g. an "additive increase") computed from the phantom
-        // 8 Mbit SLASHED the host below the user's choice. Clamp to the ceiling defensively.
-        let mut cur_bitrate: u32 = cur_req.bitrate_kbps.min(base_kbps).max(1);
-        let mut probe_ceiling: u32 = base_kbps;
-        // Reorder/jitter buffer: releases video RTP in seq order after an RTT-sized
-        // hold, owns NACK generation and the ABR's true-loss window. See the TAG_VIDEO
-        // branch comment for why direct feed was wrong (live link reorders heavily).
+        let adapt_enabled = cur_req.media_over_session;
+        let mut ctl = ctl;
         let mut reorder = crate::rtp::ReorderBuffer::new();
-        // Reusable scratch list — missing seqs in a batch coalesced into ONE NACK (A23).
         let mut nack_seqs: Vec<u16> = Vec::new();
-        // Loss containment (Moonlight model): a seq gap tears the AU being assembled
-        // (and/or drops a reference frame). Feeding torn AUs paints visible corruption
-        // that persists until the next IDR — with a 10 s safety GOP that's seconds of
-        // garbage. Instead: mark the stream corrupt, drop every non-keyframe AU, and
-        // ask the host for an IDR (rate-limited) — the picture freezes ~1 RTT, no tear.
         let mut loss_corrupt = false;
         let mut waiting_idr = false;
-        // Diagnostic: cumulative DECLARED gaps (true post-hold loss, not reorder).
         let mut total_lost: u64 = 0;
         let mut last_idr_req = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
-        // Reusable framing buffer for the loopback AU socket write (no per-frame alloc).
         let mut framed: Vec<u8> = Vec::new();
-        let mut clean_windows: u32 = 0;
-        // A22: count consecutive over-threshold windows before the gentle down-step.
-        let mut over_windows: u32 = 0;
-        let mut last_step = Instant::now();
         let mut last_abr = Instant::now();
-        // Delay-aware ABR signal: latest keepalive RTT + its slow min-tracking baseline.
         let mut rtt_ms: f64 = 0.0;
-        let mut rtt_baseline_ms: f64 = 0.0;
-        // Fast-reflex cut throttle (separate from the 1 s AIMD tick's last_step).
-        let mut last_panic = Instant::now();
+        let mut rtt_samples: Vec<f32> = Vec::with_capacity(8);
+        // FEC parity decoding (Phase 2.1) + per-frame delay sampling (Phase 3).
+        let mut fec_dec = service::media::FecDecoder::default();
+        let mut win_fec_ok: u32 = 0;
+        let epoch = Instant::now();
+        let mono_ms = move || epoch.elapsed().as_secs_f64() * 1000.0;
+        let mut frame_ts: Option<u32> = None;
+        let mut frame_last_arrival_ms: f64 = 0.0;
 
         // ── W3: stats tracking ───────────────────────────────────────────────
         let mut frames: u64 = 0;
@@ -1620,12 +1419,17 @@ pub async fn connect_host<R: Runtime>(
                         // Re-seat the adaptive-bitrate baseline to the user's new pick
                         // so ABR ramps relative to it (and doesn't fight a manual change).
                         cur_req = new_req.clone();
-                        base_kbps = if new_req.bitrate_kbps > 0 { new_req.bitrate_kbps } else { 12_000 };
-                        cur_bitrate = base_kbps;
-                        clean_windows = 0;
-                        last_step = Instant::now();
-
-                        // Update the stored req so the next patch has fresh baseline.
+                        // A user pick is a new top rung + cap: rebuild the controller around it.
+                        let mut acfg = adapt::Config::new(
+                            adapt::codec_from_wire(&new_req.codec),
+                            if new_req.bitrate_kbps > 0 { new_req.bitrate_kbps } else { AUTO_CAP_KBPS },
+                        );
+                        acfg.native = (new_req.width, new_req.height, new_req.fps);
+                        acfg.ir_capable = false;
+                        ctl = Controller::new(acfg);
+                        fec_dec.reset();
+                        frame_ts = None;
+                        last_abr = Instant::now();
                         let new_codec = new_req.codec.clone();
                         app2.state::<SessionRegistry>().update_last_req(slot, new_req);
                         log::info!("pulsar: restream applied slot={slot} codec={new_codec}");
@@ -1655,7 +1459,18 @@ pub async fn connect_host<R: Runtime>(
                             for bytes in &batch {
                                 let byte_len = bytes.len() as u64;
                                 if let Some((tag, rtp)) = service::media::parse(bytes) {
-                                    if tag == service::media::TAG_VIDEO {
+                                    if tag == service::media::TAG_FEC {
+                                        // Parity (Phase 2.1): rebuild the group's single missing
+                                        // packet with zero round-trips and feed it like a late
+                                        // arrival; the group size is deducted from the encoder rate.
+                                        if let Some((seq, pkt)) = fec_dec.on_parity(rtp) {
+                                            reorder.push(seq, &pkt, &mut nack_seqs);
+                                            win_fec_ok += 1;
+                                        }
+                                        if fec_dec.last_n() != ctl.fec_n() {
+                                            ctl.set_fec_n(fec_dec.last_n());
+                                        }
+                                    } else if tag == service::media::TAG_VIDEO {
                                         frames += 1;
                                         stats_window_bytes += byte_len;
                                         last_video_pkt = now;
@@ -1672,6 +1487,18 @@ pub async fn connect_host<R: Runtime>(
                                         // happens after the batch loop (and on idle ticks, so a
                                         // blocked head can't stall past its hold window).
                                         if let Some(seq) = service::media::rtp_seq(rtp) {
+                                            fec_dec.on_packet(seq, rtp);
+                                            if rtp.len() >= 8 {
+                                                let ts = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
+                                                let now_ms = mono_ms();
+                                                if frame_ts != Some(ts) {
+                                                    if let Some(prev) = frame_ts {
+                                                        ctl.on_frame(prev, frame_last_arrival_ms);
+                                                    }
+                                                    frame_ts = Some(ts);
+                                                }
+                                                frame_last_arrival_ms = now_ms;
+                                            }
                                             reorder.push(seq, rtp, &mut nack_seqs);
                                         }
                                     } else if tag == service::media::TAG_AUDIO {
@@ -1697,18 +1524,8 @@ pub async fn connect_host<R: Runtime>(
                                     if let Some(t0) = ping_at.take() {
                                         let sample = t0.elapsed().as_secs_f64() * 1000.0;
                                         rtt_ms = sample;
-                                        // Size the reorder hold window from the live RTT so NACK
-                                        // retransmits land inside it (single-packet loss heals
-                                        // with no declared gap at all).
+                                        rtt_samples.push(sample as f32);
                                         reorder.set_rtt_ms(sample);
-                                        // Min-tracking baseline: snap DOWN to a new low instantly,
-                                        // creep UP slowly so a congestion spike doesn't poison it
-                                        // (keeps the excess visible to abr_decide).
-                                        rtt_baseline_ms = if rtt_baseline_ms <= 0.0 || sample < rtt_baseline_ms {
-                                            sample
-                                        } else {
-                                            rtt_baseline_ms + (sample - rtt_baseline_ms) * 0.05
-                                        };
                                         emit_play_rtt(&app2, slot, sample);
                                     }
                                 } else if service::is_bye(bytes) {
@@ -1862,75 +1679,87 @@ pub async fn connect_host<R: Runtime>(
                     // iteration off the freshest keepalive RTT (~350 ms cadence) and cuts the
                     // bitrate HARD the instant RTT jumps over baseline — straight to the floor
                     // on a big spike — so we stop feeding the queue before it deepens.
-                    if adapt_enabled
-                        && cur_bitrate > ADAPT_MIN_KBPS
-                        && rtt_baseline_ms > 0.0
-                        && now.saturating_duration_since(last_panic) >= Duration::from_millis(450)
-                    {
-                        let excess = rtt_ms - rtt_baseline_ms;
-                        if excess >= ADAPT_RTT_PANIC_MS {
-                            let nk = if excess >= ADAPT_RTT_PANIC_FLOOR_MS {
-                                ADAPT_MIN_KBPS
-                            } else {
-                                (cur_bitrate / 2).max(ADAPT_MIN_KBPS)
-                            };
-                            if nk < cur_bitrate {
+                    // Fast reflex (Phase 3): a queue that keeps filling cuts the rate between
+                    // windows — the controller's delay-gradient estimator decides.
+                    if adapt_enabled {
+                        if let Some(d) = ctl.poll_fast(mono_ms()) {
+                            let mut changed = false;
+                            if let Some(kbps) = d.bitrate {
+                                cur_req.bitrate_kbps = kbps;
+                                changed = true;
+                            }
+                            if let Some(p) = d.point {
+                                cur_req.width = p.width;
+                                cur_req.height = p.height;
+                                cur_req.fps = p.fps;
+                                changed = true;
+                            }
+                            if changed {
                                 log::info!(
-                                    "pulsar: ABR PANIC slot={slot} rtt={rtt_ms:.0}ms(base {rtt_baseline_ms:.0}) {cur_bitrate}->{nk} kbps"
+                                    "pulsar: ABR fast slot={slot} {} → {} kbps {} ({})",
+                                    d.reason, cur_req.bitrate_kbps, ctl.point().label(), ctl.target_kbps()
                                 );
-                                cur_bitrate = nk;
-                                probe_ceiling = nk; // converge back under the bloat point
-                                clean_windows = 0;
-                                over_windows = 0;
-                                last_panic = now;
-                                last_step = now;
-                                last_abr = now; // skip the slow tick this round (already acted)
-                                cur_req.bitrate_kbps = cur_bitrate;
                                 if request_stream(&mut sess, &cur_req).await.is_err() {
                                     break 'read;
                                 }
-                                app2.state::<SessionRegistry>()
-                                    .update_last_req(slot, cur_req.clone());
+                                app2.state::<SessionRegistry>().update_last_req(slot, cur_req.clone());
                             }
                         }
                     }
 
-                    // ── Adaptive-bitrate decision (every ABR_TICK) ─────────────
-                    // The pure, unit-tested controller (`abr_decide`, module scope) does
-                    // BOTH the delay-aware cut (bufferbloat = RTT over baseline, ~zero
-                    // loss → cut + block ramp-up) and the original loss-based AIMD. Async
-                    // I/O (the restream request) stays here in the loop.
                     if adapt_enabled && now.saturating_duration_since(last_abr) >= ABR_TICK {
                         last_abr = now;
-                        // True loss only (declared gaps after the reorder hold window) —
-                        // packets that merely arrived late no longer count as loss.
                         let (recv, lost) = reorder.take_loss_window();
                         total_lost += lost as u64;
-                        let mut st = AbrState {
-                            cur_kbps: cur_bitrate,
-                            base_kbps,
-                            probe_ceiling,
-                            clean_windows,
-                            over_windows,
-                            secs_since_step: now.saturating_duration_since(last_step).as_secs(),
+                        let sample = adapt::Sample {
+                            recv,
+                            lost,
+                            rtt_ms: std::mem::take(&mut rtt_samples),
+                            nack_sent: 0,
+                            nack_ok: 0,
+                            fec_ok: win_fec_ok,
                         };
-                        let decision =
-                            abr_decide(&mut st, &AbrSample { recv, lost, rtt_ms, rtt_baseline_ms });
-                        // Carry the controller's window state forward.
-                        probe_ceiling = st.probe_ceiling;
-                        clean_windows = st.clean_windows;
-                        over_windows = st.over_windows;
-                        if let Some(kbps) = decision {
-                            let total = recv + lost;
-                            let loss_pct =
-                                if total > 0 { lost as f32 / total as f32 * 100.0 } else { 0.0 };
+                        win_fec_ok = 0;
+                        let d = ctl.tick(&sample);
+                        let sig = ctl.last();
+                        let mut changed = false;
+                        if let Some(r) = d.recovery {
+                            cur_req.loss_recovery = r;
+                            changed = true;
+                        }
+                        if let Some(kbps) = d.bitrate {
+                            cur_req.bitrate_kbps = kbps;
+                            changed = true;
+                        }
+                        if let Some(p) = d.point {
+                            cur_req.width = p.width;
+                            cur_req.height = p.height;
+                            cur_req.fps = p.fps;
+                            changed = true;
+                        }
+                        if d.is_change() {
                             log::info!(
-                                "pulsar: ABR slot={slot} loss={loss_pct:.1}% \
-                                 rtt={rtt_ms:.0}ms(base {rtt_baseline_ms:.0}) {cur_bitrate}->{kbps} kbps"
+                                "pulsar: ABR slot={slot} loss={:.1}% rtt={:.0}ms(+{:.0}) delay={:?} target={} kbps={} point={} ceiling={} fec_n={} recovery={:?}: {}",
+                                sig.loss * 100.0, sig.rtt_ms, sig.excess_ms, sig.delay, ctl.target_kbps(),
+                                cur_req.bitrate_kbps, ctl.point().label(), ctl.ceiling(), ctl.fec_n(),
+                                cur_req.loss_recovery, d.reason
                             );
-                            cur_bitrate = kbps;
-                            last_step = now;
-                            cur_req.bitrate_kbps = cur_bitrate;
+                        }
+                        // Client → host feedback (the host sizes its FEC parity from the loss).
+                        let stats = ClientStats {
+                            v: ClientStats::VERSION,
+                            loss: sig.loss,
+                            rtt_ms: sig.rtt_ms,
+                            jitter_ms: sig.jitter_ms,
+                            kbps: cur_req.bitrate_kbps,
+                            recovery: cur_req.loss_recovery,
+                            nack_sent: 0,
+                            nack_ok: 0,
+                            fec_ok: sample.fec_ok,
+                            point: ctl.point().label(),
+                        };
+                        let _ = send_data_via(&data_sender, &DataMsg::Stats(stats.to_json())).await;
+                        if changed {
                             if request_stream(&mut sess, &cur_req).await.is_err() {
                                 break 'read;
                             }
@@ -1938,9 +1767,6 @@ pub async fn connect_host<R: Runtime>(
                         }
                     }
 
-                    // Keepalive every ~350 ms — it's also the RTT probe the fast congestion
-                    // reflex reads, so it must sample several times within the <1 s the AP
-                    // queue takes to bloat under motion (not just once per 1 s ABR tick).
                     if now.saturating_duration_since(last_ka) >= Duration::from_millis(350) {
                         let _ = service::send_keepalive(&mut sess).await;
                         last_ka = now;

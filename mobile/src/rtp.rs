@@ -542,7 +542,11 @@ impl ReorderBuffer {
 
     /// Size the hold window from the measured network RTT: clamp(2.5*RTT, 30, 120) ms.
     pub fn set_rtt_ms(&mut self, rtt_ms: f64) {
-        let ms = (rtt_ms * 2.5).clamp(30.0, 120.0);
+        // Adaptive streaming Phase 0.5: a NACK retransmit needs ~1 RTT to land, so wait
+        // `1.5 × RTT + 100 ms` (100–500 ms) before skipping a hole — the same window the
+        // desktop client and renderer use. The old 30–120 ms cap made every repair "too
+        // late" on any route slower than a LAN.
+        let ms = (rtt_ms * 1.5 + 100.0).clamp(100.0, 500.0);
         self.max_delay = Duration::from_millis(ms as u64);
     }
 
