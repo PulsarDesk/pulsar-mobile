@@ -14,6 +14,10 @@ const COMMANDS: &[&str] = &[
   "get_wallpaper_avatar",
   "mic_start",
   "mic_stop",
+  "update_download",
+  "update_cancel",
+  "update_status",
+  "update_install",
 ];
 
 fn main() {

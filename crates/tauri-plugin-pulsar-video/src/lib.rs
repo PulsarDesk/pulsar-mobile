@@ -55,6 +55,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       commands::get_wallpaper_avatar,
       commands::mic_start,
       commands::mic_stop,
+      commands::update_download,
+      commands::update_cancel,
+      commands::update_status,
+      commands::update_install,
     ])
     .setup(|app, api| {
       #[cfg(mobile)]

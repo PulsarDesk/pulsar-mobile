@@ -1,6 +1,6 @@
 ## Default Permission
 
-Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture).
+Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture + in-app update download/install).
 
 #### This default permission set includes the following:
 
@@ -19,6 +19,10 @@ Default permissions for the pulsar-video plugin (attach/detach surface + decode 
 - `allow-get-wallpaper-avatar`
 - `allow-mic-start`
 - `allow-mic-stop`
+- `allow-update-download`
+- `allow-update-cancel`
+- `allow-update-status`
+- `allow-update-install`
 
 ## Permission Table
 
@@ -415,6 +419,110 @@ Enables the set_video_transform command without any pre-configured scope.
 <td>
 
 Denies the set_video_transform command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-update-cancel`
+
+</td>
+<td>
+
+Enables the update_cancel command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-update-cancel`
+
+</td>
+<td>
+
+Denies the update_cancel command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-update-download`
+
+</td>
+<td>
+
+Enables the update_download command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-update-download`
+
+</td>
+<td>
+
+Denies the update_download command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-update-install`
+
+</td>
+<td>
+
+Enables the update_install command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-update-install`
+
+</td>
+<td>
+
+Denies the update_install command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-update-status`
+
+</td>
+<td>
+
+Enables the update_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-update-status`
+
+</td>
+<td>
+
+Denies the update_status command without any pre-configured scope.
 
 </td>
 </tr>

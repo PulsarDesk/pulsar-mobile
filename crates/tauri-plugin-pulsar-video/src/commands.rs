@@ -73,13 +73,16 @@ pub(crate) async fn set_orientation<R: Runtime>(
 
 /// Match the system status / navigation bar icon colour to the app theme:
 /// `light_theme: true` (light background) → DARK icons; `false` (dark theme) →
-/// LIGHT icons. JS-invokable as `plugin:pulsar-video|setStatusBar`.
+/// LIGHT icons. `setting` is the app's theme SETTING (`light` | `dark` | `system`);
+/// Android adopts it as the app's night mode so the launch splash matches the app
+/// theme instead of the device's. JS-invokable as `plugin:pulsar-video|setStatusBar`.
 #[command]
 pub(crate) async fn set_status_bar<R: Runtime>(
     app: AppHandle<R>,
     light_theme: bool,
+    setting: Option<String>,
 ) -> Result<AttachResponse> {
-    app.pulsar_video().set_status_bar(light_theme)
+    app.pulsar_video().set_status_bar(light_theme, setting)
 }
 
 /// Read the system clipboard text. The Android WebView denies
@@ -141,4 +144,47 @@ pub(crate) async fn mic_start<R: Runtime>(app: AppHandle<R>) -> Result<AttachRes
 #[command]
 pub(crate) async fn mic_stop<R: Runtime>(app: AppHandle<R>) -> Result<AttachResponse> {
     app.pulsar_video().mic_stop()
+}
+
+// ---- In-app update (Android: Updater.kt) -------------------------------------
+
+/// Start downloading the release APK `url` for `version` (`size` bytes, 0 = unknown) on a
+/// native background thread; resolves immediately. Poll `update_status` for progress.
+/// JS-invokable as `plugin:pulsar-video|update_download`.
+#[command]
+pub(crate) async fn update_download<R: Runtime>(
+    app: AppHandle<R>,
+    url: String,
+    version: String,
+    size: u64,
+) -> Result<AttachResponse> {
+    app.pulsar_video().update_download(&url, &version, size)
+}
+
+/// Stop the running update download and delete its partial file.
+/// JS-invokable as `plugin:pulsar-video|update_cancel`.
+#[command]
+pub(crate) async fn update_cancel<R: Runtime>(app: AppHandle<R>) -> Result<AttachResponse> {
+    app.pulsar_video().update_cancel()
+}
+
+/// Is `version`'s APK on disk (with `size` bytes, 0 = don't check) + live download progress.
+/// JS-invokable as `plugin:pulsar-video|update_status`.
+#[command]
+pub(crate) async fn update_status<R: Runtime>(
+    app: AppHandle<R>,
+    version: String,
+    size: Option<u64>,
+) -> Result<UpdateStatus> {
+    app.pulsar_video().update_status(&version, size.unwrap_or(0))
+}
+
+/// Hand the downloaded APK to the system installer (after the unknown-sources permission and
+/// a signing-certificate match check). JS-invokable as `plugin:pulsar-video|update_install`.
+#[command]
+pub(crate) async fn update_install<R: Runtime>(
+    app: AppHandle<R>,
+    version: String,
+) -> Result<UpdateInstall> {
+    app.pulsar_video().update_install(&version)
 }

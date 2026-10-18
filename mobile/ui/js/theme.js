@@ -44,8 +44,10 @@ function apply() {
 	const r = resolved();
 	document.documentElement.setAttribute('data-theme', r);
 	// Native bars: light theme → dark icons (lightTheme=true); dark → light icons.
+	// `setting` also becomes Android's app night mode, so the next launch splash
+	// matches the in-app theme.
 	if (hasTauri) {
-		invoke('plugin:pulsar-video|set_status_bar', { lightTheme: r === 'light' }).catch(() => {});
+		invoke('plugin:pulsar-video|set_status_bar', { lightTheme: r === 'light', setting: _setting }).catch(() => {});
 	}
 }
 

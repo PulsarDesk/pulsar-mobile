@@ -212,6 +212,10 @@ async function boot() {
 	// 3f. Controller navigation of the whole app UI (D-pad/stick + A/B).
 	startGamepadNav();
 
+	// 3g. Update check (GitHub latest release) → top-bar indicator + update sheet
+	// (Android only). Guarded like the session modules so it can never block boot.
+	import('./update.js').then((m) => m.initUpdate()).catch(() => null);
+
 	// 4. In-session bar wiring.
 	wireSessionBar();
 
@@ -393,11 +397,16 @@ function wireTouchForwarding() {
 	let cursorEl = null;
 
 	// Gesture bookkeeping
-	const TAP_SLOP = 10, LONG_MS = 480, DBL_MS = 280, TAP_MAX_MS = 600, DRAG_DBL_MS = 450;
+	const TAP_SLOP = 10, LONG_MS = 480, DBL_MS = 280, TAP_MAX_MS = 600, DRAG_DBL_MS = 250;
 	// A double-tap-drag ("tap-and-a-half") or armed long-press grabs the left button
 	// after this tiny move (px) — small so fast/short drags engage as a DRAG instead of
 	// being misread as a double-click.
 	const DRAG_ENGAGE = 3;
+	// Double-tap-drag is stricter than the long-press drag above: it is easy to trigger
+	// by accident (a quick re-tap that jitters), so the 2nd tap must come within
+	// DRAG_DBL_MS and DBL_TAP_NEAR px of the 1st, and only a DBL_DRAG_ENGAGE px move
+	// starts the drag.
+	const DBL_TAP_NEAR = 32, DBL_DRAG_ENGAGE = 10;
 	// A 2nd tap released in place within this many ms = double-click. Held longer or
 	// moved = drag (whose button-down is delayed past the OS double-click window, so
 	// the drag can never fabricate a double-click).
@@ -410,6 +419,12 @@ function wireTouchForwarding() {
 	const SCROLL_GAIN = 12;
 	let g1 = null;             // 1-finger: {sx,sy,x,y,t,moved,dragging}
 	let g2 = null;             // 2-finger: {d0, mid0, type, lastMid}
+	// Two-finger TAP → right click (the trackpad convention). Tracked apart from g2,
+	// which is dropped as soon as one finger lifts, while the tap is only decided once
+	// both are up: {t, x, y} at the second finger's touchdown; null once it scrolls /
+	// zooms, a third finger lands or it is held too long.
+	let tap2 = null;
+	const TAP2_MAX_MS = 300;
 	let longTimer = null;
 	let lastTap = null;
 	let lastClickSent = null; // {t,fx,fy} — cooldown so the HOST OS can never see two rapid clicks (= its own double-click)
@@ -640,9 +655,10 @@ function wireTouchForwarding() {
 			// Two fingers → pinch-zoom / pan / scroll. Abort any pending 1-finger gesture.
 			g1 = null; clearTimeout(longTimer); longTimer = null;
 			multi = true;
-			if (isSplit()) { g2 = null; pinch = null; return; }
+			if (isSplit()) { g2 = null; pinch = null; tap2 = null; return; }
 			const a = e.touches[0], b = e.touches[1];
 			const mid0 = { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+			tap2 = e.touches.length === 2 ? { t: Date.now(), x: mid0.x, y: mid0.y } : null;
 			g2 = { d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1, mid0, type: 'none', lastMid: mid0 };
 			pinch = beginPinch(e.touches);
 			return;
@@ -656,10 +672,10 @@ function wireTouchForwarding() {
 		// DRAG as soon as it moves (the standard trackpad gesture; matches the
 		// user's "double-click then hold to drag"). No long still-hold needed.
 		if (lastTap && (Date.now() - lastTap.t) < DRAG_DBL_MS &&
-		    Math.hypot(t.clientX - (lastTap.fx ?? lastTap.x), t.clientY - (lastTap.fy ?? lastTap.y)) < 48) {
+		    Math.hypot(t.clientX - (lastTap.fx ?? lastTap.x), t.clientY - (lastTap.fy ?? lastTap.y)) < DBL_TAP_NEAR) {
 			// 2nd tap of a double-tap: send NOTHING yet — disambiguate by what follows.
 			//   release in place → down+up sent on RELEASE = click #2 → double-click
-			//   move (>DRAG_ENGAGE) → button pressed at the start = drag, no wait
+			//   move (>DBL_DRAG_ENGAGE) → button pressed at the start = drag, no wait
 			//   hold still → nothing goes to the host, so no accidental double-click
 			g1.afterTap = true;
 			g1.dblArmed = true;
@@ -699,6 +715,7 @@ function wireTouchForwarding() {
 				if (dDist > PINCH_THRESH && dDist > 1.4 * dMid) g2.type = 'zoom';
 				else if (dMid > SCROLL_SLOP && dMid >= dDist) g2.type = 'scroll'; // two-finger drag = ALWAYS scroll (zoomed too; panning stays on pinch/cursor-edge)
 			}
+			if (g2.type !== 'none') tap2 = null;
 			if (g2.type === 'zoom') {
 				updatePinch(e.touches);
 			} else if (g2.type === 'scroll') {
@@ -722,7 +739,7 @@ function wireTouchForwarding() {
 		// sent click; pointer-moves are held until the down goes out, then the drag
 		// streams normally. No recent click → down is immediate.
 		if (g1.dblArmed && !g1.dragStarted &&
-		    Math.hypot(t.clientX - g1.sx, t.clientY - g1.sy) > DRAG_ENGAGE) {
+		    Math.hypot(t.clientX - g1.sx, t.clientY - g1.sy) > DBL_DRAG_ENGAGE) {
 			g1.dblArmed = false;
 			g1.dragStarted = true;
 			// Grab point = where the user AIMED at engage time (the local cursor visual
@@ -776,6 +793,14 @@ function wireTouchForwarding() {
 			clearTimeout(longTimer); longTimer = null;
 			if (multi) {
 				multi = false; pinch = null; g2 = null;
+				// Quick two-finger tap that neither scrolled nor zoomed → right click at the
+				// cursor (mouse mode) or between the fingers (touch mode).
+				if (tap2 && Date.now() - tap2.t <= TAP2_MAX_MS) {
+					const p = mode === 'mouse' ? (cur || rectCenter()) : tap2;
+					sendClickAt(p.x, p.y, 1);
+					if (navigator.vibrate) try { navigator.vibrate(12); } catch (_) {}
+				}
+				tap2 = null;
 				// Residual zoom lock: after any pinch, zfac rarely lands back at exactly 1,
 				// and anything >1.001 classifies every later two-finger drag as 'pan' —
 				// scroll becomes unreachable forever. If the gesture ended near fit, snap
@@ -835,7 +860,7 @@ function wireTouchForwarding() {
 	addEventListener('touchcancel', () => {
 		if (g1 && g1.downTimer) clearTimeout(g1.downTimer);
 		if (g1 && g1.dragStarted && !g1.waitingDown) { const c = (mode === 'mouse') ? (cur || rectCenter()) : { x: g1.x, y: g1.y }; sendButtonAt(c.x, c.y, 0, false); }
-		clearTimeout(longTimer); longTimer = null; g1 = null; g2 = null; pinch = null; multi = false;
+		clearTimeout(longTimer); longTimer = null; g1 = null; g2 = null; pinch = null; multi = false; tap2 = null;
 	}, { passive: true });
 
 	// Pointer-mode toggle (from the overlay Display card). Persisted + reflected live.

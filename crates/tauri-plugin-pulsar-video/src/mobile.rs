@@ -39,6 +39,13 @@ struct SlotArgs {
   slot: u8,
 }
 
+#[derive(Serialize)]
+struct UpdateArgs<'a> {
+  url: &'a str,
+  version: &'a str,
+  size: u64,
+}
+
 /// Access to the pulsar-video APIs.
 pub struct PulsarVideo<R: Runtime>(PluginHandle<R>);
 
@@ -281,11 +288,12 @@ impl<R: Runtime> PulsarVideo<R> {
   }
 
   /// Status / nav bar icon colour vs the app theme: `light_theme: true` → dark
-  /// icons (light bg); `false` → light icons (dark bg).
-  pub fn set_status_bar(&self, light_theme: bool) -> crate::Result<AttachResponse> {
+  /// icons (light bg); `false` → light icons (dark bg). `setting` (the app theme
+  /// setting) becomes the app's night mode, for the launch splash.
+  pub fn set_status_bar(&self, light_theme: bool, setting: Option<String>) -> crate::Result<AttachResponse> {
     self
       .0
-      .run_mobile_plugin("setStatusBar", StatusBarArgs { light_theme })
+      .run_mobile_plugin("setStatusBar", StatusBarArgs { light_theme, setting })
       .map_err(Into::into)
   }
 
@@ -365,6 +373,37 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
+  // ---- In-app update (Updater.kt) --------------------------------------------
+
+  /// Start the background APK download (resolves immediately).
+  pub fn update_download(&self, url: &str, version: &str, size: u64) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("updateDownload", UpdateArgs { url, version, size })
+      .map_err(Into::into)
+  }
+
+  /// Stop the running download + delete its `.part`.
+  pub fn update_cancel(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("updateCancel", ()).map_err(Into::into)
+  }
+
+  /// On-disk + live-progress state for `version`.
+  pub fn update_status(&self, version: &str, size: u64) -> crate::Result<UpdateStatus> {
+    self
+      .0
+      .run_mobile_plugin("updateStatus", UpdateArgs { url: "", version, size })
+      .map_err(Into::into)
+  }
+
+  /// Launch the system installer for `version`'s downloaded APK.
+  pub fn update_install(&self, version: &str) -> crate::Result<UpdateInstall> {
+    self
+      .0
+      .run_mobile_plugin("updateInstall", UpdateArgs { url: "", version, size: 0 })
+      .map_err(Into::into)
+  }
+
   /// Poll one ~20 ms PCM frame (48 kHz mono s16le, 1920 bytes) from the native mic
   /// buffer, returning the raw decoded s16le bytes — or an empty `Vec` when the
   /// buffer has no frame ready. The Kotlin side base64-encodes the PCM into the
@@ -418,6 +457,7 @@ struct OrientationArgs {
 #[serde(rename_all = "camelCase")]
 struct StatusBarArgs {
   light_theme: bool,
+  setting: Option<String>,
 }
 
 #[derive(Serialize)]

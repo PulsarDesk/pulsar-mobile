@@ -2283,10 +2283,10 @@
           "markdownDescription": "Denies the save command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture).\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-detach`\n- `allow-play-test`\n- `allow-set-audio-muted`\n- `allow-set-aspect`\n- `allow-set-video-transform`\n- `allow-set-orientation`\n- `allow-set-status-bar`\n- `allow-read-clipboard`\n- `allow-screen-refresh-rate`\n- `allow-gamepad-battery`\n- `allow-get-video-size`\n- `allow-get-wallpaper-avatar`\n- `allow-mic-start`\n- `allow-mic-stop`",
+          "description": "Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture + in-app update download/install).\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-detach`\n- `allow-play-test`\n- `allow-set-audio-muted`\n- `allow-set-aspect`\n- `allow-set-video-transform`\n- `allow-set-orientation`\n- `allow-set-status-bar`\n- `allow-read-clipboard`\n- `allow-screen-refresh-rate`\n- `allow-gamepad-battery`\n- `allow-get-video-size`\n- `allow-get-wallpaper-avatar`\n- `allow-mic-start`\n- `allow-mic-stop`\n- `allow-update-download`\n- `allow-update-cancel`\n- `allow-update-status`\n- `allow-update-install`",
           "type": "string",
           "const": "pulsar-video:default",
-          "markdownDescription": "Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture).\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-detach`\n- `allow-play-test`\n- `allow-set-audio-muted`\n- `allow-set-aspect`\n- `allow-set-video-transform`\n- `allow-set-orientation`\n- `allow-set-status-bar`\n- `allow-read-clipboard`\n- `allow-screen-refresh-rate`\n- `allow-gamepad-battery`\n- `allow-get-video-size`\n- `allow-get-wallpaper-avatar`\n- `allow-mic-start`\n- `allow-mic-stop`"
+          "markdownDescription": "Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture + in-app update download/install).\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-detach`\n- `allow-play-test`\n- `allow-set-audio-muted`\n- `allow-set-aspect`\n- `allow-set-video-transform`\n- `allow-set-orientation`\n- `allow-set-status-bar`\n- `allow-read-clipboard`\n- `allow-screen-refresh-rate`\n- `allow-gamepad-battery`\n- `allow-get-video-size`\n- `allow-get-wallpaper-avatar`\n- `allow-mic-start`\n- `allow-mic-stop`\n- `allow-update-download`\n- `allow-update-cancel`\n- `allow-update-status`\n- `allow-update-install`"
         },
         {
           "description": "Enables the attach command without any pre-configured scope.",
@@ -2379,6 +2379,30 @@
           "markdownDescription": "Enables the set_video_transform command without any pre-configured scope."
         },
         {
+          "description": "Enables the update_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:allow-update-cancel",
+          "markdownDescription": "Enables the update_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_download command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:allow-update-download",
+          "markdownDescription": "Enables the update_download command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:allow-update-install",
+          "markdownDescription": "Enables the update_install command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:allow-update-status",
+          "markdownDescription": "Enables the update_status command without any pre-configured scope."
+        },
+        {
           "description": "Denies the attach command without any pre-configured scope.",
           "type": "string",
           "const": "pulsar-video:deny-attach",
@@ -2467,6 +2491,30 @@
           "type": "string",
           "const": "pulsar-video:deny-set-video-transform",
           "markdownDescription": "Denies the set_video_transform command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:deny-update-cancel",
+          "markdownDescription": "Denies the update_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_download command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:deny-update-download",
+          "markdownDescription": "Denies the update_download command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:deny-update-install",
+          "markdownDescription": "Denies the update_install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "pulsar-video:deny-update-status",
+          "markdownDescription": "Denies the update_status command without any pre-configured scope."
         }
       ]
     },

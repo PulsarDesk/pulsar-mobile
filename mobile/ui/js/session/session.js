@@ -1173,13 +1173,22 @@ function _showWaitingOverlay() {
 	el.id = 'ps-wait';
 	el.className = 'ps-wait';
 	el.setAttribute('role', 'status');
+	// The Pulsar mark sits in the middle of the expanding rings (it used to be rings only).
 	el.innerHTML =
-		'<div class="ps-wait-rings" aria-hidden="true"><span></span><span></span><span></span></div>' +
+		'<div class="ps-wait-rings" aria-hidden="true"><span></span><span></span><span></span>' +
+		'<svg class="ps-wait-mark" viewBox="0 0 52 52" fill="none">' +
+		'<circle cx="26" cy="26" r="22" stroke="currentColor" stroke-width="1.5" opacity="0.22"/>' +
+		'<circle cx="26" cy="26" r="14" stroke="currentColor" stroke-width="1.75" opacity="0.5"/>' +
+		'<circle cx="26" cy="26" r="7" stroke="currentColor" stroke-width="2"/>' +
+		'<circle cx="26" cy="26" r="3" fill="currentColor"/></svg></div>' +
 		'<p class="ps-wait-text">' + t('session.waiting') + '</p>';
 	document.body.appendChild(el);
+	// Nothing to control yet: hide the overlay FAB until the first frame (CSS below).
+	document.body.classList.add('ps-waiting');
 }
 
 function _hideWaitingOverlay() {
+	document.body.classList.remove('ps-waiting');
 	const el = document.getElementById('ps-wait');
 	if (!el) return;
 	el.classList.add('ps-wait-out');
@@ -1224,7 +1233,24 @@ function _injectStyles() {
 	max-width: 320px;
 	line-height: 1.45;
 }
-.ps-wait-rings { position: relative; width: 64px; height: 64px; }
+/* The overlay FAB (z 16) showed through the translucent wait screen — the session isn't
+   controllable before the first frame, so hide it outright while waiting. */
+body.ps-waiting .overlay-fab { display: none !important; }
+.ps-wait-rings { position: relative; width: 96px; height: 96px; }
+.ps-wait-mark {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 52px;
+	height: 52px;
+	margin: -26px 0 0 -26px;
+	color: var(--brand, #6366f1);
+	animation: ps-wait-breathe 1.6s ease-in-out infinite alternate;
+}
+@keyframes ps-wait-breathe {
+	from { transform: scale(0.94); }
+	to   { transform: scale(1.06); }
+}
 .ps-wait-rings span {
 	position: absolute;
 	inset: 0;

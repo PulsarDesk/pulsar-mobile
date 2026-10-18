@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.UiModeManager
 import android.app.WallpaperManager
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -230,6 +231,15 @@ class NotifyRequestArgs {
 @InvokeArg
 class StatusBarArgs {
     var lightTheme: Boolean = true
+    var setting: String? = null
+}
+
+/** In-app update (see Updater.kt). `size` = the release asset's byte size (0 = unknown). */
+@InvokeArg
+class UpdateArgs {
+    var url: String? = null
+    var version: String? = null
+    var size: Long = 0
 }
 
 /**
@@ -816,6 +826,40 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val r = JSObject(); r.put("ok", isA11yGranted()); invoke.resolve(r)
     }
 
+    // ---- In-app update (Updater.kt) -------------------------------------------------
+
+    /** Start the APK download on a background thread (resolves immediately; poll updateStatus). */
+    @Command
+    fun updateDownload(invoke: Invoke) {
+        val a = invoke.parseArgs(UpdateArgs::class.java)
+        val url = a.url; val ver = a.version
+        if (url.isNullOrEmpty() || ver.isNullOrEmpty()) { invoke.reject("url/version required"); return }
+        val err = Updater.start(activity, url, ver, a.size) { ev, payload -> trigger(ev, payload) }
+        if (err != null) { invoke.reject(err); return }
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /** Stop the running download and delete its .part file. */
+    @Command
+    fun updateCancel(invoke: Invoke) {
+        Updater.cancel(activity)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    /** {downloaded, bytes, active, received, total, bps, error} for `version`. */
+    @Command
+    fun updateStatus(invoke: Invoke) {
+        val a = invoke.parseArgs(UpdateArgs::class.java)
+        invoke.resolve(Updater.status(activity, a.version ?: "", a.size))
+    }
+
+    /** Launch the system installer → {started} | {needsPermission} | {signatureMismatch} | {error}. */
+    @Command
+    fun updateInstall(invoke: Invoke) {
+        val a = invoke.parseArgs(UpdateArgs::class.java)
+        invoke.resolve(Updater.install(activity, a.version ?: ""))
+    }
+
     /**
      * Is the control AccessibilityService DECLARED in this build? Always true for the
      * release APK (it ships the service disabled, not absent), but a build that strips the
@@ -996,6 +1040,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
      * `lightTheme=true` (light app background) → dark icons; `false` (dark theme) →
      * light icons. The MainActivity sets dark icons at launch for the light default;
      * this lets js/theme.js flip them live when the user switches theme.
+     *
+     * `setting` (light | dark | system) also becomes the app's night mode
+     * (UiModeManager.setApplicationNightMode, API 31+): the system persists it and
+     * applies it to the NEXT launch's splash, which runs before any app code — so the
+     * splash follows the in-app theme, not the device's. Only set when it changed
+     * (the manifest handles uiMode, so the activity is not recreated).
      */
     @Command
     fun setStatusBar(invoke: Invoke) {
@@ -1004,6 +1054,22 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             val c = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
             c.isAppearanceLightStatusBars = args.lightTheme
             c.isAppearanceLightNavigationBars = args.lightTheme
+        }
+        val night = when (args.setting) {
+            "light" -> UiModeManager.MODE_NIGHT_NO
+            "dark" -> UiModeManager.MODE_NIGHT_YES
+            "system" -> UiModeManager.MODE_NIGHT_AUTO
+            else -> null
+        }
+        if (night != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val prefs = activity.getSharedPreferences("pulsar.theme", Context.MODE_PRIVATE)
+            if (prefs.getInt("nightMode", -1) != night) {
+                try {
+                    (activity.getSystemService(Context.UI_MODE_SERVICE) as UiModeManager)
+                        .setApplicationNightMode(night)
+                    prefs.edit().putInt("nightMode", night).apply()
+                } catch (_: Exception) {}
+            }
         }
         val r = JSObject(); r.put("ok", true); invoke.resolve(r)
     }

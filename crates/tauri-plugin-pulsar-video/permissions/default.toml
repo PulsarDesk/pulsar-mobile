@@ -1,5 +1,5 @@
 [default]
-description = "Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture)."
+description = "Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture + in-app update download/install)."
 permissions = [
   "allow-attach",
   "allow-detach",
@@ -16,4 +16,8 @@ permissions = [
   "allow-get-wallpaper-avatar",
   "allow-mic-start",
   "allow-mic-stop",
+  "allow-update-download",
+  "allow-update-cancel",
+  "allow-update-status",
+  "allow-update-install",
 ]

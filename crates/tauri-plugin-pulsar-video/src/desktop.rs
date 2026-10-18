@@ -125,7 +125,7 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn set_orientation(&self, _landscape: bool) -> crate::Result<AttachResponse> {
     Self::noop("no orientation lock on desktop")
   }
-  pub fn set_status_bar(&self, _light_theme: bool) -> crate::Result<AttachResponse> {
+  pub fn set_status_bar(&self, _light_theme: bool, _setting: Option<String>) -> crate::Result<AttachResponse> {
     Self::noop("no system bars on desktop")
   }
   pub fn read_clipboard(&self) -> crate::Result<AttachResponse> {
@@ -156,5 +156,20 @@ impl<R: Runtime> PulsarVideo<R> {
 
   pub fn poll_mic_frame(&self) -> crate::Result<Vec<u8>> {
     Ok(Vec::new())
+  }
+
+  // ---- In-app update no-ops (Android-only; the UI never offers it elsewhere) ----
+
+  pub fn update_download(&self, _url: &str, _version: &str, _size: u64) -> crate::Result<AttachResponse> {
+    Self::noop("no in-app update on desktop")
+  }
+  pub fn update_cancel(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no in-app update on desktop")
+  }
+  pub fn update_status(&self, _version: &str, _size: u64) -> crate::Result<UpdateStatus> {
+    Ok(UpdateStatus::default())
+  }
+  pub fn update_install(&self, _version: &str) -> crate::Result<UpdateInstall> {
+    Ok(UpdateInstall { error: "no in-app update on desktop".into(), ..Default::default() })
   }
 }
