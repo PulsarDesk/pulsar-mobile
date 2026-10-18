@@ -10,16 +10,12 @@ remote peer's gestures (accessibility service + SYSTEM_ALERT_WINDOW). **iOS does
 not exist yet** (no `gen/apple/`, no Swift — only a plugin binding stub + icons).
 AndroidTV is supported (leanback launcher + `gamepad-nav.js` D-pad navigation).
 
-## Layout
+This file is the **index**. Read the topic file before working in its area:
 
-- `mobile/` — the Tauri app crate (`pulsar-mobile`). `src/`: client.rs (2k LOC),
-  host.rs, net.rs, rtp.rs, datachan.rs, session_cmds.rs, relay_cmds.rs
-  (on-device local relay: `start/stop/local_relay_status`), config, identity.
-- `mobile/ui/` — **static** webview UI, plain ES modules, no bundler
-  (`frontendDist: "ui"`). i18n: `ui/js/i18n/{en,tr,ru,kk}.js`.
-- `crates/tauri-plugin-pulsar-video/` — the native surface plugin.
-  `PulsarVideoPlugin.kt` (~2.8k lines) is the center of gravity.
-- Deps: `pulsar-core` + `pulsar-relay` as **git deps**.
+| Topic | File | Read before touching… |
+| --- | --- | --- |
+| Where things live | [docs/agents/layout.md](docs/agents/layout.md) | anything — `mobile/` crate, static `ui/`, the video plugin |
+| Develop + release | [docs/agents/build-release.md](docs/agents/build-release.md) | running on a device/emulator, debug APKs, the release pipeline, the a11y-service manifest rule |
 
 ## Critical gotchas
 
@@ -45,7 +41,7 @@ AndroidTV is supported (leanback launcher + `gamepad-nav.js` D-pad navigation).
   breaks the whole module silently (import `.catch` swallows it). Run
   `node --check` after editing.
 
-## Develop
+## Develop (quick)
 
 ```bash
 cd mobile && bun install
@@ -53,16 +49,4 @@ bun run tauri android dev        # emulator/device (SDK+NDK; see project memory)
 cargo check -p pulsar-mobile     # host compile-check, no device toolchain
 ```
 
-Standalone debug APK: `tauri android build --debug`, install the **universal**
-variant (`arm64`-only can carry a stale cached devUrl). `tauri android dev`
-always bakes a live devUrl — the APK breaks when you kill the dev process.
-
-Releases: build-first — semantic-release dry-runs the version, the APK is built with
-it (`--config '{"version":…}'`, tauri.conf.json is never rewritten) and verified, THEN
-the tag + release is cut with `Pulsar-android.apk` attached. **`PulsarA11yService` is
-declared `android:enabled="false"` in the plugin manifest — load-bearing:** Play
-Protect blocks browser installs of apps that declare an accessibility service, but
-not a disabled one (verified on a phone 2026-09-03); `openA11ySettings` enables the
-component at runtime. CI's verify step fails the release if the attribute goes. The
-launcher icon must be re-branded after `tauri android init` (`tauri icon
-app-icon.png`) or the APK ships Tauri's icon.
+**Never push a behaviour change before the maintainer tested it** on a device.
