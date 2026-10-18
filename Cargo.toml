@@ -31,3 +31,5 @@ pulsar-relay = { git = "https://github.com/PulsarDesk/relay" }
 # git to the pulsar-core repo (which vendors the fork).
 [patch.crates-io]
 vigem-client = { git = "https://github.com/PulsarDesk/pulsar-core" }
+# reed-solomon-erasure 6.0.0 with lru bumped (RUSTSEC-2026-0253) — vendored in pulsar-core.
+reed-solomon-erasure = { git = "https://github.com/PulsarDesk/pulsar-core" }
