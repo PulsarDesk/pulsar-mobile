@@ -43,4 +43,4 @@ tracing-subscriber = { workspace = true }
 
 # Route log records (incl. the client read-loop counters) to Android logcat.
 [target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.14"
+android_logger = "0.15"

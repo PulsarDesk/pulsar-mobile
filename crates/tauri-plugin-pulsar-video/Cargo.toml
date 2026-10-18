@@ -14,7 +14,7 @@ serde = "1.0"
 thiserror = "2"
 # Encode video access units as base64 to hand them across the Rust→Kotlin plugin
 # bridge (run_mobile_plugin serializes payloads as JSON; raw Vec<u8> would bloat).
-base64 = "0.22"
+base64 = "0.23"
 
 [build-dependencies]
 tauri-plugin = { version = "2.6.3", features = ["build"] }
