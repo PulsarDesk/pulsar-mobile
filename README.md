@@ -1,74 +1,91 @@
-# pulsar-mobile
+<p align="center">
+  <img width="120" height="120" src="https://raw.githubusercontent.com/PulsarDesk/.github/main/profile/logo.svg" alt="Pulsar logo">
+</p>
 
-The **Android + iOS** app for [Pulsar](https://github.com/PulsarDesk) — the free,
-open-source remote-desktop + game-streaming platform.
+<h1 align="center">Pulsar Mobile</h1>
 
-A **Tauri 2** shell (Path A: a transparent webview over a native video surface)
-that reuses the shared engine. The phone is both a **client** and a **host**:
-it can share its own screen (MediaProjection capture + MediaCodec encode) and
-accept remote control (accessibility-service gesture injection). Desktop-only
-pieces (SDL3, ffmpeg, gtk/x11, libmpv) deliberately stay out so the crate
-cross-compiles to mobile. Android is the working target; iOS is scaffolding
-only for now. Android TV is supported (leanback launcher + D-pad navigation).
+<p align="center">
+  Control your computer from your phone, or share your phone's screen. Free, open source, no account. 📱
+</p>
 
-## Layout
+<p align="center">
+  <img src="https://img.shields.io/maintenance/yes/2026?style=for-the-badge" alt="Maintained">
+  <a href="https://github.com/PulsarDesk/pulsar-mobile/releases"><img src="https://img.shields.io/github/v/release/PulsarDesk/pulsar-mobile?include_prereleases&style=for-the-badge" alt="Release"></a>
+  <a href="https://github.com/PulsarDesk/pulsar-mobile/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/PulsarDesk/pulsar-mobile/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/PulsarDesk/pulsar-mobile?style=for-the-badge" alt="License"></a>
+</p>
 
-```
-pulsar-mobile/
-  mobile/                         # the Tauri mobile app (pulsar-mobile crate + ui/)
-    src/                          #   Rust: client/host/transport glue
-    ui/                           #   static webview UI (touch-first)
-    tauri.conf.json               #   mobile app config
-  crates/
-    tauri-plugin-pulsar-video/    # native video-surface plugin (Android MediaCodec
-                                  # host/encode, surface transform/orientation)
-```
+---
 
-Depends on (git dependencies):
-[`pulsar-core`](https://github.com/PulsarDesk/pulsar-core) (shared engine),
-[`relay`](https://github.com/PulsarDesk/relay) (on-device local relay), and
-transitively [`pulsar-proto`](https://github.com/PulsarDesk/pulsar-proto).
+## 🚀 Project Status
+**Current Status:** Alpha (0.x). Android works: connect to a computer with touch, mouse and keyboard, or share the
+phone's screen and let someone control it. iOS is not available yet.
 
-## Develop
+---
 
+## 📦 Other Pulsar Repositories
+- [**pulsar-desktop**](https://github.com/PulsarDesk/pulsar-desktop) - Pulsar for Windows, macOS and Linux
+- [**relay**](https://github.com/PulsarDesk/relay) - Run your own relay server
+- [**pulsar-core**](https://github.com/PulsarDesk/pulsar-core) - The shared engine behind both apps
+
+---
+
+## ⚡ Trying Pulsar Mobile
+Download [`Pulsar-android.apk`](https://github.com/PulsarDesk/pulsar-mobile/releases/latest/download/Pulsar-android.apk)
+from the [latest release](https://github.com/PulsarDesk/pulsar-mobile/releases/latest) and install it. The app
+updates itself after that.
+
+- **Letting others control the phone** needs Pulsar's accessibility service. Android may block it for apps installed
+  from a file: App info -> ⋮ -> **Allow restricted settings**, then turn it on.
+- **Android TV:** the app is navigated with the remote's D-pad.
+
+---
+
+## 📱 Where it has been tested
+| Device | Connect to a computer | Share this phone |
+|---|---|---|
+| Samsung Galaxy Z Flip4 | ✅ | ✅ |
+| Android emulator (Android 15) | ✅ | ❔ partly |
+| Android TV | ❔ not tested on a real TV yet | ❔ |
+| iPhone / iPad | ❌ not available yet | ❌ |
+
+Needs Android 7.0 or newer. Tried it on another phone? A short note in an
+[issue](https://github.com/PulsarDesk/pulsar-mobile/issues) helps, even when everything worked.
+
+---
+
+## 🐞 Reporting a bug
+[Open an issue](https://github.com/PulsarDesk/pulsar-mobile/issues/new/choose) and include:
+
+- Pulsar version, phone model and Android version
+- The other side: computer or phone, its system and Pulsar version
+- What you did and what happened (black screen, no connection, touch not working, crash, ...)
+- A screen recording, if you can
+
+---
+
+## 🛠️ Requirements
+**To use:** an Android 7.0+ phone, tablet or TV.
+
+**For contributors / development:** Rust stable, [bun](https://bun.sh), the Android SDK + NDK and JDK 17.
+
+---
+
+## 🤝 Contributing
+Everyone can open [issues](https://github.com/PulsarDesk/pulsar-mobile/issues) and pull requests. Irrelevant or
+abusive issues may be closed or removed. Commits follow [Conventional Commits](https://www.conventionalcommits.org).
+
+### Development Guide
 ```bash
-cd mobile
+git clone https://github.com/PulsarDesk/pulsar-mobile.git
+cd pulsar-mobile/mobile
 bun install
-bun run tauri android dev      # Android (needs Android SDK + NDK + an emulator/device)
-bun run tauri ios dev          # iOS (needs macOS + Xcode)
+bun run tauri android dev    # needs a device or emulator
 ```
 
-Host compile-check (no device toolchain):
+More: [docs/development.md](docs/development.md) (layout, releases, signing, the accessibility service).
 
-```bash
-cargo check -p pulsar-mobile
-```
+---
 
-## Releases
-
-CI compile-checks every push/PR. `release.yml` cuts a **tag + GitHub Release** from
-Conventional Commits (no commit-back) — but only **after** the Android APKs have built:
-the version is computed in a dry run, both APKs are built with it stamped in and
-verified (signature, version, manifest), and the release is created last with the
-APKs attached. A failed build means no release, not an empty one.
-
-Every release attaches one APK, `Pulsar-android.apk` — named without a version so
-`releases/latest/download/Pulsar-android.apk` is a stable link.
-
-The phone-as-host remote-touch feature is an **accessibility service**
-(`PulsarA11yService`), and Google Play Protect refuses to install an app downloaded
-through a browser when its manifest declares one — "this app can access sensitive
-information", no override. Verified on a real phone: it does **not** refuse a service
-declared with `android:enabled="false"`. So the service ships disabled (in the plugin's
-`AndroidManifest.xml`) and the app enables the component the moment the user asks for
-remote control, right before opening the accessibility settings. CI fails the release
-if that attribute goes missing.
-
-Signing needs the repo secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`,
-`ANDROID_KEY_PASSWORD`, `ANDROID_STORE_PASSWORD`; the build fails loudly without
-them. **iOS** store builds need a macOS runner + Apple signing and are done manually
-for now.
-
-## License
-
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+## 📄 License
+Pulsar is licensed under **GNU GPLv3 or later** (GPL-3.0-or-later). See the [LICENSE](LICENSE) file for details.
