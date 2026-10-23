@@ -5,7 +5,7 @@
 <h1 align="center">Pulsar Mobile</h1>
 
 <p align="center">
-  Control your computer from your phone, or share your phone's screen. Free, open source, no account. 📱
+  Control your computer from your phone, or share your phone's screen. A free, open-source alternative to TeamViewer, AnyDesk and Parsec. 📱
 </p>
 
 <p align="center">
