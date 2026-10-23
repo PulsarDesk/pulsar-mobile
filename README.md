@@ -21,6 +21,12 @@
 **Current Status:** Alpha (0.x). Android works: connect to a computer with touch, mouse and keyboard, or share the
 phone's screen and let someone control it. iOS is not available yet.
 
+<p align="center">
+  <img src="docs/screenshots/connect.png" width="30%" alt="Connect screen">
+  <img src="docs/screenshots/my-device.png" width="30%" alt="My Device: ID and one-time password">
+  <img src="docs/screenshots/game-mode.png" width="30%" alt="Game mode">
+</p>
+
 ---
 
 ## 📦 Other Pulsar Repositories
