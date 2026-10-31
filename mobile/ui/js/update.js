@@ -1,7 +1,7 @@
 /**
  * update.js — in-app update for the Android app.
  *
- * 1. Check: on boot (and on later resumes) at most every 6 h, fetch the latest GitHub
+ * 1. Check: on boot, on later resumes and every 30 min — at most once an hour — fetch the latest GitHub
  *    release, pick its APK asset (`*.apk`, not the "hostcontrol" variant) and compare the
  *    tag with the running version (`__TAURI__.app.getVersion()`). Only a strictly newer
  *    semver counts. The last result is cached in localStorage; failures are silent and
@@ -28,7 +28,7 @@ import { t, lang } from './i18n.js';
 
 const REPO_API = 'https://api.github.com/repos/PulsarDesk/pulsar-mobile/releases/latest';
 const CACHE_KEY = 'pulsar.update.v1';
-const CHECK_EVERY_MS = 6 * 3600 * 1000;
+const CHECK_EVERY_MS = 3600 * 1000;
 const POLL_MS = 250;
 const MOCK_KEY = 'pulsar.update.mock';
 
@@ -106,7 +106,7 @@ function fromRelease(j) {
 	};
 }
 
-/** Check (rate-limited to once per 6 h through the cache). Silent on any failure. */
+/** Check (rate-limited to once an hour through the cache; GitHub allows 60 unauthenticated calls/h). Silent on any failure. */
 async function check() {
 	if (checking) return;
 	checking = true;
@@ -368,7 +368,7 @@ export function initUpdate() {
 	btn.addEventListener('click', openSheet);
 	if (!isAndroid) return;
 	check();
-	// Long-lived app: re-check when brought back (the 6 h cache gate keeps it cheap).
+	// Long-lived app: re-check when brought back (the 1 h cache gate keeps it cheap).
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'visible') { check(); if (rel) refreshStatus(); }
 	});
