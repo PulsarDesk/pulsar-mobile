@@ -43,8 +43,8 @@ use tauri_plugin_pulsar_video::PulsarVideoExt;
 use tokio::sync::{oneshot, Notify};
 
 use pulsar_core::service::{
-    accept, gen_password, media, need_password, recv_auth, reject, serve_with, DataHandlers,
-    InputEvent, StreamCaps,
+    accept, gen_password, media, need_password, recv_auth, reject, serve_with, Credential,
+    DataHandlers, InputEvent, StreamCaps,
 };
 use crate::client::parse_mode;
 use crate::config::load_config;
@@ -387,23 +387,38 @@ async fn approval_race<R: Runtime>(
     peer: &str,
     connect_password: &str,
 ) -> bool {
-    // Always read the initial Auth first.
-    let first_pw = recv_auth(sess).await.unwrap_or_default();
+    // Always read the initial Auth first (None = garbage/hang-up → treat as "no password").
+    let first = recv_auth(sess).await;
+    let has_pw = first.as_ref().is_some_and(|a| !a.is_empty());
 
     let otp = host_state.otp.lock().unwrap().clone();
+    // PAKE for new clients (the password never travels), plaintext compare for old ones.
+    let cred = match first {
+        Some(a) => a.verify(sess, &otp, connect_password).await,
+        None => Credential::None,
+    };
 
-    // Fast path: correct OTP.
-    if !otp.is_empty() && first_pw == otp {
-        let _ = accept(sess).await;
-        // Rotate the OTP after a successful one-time use.
-        let new_pw = gen_password();
-        *host_state.otp.lock().unwrap() = new_pw.clone();
-        let _ = app.emit("host-password", HostPasswordPayload { password: new_pw });
-        return true;
+    // Fast path: correct OTP — consume it only if it is still the live one (single use).
+    if cred == Credential::OneTime {
+        let rotated = {
+            let mut g = host_state.otp.lock().unwrap();
+            if !otp.is_empty() && *g == otp {
+                let new_pw = gen_password();
+                *g = new_pw.clone();
+                Some(new_pw)
+            } else {
+                None
+            }
+        };
+        if let Some(new_pw) = rotated {
+            let _ = accept(sess).await;
+            let _ = app.emit("host-password", HostPasswordPayload { password: new_pw });
+            return true;
+        }
     }
 
     // Fast path: standing connect-password.
-    if !connect_password.is_empty() && first_pw == connect_password {
+    if cred == Credential::Fixed {
         let _ = accept(sess).await;
         return true;
     }
@@ -414,7 +429,6 @@ async fn approval_race<R: Runtime>(
 
     // Emit session-request so the JS shows the approval bottom-sheet.
     let req_id = host_state.next_req.fetch_add(1, Ordering::Relaxed);
-    let has_pw = !first_pw.is_empty();
     let (name, id) = peer_identity(app, sess).await;
     let _ = app.emit(
         "session-request",

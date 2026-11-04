@@ -146,6 +146,7 @@ function friendlyConnectError(raw) {
 	// credential prompt. A `failed` that escapes means the user gave up on the sheet.
 	if (m.includes('relay_auth_failed'))                      return t('m.relayAuth.failed');
 	if (m.includes(CONN_TIMEOUT_MARKER))                      return t('connErr.timeout');
+	if (m.includes('peer-outdated'))                          return t('connErr.peerOutdated');
 	if (m.includes('relay did not respond'))                  return t('connErr.relayDown');
 	if (m.includes('could not be reached via the relay'))     return t('connErr.peerUnreachable');
 	if (m.includes('not registered with a relay yet'))        return t('connErr.notOnline');

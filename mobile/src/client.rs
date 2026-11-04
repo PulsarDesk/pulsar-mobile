@@ -716,6 +716,15 @@ fn parse_quality(s: &str) -> QualityPref {
 ///    - `Other` → ignore and continue polling.
 ///
 /// This replaces the old single-shot `authenticate()` call.
+/// Error text for a failed auth send. `peer-outdated` is mapped to localised copy by the
+/// connect screen: a password is never sent to an old host (see `ConnError::PeerOutdated`).
+fn auth_send_err(e: pulsar_core::ConnError) -> String {
+    match e {
+        pulsar_core::ConnError::PeerOutdated => "peer-outdated".into(),
+        e => format!("auth send failed: {e:?}"),
+    }
+}
+
 async fn auth_race<R: Runtime>(
     app: &AppHandle<R>,
     slot: u8,
@@ -726,7 +735,7 @@ async fn auth_race<R: Runtime>(
     // Send the initial auth message (possibly empty if unattended).
     send_auth(sess, initial_password)
         .await
-        .map_err(|e| format!("auth send failed: {e:?}"))?;
+        .map_err(auth_send_err)?;
 
     loop {
         let verdict = timeout(POST_AUTH_TIMEOUT, recv_host_auth(sess))
@@ -781,7 +790,7 @@ async fn auth_race<R: Runtime>(
                 // Re-send the password and loop back to poll.
                 send_auth(sess, &pw)
                     .await
-                    .map_err(|e| format!("auth send failed: {e:?}"))?;
+                    .map_err(auth_send_err)?;
             }
         }
     }

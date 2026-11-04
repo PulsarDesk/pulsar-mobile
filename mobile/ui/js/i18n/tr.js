@@ -19,6 +19,7 @@ export default {
 	"connErr.unreachable": "Hedefe bağlanılamadı — adresi ve ağ bağlantınızı kontrol edin.",
 	"connErr.timeout": "Bağlantı zaman aşımına uğradı — el sıkışma tamamlanamadı. Cihaz çevrimdışı veya erişilemiyor olabilir.",
 	"connErr.incompatibleVersion": "Aktarıcı daha yeni bir sürüm gerektiriyor — lütfen Pulsar'ı güncelleyin.",
+	"connErr.peerOutdated": "Karşı cihazda eski bir Pulsar sürümü var — şifreyle bağlanmak için onu güncelleyin.",
 	"home.title": "Bağlan",
 	"home.sub": "Uzak bir cihaza bağlan.",
 	"home.modeRemote": "Uzaktan masaüstü",

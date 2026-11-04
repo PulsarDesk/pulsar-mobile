@@ -19,6 +19,7 @@ export default {
 	"connErr.unreachable": "Could not connect to the target — check the address and your network.",
 	"connErr.timeout": "Connection timed out — the handshake did not complete in time. The device may be offline or unreachable.",
 	"connErr.incompatibleVersion": "Relay requires a newer version — please update Pulsar.",
+	"connErr.peerOutdated": "The other device runs an older Pulsar — update it to connect with a password.",
 	"home.title": "Connect",
 	"home.sub": "Connect to a remote device.",
 	"home.modeRemote": "Remote desktop",
