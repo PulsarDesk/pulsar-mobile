@@ -1268,6 +1268,8 @@ pub async fn connect_host<R: Runtime>(
         fec_rs: mos,
         // Reference-frame invalidation recovery: the desktop renderer only, for now.
         rfi: false,
+        // Opus at the standard rate; the higher qualities (and raw PCM) are desktop-only so far.
+        audio_quality: Default::default(),
     };
 
     timeout(POST_AUTH_TIMEOUT, request_stream(&mut sess, &req))
