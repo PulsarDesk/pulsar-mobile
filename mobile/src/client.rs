@@ -1232,6 +1232,8 @@ pub async fn connect_host<R: Runtime>(
         // (several losses per frame) preferred, XOR for older hosts.
         fec: mos,
         fec_rs: mos,
+        // Reference-frame invalidation recovery: the desktop renderer only, for now.
+        rfi: false,
     };
 
     timeout(POST_AUTH_TIMEOUT, request_stream(&mut sess, &req))
@@ -1750,6 +1752,9 @@ pub async fn connect_host<R: Runtime>(
                             nack_sent: 0,
                             nack_ok: 0,
                             fec_ok: win_fec_ok,
+                            // Received bytes / window length (goodput) aren't measured here
+                            // yet: 0 keeps the controller on its unmeasured path.
+                            ..Default::default()
                         };
                         win_fec_ok = 0;
                         let d = ctl.tick(&sample);
