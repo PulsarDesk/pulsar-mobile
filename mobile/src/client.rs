@@ -1198,7 +1198,41 @@ pub async fn connect_host<R: Runtime>(
     // Start near the peer's last known-good rate (60 % of it), else the auto start.
     let peer_key = target.clone();
     let hint = crate::adapt_memory::hint(&app, &peer_key).map(|k| (k * 3 / 5).max(adapt::FLOOR_KBPS));
-    acfg.start_kbps = if auto_rate { hint.unwrap_or(AUTO_START_KBPS).min(AUTO_CAP_KBPS) } else { 0 };
+    // Session-start bandwidth probe (pulsar-core `adapt::probe`, hosts advertising FEAT_PROBE):
+    // ~1 s of packet trains measured before the stream starts, so an auto-rate session opens at
+    // what this path carries now instead of a remembered or fixed guess.
+    let probed = if auto_rate && caps.features.iter().any(|f| f == service::media::FEAT_PROBE) {
+        let rtt = match sess.path_latency().await {
+            Some((d, r)) => match sess.transport() {
+                Transport::Direct => d.or(r),
+                Transport::Relay => r.or(d),
+            },
+            None => None,
+        }
+        .unwrap_or(100.0);
+        let rates = adapt::probe::plan_rates(AUTO_CAP_KBPS);
+        match service::run_probe(&mut sess, rates, adapt::probe::TRAIN_MS, rtt).await {
+            Ok(Some(e)) => {
+                log::info!("pulsar: bandwidth probe {} kbps (at least: {})", e.kbps, e.at_least);
+                Some((e.kbps as u64 * 4 / 5).clamp(adapt::FLOOR_KBPS as u64, AUTO_CAP_KBPS as u64) as u32)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // Auto: the probe, else the peer's memory, else the fixed auto start. A picked bitrate
+    // starts AT the pick (start_kbps 0 would now mean the controller's cautious no-memory
+    // start, not the cap).
+    acfg.start_kbps = if auto_rate {
+        probed.or(hint).unwrap_or(AUTO_START_KBPS).min(AUTO_CAP_KBPS)
+    } else {
+        bitrate_kbps
+    };
+    if probed.is_some() {
+        // The probe did the startup ramp's job.
+        acfg.startup_windows = 0;
+    }
     acfg.ir_capable = false;
     // Size/fps are fixed for the session (settings / screen); only the bitrate adapts.
     acfg.ladder = false;
@@ -1439,10 +1473,20 @@ pub async fn connect_host<R: Runtime>(
                         // so ABR ramps relative to it (and doesn't fight a manual change).
                         cur_req = new_req.clone();
                         // A user pick is a new top rung + cap: rebuild the controller around it.
+                        // It starts at the picked bitrate, or (auto) at the rate the link was
+                        // just running at — a 0 start would now mean the core's cautious
+                        // no-memory start (~4 Mbit), a needless drop mid-session.
+                        let running_kbps = ctl.target_kbps();
                         let mut acfg = adapt::Config::new(
                             adapt::codec_from_wire(&new_req.codec),
                             if new_req.bitrate_kbps > 0 { new_req.bitrate_kbps } else { AUTO_CAP_KBPS },
                         );
+                        acfg.start_kbps = if new_req.bitrate_kbps > 0 {
+                            new_req.bitrate_kbps
+                        } else {
+                            running_kbps.clamp(adapt::FLOOR_KBPS, AUTO_CAP_KBPS)
+                        };
+                        acfg.startup_windows = 0;
                         acfg.native = (new_req.width, new_req.height, new_req.fps);
                         acfg.ir_capable = false;
                         acfg.ladder = false;
