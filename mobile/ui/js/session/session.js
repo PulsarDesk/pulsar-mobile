@@ -609,9 +609,12 @@ function clearDisconnectCard() {
  *
  * @param {{ slot:number, peer:string }} opts
  */
-function showAuthPromptSheet({ slot, peer }) {
+function showAuthPromptSheet({ slot, peer, kind = 'password', retry = false }) {
 	const mount = MOUNT();
 	if (!mount) return;
+	// kind 'totp': the host has 2FA on and wants the 6-digit authenticator code (after the
+	// password step); retry = the previous code was wrong.
+	const totp = kind === 'totp';
 
 	// Remove any existing auth sheet
 	hideAuthPromptSheet();
@@ -628,25 +631,26 @@ function showAuthPromptSheet({ slot, peer }) {
 		<div class="sheet auth-sheet" id="${sheetId}" role="dialog" aria-modal="true"
 		     aria-labelledby="auth-sheet-title-${slot}">
 			<div class="sheet-handle" aria-hidden="true"></div>
-			<h3 class="auth-sheet-title" id="auth-sheet-title-${slot}">${t('pw.title')}</h3>
-			<p class="auth-sheet-lead">${t('pw.lead')}</p>
+			<h3 class="auth-sheet-title" id="auth-sheet-title-${slot}">${totp ? t('pw.totpTitle') : t('pw.title')}</h3>
+			<p class="auth-sheet-lead">${totp ? t('pw.totpLead') : t('pw.lead')}</p>
 			<div class="field">
 				<label for="${inputId}" class="sr-only">${t('pw.aria')}</label>
 				<input
 					id="${inputId}"
 					class="input mono auth-sheet-input"
 					type="text"
-					inputmode="text"
+					inputmode="${totp ? 'numeric' : 'text'}"
+					${totp ? 'maxlength="6"' : ''}
 					autocomplete="one-time-code"
 					autocorrect="off"
 					autocapitalize="none"
 					spellcheck="false"
-					placeholder="${t('pw.placeholder')}"
+					placeholder="${totp ? '000000' : t('pw.placeholder')}"
 					aria-describedby="${errorId}"
 				/>
 			</div>
 			<p class="auth-sheet-error" id="${errorId}" role="alert" aria-live="polite"
-			   style="display:none">${t('pw.error')}</p>
+			   style="${retry ? '' : 'display:none'}">${totp ? t('pw.totpError') : t('pw.error')}</p>
 			<div class="auth-sheet-actions">
 				<button class="btn btn-ghost" id="${cancelId}" type="button">
 					${t('pw.cancel')}
@@ -1072,8 +1076,8 @@ async function init() {
 	});
 
 	// auth-prompt: host is asking for a one-time password
-	await listen('auth-prompt', ({ slot, peer }) => {
-		showAuthPromptSheet({ slot, peer });
+	await listen('auth-prompt', ({ slot, peer, kind, retry }) => {
+		showAuthPromptSheet({ slot, peer, kind, retry });
 	});
 
 	// auth-ok: host approved WITHOUT a password (clicked "Allow") — dismiss the

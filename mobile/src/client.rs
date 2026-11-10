@@ -49,7 +49,7 @@ use pulsar_core::proto::DeviceId;
 use pulsar_core::adapt::{self, Controller};
 use pulsar_core::service::{
     self, query_stream_caps, recv_host_auth, request_games, request_launch, request_stream,
-    send_auth, send_bye, send_data_via, send_input_via, AuthOutcome, ClientStats, DataMsg,
+    send_auth, send_bye, send_data_via, send_input_via, send_totp, AuthOutcome, ClientStats, DataMsg,
     GameInfo, HostAuth, InputEvent, LossRecovery, StreamReq,
 };
 use pulsar_core::{NetworkMode, QualityPref, SessionSender, Transport};
@@ -357,10 +357,15 @@ fn emit_play_stall<R: Runtime>(app: &AppHandle<R>, slot: u8, stalled: bool) {
 struct AuthPromptPayload {
     slot: u8,
     peer: String,
+    /// `"password"` (the host's one-time password) or `"totp"` (the host has 2FA on: the
+    /// 6-digit authenticator code, after the password step).
+    kind: &'static str,
+    /// The previous answer was wrong (the sheet shows that).
+    retry: bool,
 }
 
-fn emit_auth_prompt<R: Runtime>(app: &AppHandle<R>, slot: u8, peer: &str) {
-    let _ = app.emit("auth-prompt", AuthPromptPayload { slot, peer: peer.to_string() });
+fn emit_auth_prompt<R: Runtime>(app: &AppHandle<R>, slot: u8, peer: &str, kind: &'static str, retry: bool) {
+    let _ = app.emit("auth-prompt", AuthPromptPayload { slot, peer: peer.to_string(), kind, retry });
 }
 
 // ── Adaptive streaming ──────────────────────────────────────────────────────
@@ -750,48 +755,64 @@ async fn auth_race<R: Runtime>(
                 // Non-auth message (keepalive etc.) — keep waiting.
                 continue;
             }
-            HostAuth::NeedPassword => {
-                // Prompt the user for the password.
-                emit_auth_prompt(app, slot, peer);
-
-                // Create a oneshot and register it in the pending map.
-                let (tx, rx) = oneshot::channel::<String>();
-                app.state::<PwPending>().0.lock().unwrap().insert(slot, tx);
-                tokio::pin!(rx);
-                let deadline = tokio::time::Instant::now() + PW_SUBMIT_TIMEOUT;
-
-                // Wait for EITHER the user's submitted password OR the host approving
-                // without one — the desktop's "Allow" sends `Ok`. Previously we only
-                // awaited the password, so a host-side approval was missed and the OTP
-                // prompt stayed open forever even though the host had accepted.
-                let pw = 'wait: loop {
-                    tokio::select! {
-                        biased;
-                        host = recv_host_auth(sess) => match host {
-                            HostAuth::Ok => {
-                                // Host approved (Allow). Tell the UI to dismiss the prompt.
-                                let _ = app.emit("auth-ok", AuthPromptPayload {
-                                    slot, peer: peer.to_string(),
-                                });
-                                return Ok(AuthOutcome::Accepted);
-                            }
-                            HostAuth::Denied | HostAuth::Gone => return Ok(AuthOutcome::Denied),
-                            // NeedPassword / keepalive while we wait — keep waiting.
-                            _ => continue 'wait,
-                        },
-                        r = tokio::time::timeout_at(deadline, &mut rx) => match r {
-                            Ok(Ok(pw)) => break 'wait pw,
-                            Ok(Err(_)) => return Err("auth cancelled".into()),
-                            Err(_) => return Err("connect-timed-out".into()),
-                        },
-                    }
-                };
-
+            HostAuth::NeedPassword => match prompt_and_wait(app, slot, sess, peer, "password", false).await? {
                 // Re-send the password and loop back to poll.
-                send_auth(sess, &pw)
-                    .await
-                    .map_err(auth_send_err)?;
-            }
+                Prompted::Answer(pw) => send_auth(sess, &pw).await.map_err(auth_send_err)?,
+                Prompted::Done(out) => return Ok(out),
+            },
+            // The password passed (or unattended access let us in) and the host has 2FA on:
+            // the same sheet asks for the authenticator code.
+            HostAuth::NeedTotp(retry) => match prompt_and_wait(app, slot, sess, peer, "totp", retry).await? {
+                Prompted::Answer(code) => send_totp(sess, &code).await.map_err(auth_send_err)?,
+                Prompted::Done(out) => return Ok(out),
+            },
+        }
+    }
+}
+
+/// What came of an auth prompt: the user's answer, or the host decided meanwhile.
+enum Prompted {
+    Answer(String),
+    Done(AuthOutcome),
+}
+
+/// Show the auth sheet (`kind` = "password" | "totp") and wait for EITHER the user's answer
+/// OR the host deciding without one — the desktop's "Allow" sends `Ok`. (Only awaiting the
+/// answer once missed a host-side approval: the prompt stayed open although the host had
+/// accepted.)
+async fn prompt_and_wait<R: Runtime>(
+    app: &AppHandle<R>,
+    slot: u8,
+    sess: &mut pulsar_core::Session,
+    peer: &str,
+    kind: &'static str,
+    retry: bool,
+) -> Result<Prompted, String> {
+    emit_auth_prompt(app, slot, peer, kind, retry);
+    let (tx, rx) = oneshot::channel::<String>();
+    app.state::<PwPending>().0.lock().unwrap().insert(slot, tx);
+    tokio::pin!(rx);
+    let deadline = tokio::time::Instant::now() + PW_SUBMIT_TIMEOUT;
+    loop {
+        tokio::select! {
+            biased;
+            host = recv_host_auth(sess) => match host {
+                HostAuth::Ok => {
+                    // Host approved (Allow). Tell the UI to dismiss the prompt.
+                    let _ = app.emit("auth-ok", AuthPromptPayload {
+                        slot, peer: peer.to_string(), kind, retry: false,
+                    });
+                    return Ok(Prompted::Done(AuthOutcome::Accepted));
+                }
+                HostAuth::Denied | HostAuth::Gone => return Ok(Prompted::Done(AuthOutcome::Denied)),
+                // A repeated ask / keepalive while we wait — keep waiting.
+                _ => continue,
+            },
+            r = tokio::time::timeout_at(deadline, &mut rx) => return match r {
+                Ok(Ok(answer)) => Ok(Prompted::Answer(answer)),
+                Ok(Err(_)) => Err("auth cancelled".into()),
+                Err(_) => Err("connect-timed-out".into()),
+            },
         }
     }
 }
@@ -876,7 +897,7 @@ pub async fn list_remote_games<R: Runtime>(
     match auth_race(&app, FETCH_SLOT, &mut sess, &password, &target).await? {
         AuthOutcome::Accepted => {}
         AuthOutcome::Denied => return Err("auth denied (wrong password?)".into()),
-        AuthOutcome::NeedPassword => return Err("host requires a password".into()),
+        AuthOutcome::NeedPassword | AuthOutcome::NeedTotp(_) => return Err("host requires a password".into()),
     }
 
     let games = timeout(POST_AUTH_TIMEOUT, request_games(&mut sess))
@@ -1026,7 +1047,7 @@ pub async fn connect_host<R: Runtime>(
     match auth_outcome {
         AuthOutcome::Accepted => {}
         AuthOutcome::Denied => return Err("auth denied (wrong password?)".into()),
-        AuthOutcome::NeedPassword => {
+        AuthOutcome::NeedPassword | AuthOutcome::NeedTotp(_) => {
             // Should not reach here — auth_race only returns NeedPassword if the
             // loop above somehow exits (it loops internally on NeedPassword). Guard
             // for completeness.
