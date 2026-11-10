@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="120" height="120" src="https://raw.githubusercontent.com/PulsarDesk/.github/main/profile/logo.svg" alt="Pulsar logo">
+  <img width="120" height="120" src="https://avatars.githubusercontent.com/u/290144039?s=240" alt="Pulsar logo">
 </p>
 
 <h1 align="center">Pulsar Mobile</h1>
