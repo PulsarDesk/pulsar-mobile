@@ -483,6 +483,9 @@ export default {
 	"m.gamepad.emuAuto": "Otomatik",
 	"m.settings.overlayBtn": "Overlay tuşu",
 	"m.settings.overlayBtnHint": "Oturumda overlay'i açan yüzen tuş. Kapalıyken 3 parmakla dokunarak aç.",
+	"m.settings.hostCursor": "Karşı tarafın imlecini göster",
+	"m.settings.hostCursorHint": "Uzak masaüstünde karşıdaki kişi kendi faresini kullanırken onun imleci «Host» etiketiyle işaretlenir.",
+	"m.hostptr.notice": "Karşı taraf fareyi kullanıyor",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Ses",

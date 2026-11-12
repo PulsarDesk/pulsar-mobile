@@ -483,6 +483,9 @@ export default {
 	"m.gamepad.emuAuto": "Auto",
 	"m.settings.overlayBtn": "Overlay button",
 	"m.settings.overlayBtnHint": "Floating button that opens the overlay in-session. When off, open with a 3-finger tap.",
+	"m.settings.hostCursor": "Show the other side's cursor",
+	"m.settings.hostCursorHint": "In remote desktop, while the person at the host uses their own mouse, their pointer is marked «Host».",
+	"m.hostptr.notice": "The other side is using the mouse",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Audio",

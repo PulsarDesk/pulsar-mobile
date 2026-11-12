@@ -517,6 +517,58 @@ function wireTouchForwarding() {
 		return t.clientX >= rect.x && t.clientX <= rect.x + rect.w &&
 		       t.clientY >= rect.y && t.clientY <= rect.y + rect.h;
 	};
+	// Host pointer marker (issue #7, remote mode): while the person AT the host uses their own
+	// mouse the host sends `host-pointer` {slot, active, x, y} (x/y < 0 = position unknown) and
+	// holds our input back. Mark their pointer "Host" on the video and say why taps don't land.
+	// Fades 1.5 s after the idle message. Not in game mode, not in split view.
+	(() => {
+		if (!hasTauri) return;
+		const AMBER = '#ff9830';
+		const mark = document.createElement('div');
+		mark.setAttribute('aria-hidden', 'true');
+		mark.style.cssText = 'position:fixed;left:0;top:0;z-index:60;pointer-events:none;display:none;transition:opacity .3s';
+		const ring = document.createElement('div');
+		ring.style.cssText = 'position:absolute;left:-11px;top:-11px;width:22px;height:22px;border-radius:50%;border:2px solid ' + AMBER + ';box-sizing:border-box';
+		const tag = document.createElement('div');
+		tag.style.cssText = 'position:absolute;left:14px;top:14px;padding:3px 7px;border-radius:6px;background:' + AMBER + ';color:#000;font:600 12px/1.2 system-ui,sans-serif;white-space:nowrap';
+		mark.append(ring, tag);
+		const note = document.createElement('div');
+		note.setAttribute('role', 'status');
+		note.style.cssText = 'position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:60;pointer-events:none;display:none;padding:6px 12px;border-radius:8px;border:1px solid ' + AMBER + ';background:rgba(10,11,16,.85);color:#ebe1d2;font:500 12.5px/1.3 system-ui,sans-serif;transition:opacity .3s';
+		document.body.append(mark, note);
+		let hostName = '';
+		let fadeTimer = null;
+		const hide = () => { mark.style.display = 'none'; note.style.display = 'none'; };
+		const { listen } = window.__TAURI__.event;
+		listen('peer-name', (e) => { const p = e.payload || {}; if (p.slot === 0 && p.name) hostName = String(p.name); });
+		listen('host-pointer', (e) => {
+			const p = e.payload || {};
+			if (p.slot !== 0 || isSplit() || document.body.dataset.mode === 'game' || getPref('hostCursor') === false) { hide(); return; }
+			clearTimeout(fadeTimer);
+			if (!p.active) {
+				mark.style.opacity = '0';
+				note.style.opacity = '0';
+				fadeTimer = setTimeout(hide, 1500);
+				return;
+			}
+			note.textContent = t('m.hostptr.notice');
+			note.style.opacity = '1';
+			note.style.display = '';
+			const r = rect || baseRect();
+			if (p.x >= 0 && p.y >= 0 && r && r.w > 0) {
+				tag.textContent = hostName ? 'Host · ' + hostName : 'Host';
+				mark.style.transform = 'translate(' + (r.x + p.x * r.w) + 'px,' + (r.y + p.y * r.h) + 'px)';
+				mark.style.opacity = '1';
+				mark.style.display = '';
+			} else {
+				mark.style.display = 'none';
+			}
+			// Missed idle message: don't leave it up forever.
+			fadeTimer = setTimeout(() => { mark.style.opacity = '0'; note.style.opacity = '0'; fadeTimer = setTimeout(hide, 1500); }, 3000);
+		}).catch(() => {});
+		if (bus && bus.on) bus.on('session-ended', hide);
+	})();
+
 	// B2: queue the move; flushed once per frame by _flushSends (coalesces a burst).
 	const sendMoveAt  = (px, py) => { const p = norm(px, py); _pendingMove = { slot: p.slot, x: p.x, y: p.y }; _scheduleFlush(); };
 	const sendClickAt = (px, py, button) => {

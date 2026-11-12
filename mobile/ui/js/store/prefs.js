@@ -14,6 +14,7 @@ const KEY = 'pulsar.prefs.v1';
 const DEFAULTS = {
 	hudVisible: true,        // show the in-session performance HUD strip
 	overlayButton: true,     // show the floating overlay button (FAB); else 3-finger tap
+	hostCursor: true,        // remote mode: mark the host's pointer while the person there uses it
 	playHostAudio: true,     // play the host's streamed audio (false = muted)
 	frameRate: 'auto',       // stream fps: 'auto' (=display refresh) | 'unlimited' | 30|60|120|144|168|244
 	resolution: 'auto',      // 'auto' (host default) | '720' | '1080' | '1440' | '2160'

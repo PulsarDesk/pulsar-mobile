@@ -479,6 +479,9 @@ export default {
 	"m.gamepad.emuAuto": "Авто",
 	"m.settings.overlayBtn": "Оверлей түймесі",
 	"m.settings.overlayBtnHint": "Сеанста оверлейді ашатын қалқымалы түйме. Өшірулі кезде 3 саусақпен ашыңыз.",
+	"m.settings.hostCursor": "Қарсы жақтың курсорын көрсету",
+	"m.settings.hostCursorHint": "Қашықтағы жұмыс үстелінде хосттағы адам өз тінтуірін қолданғанда оның курсоры «Host» белгісімен көрінеді.",
+	"m.hostptr.notice": "Қарсы жақ тінтуірді қолданып жатыр",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Дыбыс",

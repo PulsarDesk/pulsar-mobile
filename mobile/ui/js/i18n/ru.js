@@ -479,6 +479,9 @@ export default {
 	"m.gamepad.emuAuto": "Авто",
 	"m.settings.overlayBtn": "Кнопка оверлея",
 	"m.settings.overlayBtnHint": "Плавающая кнопка для открытия оверлея. Когда выкл — открывайте тремя пальцами.",
+	"m.settings.hostCursor": "Показывать курсор другой стороны",
+	"m.settings.hostCursorHint": "В удалённом рабочем столе, пока человек у хоста пользуется своей мышью, его курсор помечен «Host».",
+	"m.hostptr.notice": "Другая сторона пользуется мышью",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Звук",

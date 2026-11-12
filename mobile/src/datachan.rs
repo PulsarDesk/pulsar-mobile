@@ -157,6 +157,15 @@ struct FileRecvPayload {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct HostPointerPayload {
+    slot: u8,
+    active: bool,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct RumblePayload {
     slot: u8,
     large: u8,
@@ -565,6 +574,12 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             // outer `slot` arg is the SESSION slot — use the session slot for the
             // event so JS knows which session it came from.
             let _ = app.emit("rumble", RumblePayload { slot, large, small });
+        }
+        DataMsg::HostPointer { active, x, y } => {
+            // The person at the host is on their own mouse (remote mode, issue #7): the UI
+            // marks the host pointer ("Host") and says why input is held back. x/y < 0 =
+            // position unknown (notice only).
+            let _ = app.emit("host-pointer", HostPointerPayload { slot, active, x, y });
         }
         // All other variants are host-only or handled by another wave.
         _ => {}

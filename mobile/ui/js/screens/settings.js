@@ -317,6 +317,17 @@ function buildSettingsDom(section) {
           <span class="thumb"></span>
         </label>
       </div>
+      <div class="setting" style="margin-top:12px">
+        <div>
+          <div class="lbl" data-i18n="m.settings.hostCursor">${t('m.settings.hostCursor')}</div>
+          <div class="settings-field-hint" data-i18n="m.settings.hostCursorHint">${t('m.settings.hostCursorHint')}</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="s-host-cursor" aria-label="${t('m.settings.hostCursor')}" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
     </div>
 
     <!-- ── Controllers (live connected-pad list) ── -->
@@ -958,6 +969,10 @@ function wireFields(section) {
       if (strip) strip.style.display = perfHudEl.checked ? '' : 'none';
     });
   }
+  const hostCursorEl = document.getElementById('s-host-cursor');
+  if (hostCursorEl) {
+    hostCursorEl.addEventListener('change', () => setPref('hostCursor', hostCursorEl.checked));
+  }
   const overlayBtnEl = document.getElementById('s-overlay-btn');
   if (overlayBtnEl) {
     overlayBtnEl.addEventListener('change', () => {
@@ -1128,6 +1143,8 @@ async function syncFieldsFromConfig() {
   if (perfHudEl)                     perfHudEl.checked = getPref('hudVisible') !== false;
   const overlayBtnEl = document.getElementById('s-overlay-btn');
   if (overlayBtnEl)                  overlayBtnEl.checked = getPref('overlayButton') !== false;
+  const hostCursorInit = document.getElementById('s-host-cursor');
+  if (hostCursorInit)                hostCursorInit.checked = getPref('hostCursor') !== false;
   const frameRateEl = document.getElementById('s-framerate');
   if (frameRateEl) {
     const fr = getPref('frameRate');
