@@ -29,6 +29,37 @@ phone's screen and let someone control it. iOS is not available yet.
 
 ---
 
+## ✨ Features
+
+### 🖥️ Control a computer
+- **Mouse or touch mode:** a trackpad-style cursor, or tap exactly where you want to click. Tap, double-tap,
+  long-press, drag and two-finger scroll.
+- **On-screen keyboard** with Ctrl+Alt+Del, plus external mice and keyboards.
+- **File transfer** (browse both sides, upload and download), **clipboard**, **chat**, the computer's **sound** and
+  your phone's **microphone**.
+- **Multi-monitor:** pick which screen to view; fit, fill or stretch; portrait or landscape.
+- **Several sessions at once** with a quick switcher, and saved devices with favourites, search and icons.
+
+### 🎮 Game streaming
+- **Game mode:** stream the desktop, one screen or a game picked from the computer's library.
+- **Controllers:** an on-screen gamepad with rumble, or a real one (battery level shown); the computer sees an
+  Xbox controller.
+- **Picture options:** H.264 / H.265, HDR, resolution, frame rate, bitrate and presets from *Data saver* to
+  *Low latency*, with a live stats overlay (fps, ping, loss).
+- **Android TV:** navigate the whole app with the remote's D-pad.
+
+### 📱 Share this phone
+- Share the phone's screen, approve or deny who connects, and see or disconnect connected devices.
+
+### 🔒 Security and network
+- **End-to-end encryption, always on:** the relay only forwards data it cannot read.
+- **Access control:** one-time password, a permanent password, unattended access and two-factor codes.
+- **Peer-to-peer first**, relay as fallback, or forced either way; your own relay server, or **run a relay on the
+  phone** for your Wi-Fi.
+- Updates itself; Turkish, English, Russian and Kazakh.
+
+---
+
 ## 📦 Other Pulsar Repositories
 - [**pulsar-desktop**](https://github.com/PulsarDesk/pulsar-desktop) - Pulsar for Windows, macOS and Linux
 - [**relay**](https://github.com/PulsarDesk/relay) - Run your own relay server
