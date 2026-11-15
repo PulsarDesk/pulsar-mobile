@@ -34,8 +34,14 @@ import java.net.InetAddress
  * RX/RY), triggers LTRIGGER/RTRIGGER (else BRAKE/GAS, else RX/RY on a Z/RZ pad), D-pad
  * from HAT_X/HAT_Y or DPAD keys. Y axes are flipped to the wire's up-positive convention.
  *
- * Wire (little endian), one datagram each:
- *   1 state:      [1, pad, buttons u32, lx i16, ly i16, rx i16, ry i16, lt u8, rt u8] (16 B)
+ * Stale input: when the window loses focus (Home, notification shade, app switch) Android
+ * synthesizes key-ups but no joystick event, and once capture stops no release reaches us.
+ * [neutralizeAll] then zeroes every pad and sends that neutral state, so a held stick,
+ * trigger or button is not left held on the host or replayed into the next session.
+ *
+ * Wire (little endian), one datagram each, prefixed with the feed token from Rust (any
+ * app can send to loopback; pad_feed.rs drops datagrams without the token):
+ *   1 state:     [1, pad, buttons u32, lx i16, ly i16, rx i16, ry i16, lt u8, rt u8] (16 B)
  *   2 connected:  [2, pad, vendorId u16, productId u16, name UTF-8...]
  *   3 removed:    [3, pad]
  * `buttons` uses pulsar-core's XInput-style bits (input::types::buttons).
@@ -57,6 +63,11 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
         var lx = 0; var ly = 0; var rx = 0; var ry = 0
         var lt = 0; var rt = 0          // analog triggers
         var keyLt = false; var keyRt = false // digital L2/R2 (pads without analog triggers)
+        // The analog trigger axis has moved at least once. Sony pads report BOTH a digital
+        // L2/R2 key (set at a light press) and the analog axis; once the axis is live the
+        // digital key is ignored, else throttle/brake would snap to 255 (Moonlight does the
+        // same: ControllerHandler leftTriggerAxisUsed).
+        var ltAxisUsed = false; var rtAxisUsed = false
         var announced = false
         // Axis layout, resolved once per device.
         var rxAxis = MotionEvent.AXIS_Z; var ryAxis = MotionEvent.AXIS_RZ
@@ -65,6 +76,7 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
 
     private val pads = HashMap<Int, Pad>() // deviceId -> pad (UI thread only)
     @Volatile private var port = 0
+    @Volatile private var token = ByteArray(0)
     private var sock: DatagramSocket? = null
     private val sendThread = HandlerThread("pulsar-pad").apply { start() }
     private val sendHandler = Handler(sendThread.looper)
@@ -72,9 +84,23 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
     private var installed = false
 
     /** Point the feed at the Rust loopback socket and install the interceptor (idempotent). */
-    fun start(feedPort: Int) {
+    fun start(feedPort: Int, feedToken: ByteArray) {
+        token = feedToken
         port = feedPort
         activity.runOnUiThread { install() }
+    }
+
+    /** Zero every pad and send that neutral state (focus lost, stream stopped). UI thread. */
+    fun neutralizeAll() {
+        for (p in pads.values) {
+            val held = p.keyButtons != 0 || p.hatButtons != 0 || p.lx != 0 || p.ly != 0 ||
+                p.rx != 0 || p.ry != 0 || p.lt != 0 || p.rt != 0 || p.keyLt || p.keyRt
+            if (!held) continue
+            p.keyButtons = 0; p.hatButtons = 0
+            p.lx = 0; p.ly = 0; p.rx = 0; p.ry = 0; p.lt = 0; p.rt = 0
+            p.keyLt = false; p.keyRt = false
+            if (p.announced) sendState(p)
+        }
     }
 
     private fun install() {
@@ -87,6 +113,10 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
             when (method.name) {
                 "dispatchKeyEvent" -> if (args != null && handleKey(args[0] as KeyEvent)) return@newProxyInstance true
                 "dispatchGenericMotionEvent" -> if (args != null && handleMotion(args[0] as MotionEvent)) return@newProxyInstance true
+                // Focus loss sends no joystick event: release everything ourselves.
+                "onWindowFocusChanged" -> if (args != null && args[0] == false) {
+                    try { neutralizeAll() } catch (e: Exception) { Log.w(TAG, "pad neutralize failed: ${e.message}") }
+                }
             }
             try {
                 if (args == null) method.invoke(orig) else method.invoke(orig, *args)
@@ -170,6 +200,10 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
         val dev = ev.device ?: return false
         if (dev.isVirtual) return false
         val code = ev.keyCode
+        // Some Bluetooth keyboards / combo devices declare SOURCE_GAMEPAD: their arrows,
+        // Back and Menu stay keyboard input (Moonlight skips alphabetic keyboards too).
+        // Real pad buttons (BUTTON_*) from such a device still count.
+        if (dev.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC && !KeyEvent.isGamepadButton(code)) return false
         val isL2 = code == KeyEvent.KEYCODE_BUTTON_L2
         val isR2 = code == KeyEvent.KEYCODE_BUTTON_R2
         val bit = keyBit(code)
@@ -221,6 +255,8 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
             var l = ev.getAxisValue(p.ltAxis); var r = ev.getAxisValue(p.rtAxis)
             if (p.triggersCentered) { l = (l + 1f) / 2f; r = (r + 1f) / 2f }
             p.lt = trig(l); p.rt = trig(r)
+            if (p.lt > 0) p.ltAxisUsed = true
+            if (p.rt > 0) p.rtAxisUsed = true
         }
         val hx = ev.getAxisValue(MotionEvent.AXIS_HAT_X)
         val hy = ev.getAxisValue(MotionEvent.AXIS_HAT_Y)
@@ -234,8 +270,8 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
 
     private fun sendState(p: Pad) {
         val buttons = p.keyButtons or p.hatButtons
-        val lt = if (p.keyLt) 255 else p.lt
-        val rt = if (p.keyRt) 255 else p.rt
+        val lt = if (p.keyLt && !p.ltAxisUsed) 255 else p.lt
+        val rt = if (p.keyRt && !p.rtAxisUsed) 255 else p.rt
         val b = ByteArray(16)
         b[0] = 1; b[1] = p.idx.toByte()
         b[2] = (buttons and 0xFF).toByte(); b[3] = ((buttons shr 8) and 0xFF).toByte()
@@ -255,9 +291,11 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
         b[at] = (v and 0xFF).toByte(); b[at + 1] = ((v shr 8) and 0xFF).toByte()
     }
 
-    private fun send(b: ByteArray) {
+    private fun send(msg: ByteArray) {
         val dst = port
-        if (dst == 0) return
+        val tok = token
+        if (dst == 0 || tok.isEmpty()) return
+        val b = tok + msg
         // Never on the UI thread (StrictMode network-on-main); one ordered sender thread.
         sendHandler.post {
             try {

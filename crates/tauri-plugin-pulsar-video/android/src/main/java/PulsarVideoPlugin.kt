@@ -71,6 +71,8 @@ import java.util.concurrent.LinkedBlockingDeque
 
 // W5-native: max pane slots — was 0..1, now supports up to 4 (quadrant grid).
 private const val MAX_PANES = 4
+/** 2.20: a fatal decoder error before this many output frames counts as an options crash. */
+private const val OPTION_CRASH_FRAMES = 30L
 // Identity-image (avatar) square edge + wire-size cap — matches the desktop
 // avatar.rs AVATAR_EDGE/MAX_AVATAR_BYTES so peer rendering is consistent.
 private const val AVATAR_EDGE = 96
@@ -134,6 +136,7 @@ class VideoSizeArgs {
 @InvokeArg
 class PadFeedArgs {
     var port: Int = 0
+    var token: String = ""
 }
 
 @InvokeArg
@@ -308,8 +311,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
      */
     private var audioPtsUs = 0L
     /** 2.20: first low-latency options level to try per decoder name (or MIME when no decoder
-     *  was picked) — the level that last configured, raised one step after a decoder died
-     *  mid-stream. Lives for the app process, across sessions. */
+     *  was picked). It moves only on failures that look caused by the options: a configure
+     *  rejected at a lower level (not a resource/transient error), or a fatal codec error
+     *  within the first frames after configure (Moonlight's crash heuristic). Loss, corrupt
+     *  AUs, buffer overflows, released codecs and busy hardware never move it; it never
+     *  stores 5 (the createDecoderByType fallback, possibly software). Process lifetime: a
+     *  clean stream at level N says nothing about N-1, so it does not decay. */
     private val decoderStartTry = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** Per-pane aspect mode: "fit" | "fill" | "stretch". W3-aspect. W5-native: 4 slots. */
     private val aspectMode = Array(MAX_PANES) { "fit" }
@@ -499,7 +506,11 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             panes[slot].release()
             streamFps[slot] = 0
-            if (panes.none { it.active }) { releaseAudio(); stopStreamService(); padInput.stopAllRumble() }
+            if (panes.none { it.active }) {
+                releaseAudio(); stopStreamService(); padInput.stopAllRumble()
+                // No stream left: release held pad input (no more events reach PadInput).
+                padInput.neutralizeAll()
+            }
             // Drop the refresh vote a moment later, not now: a restream is stopStream +
             // startStream + setStreamFps, and resetting the display mode in between would
             // switch the panel twice (a visible blank on some devices).
@@ -519,6 +530,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 voteHandler.removeCallbacks(clearVote)
                 applyFrameRateVote()
                 padInput.stopAllRumble()
+                padInput.neutralizeAll()
                 releaseAudio()
                 stopStreamService()
                 webView?.setBackgroundColor(Color.TRANSPARENT) // body paints opaque; WHITE flashed in dark theme
@@ -655,9 +667,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) return
             val nm = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val chan = "pulsar_host"
+            // Its own channel: HostService creates "pulsar_host" first at IMPORTANCE_LOW (the
+            // ongoing notice) and Android ignores a later importance change, so posting here
+            // was silent with no heads-up, exactly when the user is in another app.
+            val chan = "pulsar_host_alert"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                nm.createNotificationChannel(NotificationChannel(chan, NotifI18n.t(activity, "chanHost"), NotificationManager.IMPORTANCE_DEFAULT))
+                nm.createNotificationChannel(NotificationChannel(chan, NotifI18n.t(activity, "chanHostAlert"), NotificationManager.IMPORTANCE_HIGH))
             }
             val launch = activity.packageManager.getLaunchIntentForPackage(activity.packageName)
             val pi = launch?.let {
@@ -1287,8 +1302,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun padFeedStart(invoke: Invoke) {
         val a = invoke.parseArgs(PadFeedArgs::class.java)
-        if (a.port in 1..65535) padInput.start(a.port)
-        val r = JSObject(); r.put("ok", a.port in 1..65535); invoke.resolve(r)
+        // The token (hex) prefixes every datagram; pad_feed.rs drops anything without it.
+        val tok = try {
+            a.token.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        } catch (_: Exception) { ByteArray(0) }
+        val ok = a.port in 1..65535 && tok.size == 16
+        if (ok) padInput.start(a.port, tok)
+        val r = JSObject(); r.put("ok", ok); invoke.resolve(r)
     }
 
     /** Native-only: host rumble (DataMsg::Rumble) for pad `pad`. */
@@ -2709,11 +2729,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 // The reliable recovery channel: the Rust read loop polls this flag
                 // (decoderStatus) and requests a host IDR (trigger() events don't arrive).
                 decoderFailed = true
-                // A decoder that configured fine and then died while decoding: drop one level
-                // of low-latency options for its next configure (Moonlight lowers them after a
-                // crash too). Capped at 4 so the picked hardware decoder stays in use (try 5 is
-                // the createDecoderByType fallback).
-                if (wasConfigured) lastTryKey?.let { k ->
+                // A decoder that configured fine and then died at once: drop one level of
+                // low-latency options for its next configure (Moonlight lowers them after an
+                // early crash too). Only a fatal codec error in the first frames counts: a
+                // corrupt AU after loss, a buffer overflow or a codec released under us says
+                // nothing about the options. Capped at 4 so the picked hardware decoder stays
+                // in use (try 5 is the createDecoderByType fallback).
+                if (wasConfigured && isOptionCrash(e, framesOut)) lastTryKey?.let { k ->
                     val next = (lastTry + 1).coerceAtMost(4)
                     if ((decoderStartTry[k] ?: 0) < next) {
                         decoderStartTry[k] = next
@@ -2725,6 +2747,21 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             }
             configured
         }
+
+        /** Busy hardware or a transient state, not a property of the options. */
+        private fun isResourceError(e: Exception): Boolean {
+            if (e !is MediaCodec.CodecException) return false
+            if (e.isTransient) return true
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                (e.errorCode == MediaCodec.CodecException.ERROR_INSUFFICIENT_RESOURCE ||
+                    e.errorCode == MediaCodec.CodecException.ERROR_RECLAIMED)
+        }
+
+        /** A fatal codec error right after configure: the only feed() failure that may be the
+         *  low-latency options' fault. */
+        private fun isOptionCrash(e: Exception, outFrames: Long): Boolean =
+            e is MediaCodec.CodecException && !e.isTransient && !e.isRecoverable &&
+                !isResourceError(e) && outFrames < OPTION_CRASH_FRAMES
 
         private fun isH265() = mime == "video/hevc"
         private fun isAv1()  = mime == "video/av01"
@@ -2816,7 +2853,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             // time): a runtime failure moved it one step less aggressive (feed()), and a
             // reconfigure must not walk back into the option set that just broke it.
             val tryKey = pickedName ?: m
-            val firstTry = (decoderStartTry[tryKey] ?: 0).coerceIn(0, 5)
+            val firstTry = (decoderStartTry[tryKey] ?: 0).coerceIn(0, 4)
+            // Every failed level so far was a rejection of the options (not busy hardware).
+            var optionRejects = true
             for (tryNumber in firstTry..5) {
                 var c: MediaCodec? = null
                 try {
@@ -2833,12 +2872,18 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                     c.start()
                     codec = c
                     configured = true
-                    decoderStartTry[tryKey] = tryNumber
+                    // Remember a higher level only when the lower ones rejected the options;
+                    // a resource / transient failure (quad split, a restream racing the old
+                    // instance's release) is not a reason to drop options for the process.
+                    if (tryNumber in (firstTry + 1)..4 && optionRejects) decoderStartTry[tryKey] = tryNumber
                     lastTryKey = tryKey; lastTry = tryNumber
                     Log.i(TAG, "slot $slot decoder=${c.name} configured (try=$tryNumber, m=$m)")
                     return
                 } catch (e: Exception) {
                     lastErr = e
+                    // No codec instance (create failed) or a resource/transient error: the
+                    // options were not what failed.
+                    if (c == null || isResourceError(e)) optionRejects = false
                     try { c?.release() } catch (_: Exception) {}
                 }
             }

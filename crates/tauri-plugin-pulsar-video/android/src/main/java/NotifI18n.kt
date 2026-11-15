@@ -40,6 +40,10 @@ object NotifI18n {
                 "tr" -> "Ekran paylaşımı"; "ru" -> "Трансляция экрана"
                 "kk" -> "Экран бөлісу"; else -> "Screen sharing"
             }
+            "chanHostAlert" -> when (l) {
+                "tr" -> "Ekran paylaşımı uyarıları"; "ru" -> "Оповещения трансляции экрана"
+                "kk" -> "Экран бөлісу ескертулері"; else -> "Screen sharing alerts"
+            }
             "sharing" -> when (l) {
                 "tr" -> "Ekran paylaşılıyor"; "ru" -> "Экран транслируется"
                 "kk" -> "Экран бөлісілуде"; else -> "Screen is being shared"

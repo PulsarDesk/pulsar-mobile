@@ -172,6 +172,14 @@ struct RumblePayload {
     small: u8,
 }
 
+/// `host-stream-error`: the host's reason for a dead stream (2.21), text or `@i18n.key`.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct HostStreamErrorPayload {
+    slot: u8,
+    message: String,
+}
+
 // ── SendFileResult ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -583,6 +591,14 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             // marks the host pointer ("Host") and says why input is held back. x/y < 0 =
             // position unknown (notice only).
             let _ = app.emit("host-pointer", HostPointerPayload { slot, active, x, y });
+        }
+        // A "!" stats line is the host's stream error (2.21: encoder died, screen sharing
+        // stopped on a phone host); the desktop client shows it the same way. Plain stats
+        // labels are the desktop HUD's and are not used here.
+        DataMsg::Stats(s) if s.starts_with('!') => {
+            let message = s[1..].to_string();
+            log::warn!("pulsar: host stream error (slot={slot}): {message}");
+            let _ = app.emit("host-stream-error", HostStreamErrorPayload { slot, message });
         }
         // All other variants are host-only or handled by another wave.
         _ => {}

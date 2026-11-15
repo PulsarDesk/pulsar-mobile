@@ -532,8 +532,9 @@ struct StreamFpsArgs {
 }
 
 #[derive(Serialize)]
-struct PadFeedArgs {
+struct PadFeedArgs<'a> {
   port: u16,
+  token: &'a str,
 }
 
 #[derive(Serialize)]
@@ -629,8 +630,9 @@ pub trait PulsarVideoW5Ext<R: Runtime> {
   /// Mobile host: projection-stop generation + end reason (see [`HostStatus`]). Native-only.
   fn host_status(&self) -> crate::Result<HostStatus>;
 
-  /// Physical gamepads: send pad state to this loopback UDP port. Native-only.
-  fn pad_feed_start(&self, port: u16) -> crate::Result<AttachResponse>;
+  /// Physical gamepads: send pad state to this loopback UDP port, each datagram prefixed
+  /// with `token` (hex; the receiver drops datagrams without it). Native-only.
+  fn pad_feed_start(&self, port: u16, token: &str) -> crate::Result<AttachResponse>;
 
   /// Host rumble for physical pad `pad` (0..255 per motor, both 0 = stop). Native-only.
   fn pad_rumble(&self, pad: u8, large: u8, small: u8) -> crate::Result<AttachResponse>;
@@ -679,10 +681,10 @@ impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
     self.0.run_mobile_plugin("hostStatus", ()).map_err(Into::into)
   }
 
-  fn pad_feed_start(&self, port: u16) -> crate::Result<AttachResponse> {
+  fn pad_feed_start(&self, port: u16, token: &str) -> crate::Result<AttachResponse> {
     self
       .0
-      .run_mobile_plugin("padFeedStart", PadFeedArgs { port })
+      .run_mobile_plugin("padFeedStart", PadFeedArgs { port, token })
       .map_err(Into::into)
   }
 
