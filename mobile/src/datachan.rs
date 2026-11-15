@@ -164,6 +164,15 @@ struct HostPointerPayload {
     y: f32,
 }
 
+/// The host reported that our input does not reach its desktop (`DataMsg::InputUnavailable`).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct InputUnavailablePayload {
+    slot: u8,
+    /// pulsar-core `InputFailure` wire token (unknown → generic text in the UI).
+    reason: String,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct RumblePayload {
@@ -580,6 +589,15 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             // marks the host pointer ("Host") and says why input is held back. x/y < 0 =
             // position unknown (notice only).
             let _ = app.emit("host-pointer", HostPointerPayload { slot, active, x, y });
+        }
+        DataMsg::InputUnavailable { reason } => {
+            // The host cannot pass our touches / keys to its desktop (no /dev/uinput access,
+            // no Accessibility grant, an elevated window in front of a non-elevated Windows
+            // host, the Android control service off). `reason` is a pulsar-core
+            // `InputFailure` wire token; the UI shows a localized notice (rate-limited by
+            // the host).
+            log::warn!("host reports remote input does not reach its desktop: {reason}");
+            let _ = app.emit("input-unavailable", InputUnavailablePayload { slot, reason });
         }
         // All other variants are host-only or handled by another wave.
         _ => {}

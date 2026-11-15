@@ -631,6 +631,13 @@ pub async fn go_online<R: Runtime>(
                         // Kept for the kick branch below (the video/audio forwarders move
                         // their own clones): a kicked client is told with an explicit Bye.
                         let bye_sender = sender.clone();
+                        // Remote control needs the control AccessibilityService. When it is
+                        // off (or this build has none) the client's taps and keys vanish: tell
+                        // it on a press (ControlNotice; at most once a minute). Not at accept
+                        // time: the client is then still in its caps / probe exchange, which
+                        // drops every other message, and a metadata-only connection (the game
+                        // library fetch) never sends input at all.
+                        let notice_sender = sender.clone();
                         // NACK retransmit: the client re-requests lost RTP seqs. Without this a
                         // single dropped packet corrupted the frame's trailing slices (bottom
                         // rows) until the next keyframe. Keep a small seq→datagram ring and resend
@@ -787,8 +794,19 @@ pub async fn go_online<R: Runtime>(
                         let (in_tx, mut in_rx) =
                             tokio::sync::mpsc::unbounded_channel::<InputEvent>();
                         tauri::async_runtime::spawn(async move {
+                            let mut control = ControlNotice::default();
                             while let Some(first) = in_rx.recv().await {
                                 let mut ev = first;
+                                if matches!(
+                                    ev,
+                                    InputEvent::PointerButton { down: true, .. } | InputEvent::Key { down: true, .. }
+                                ) && control.due(std::time::Instant::now())
+                                {
+                                    if let Some(f) = control_failure(&app_in) {
+                                        control.told(std::time::Instant::now());
+                                        tell_control_off(&notice_sender, f).await;
+                                    }
+                                }
                                 loop {
                                     match ev {
                                         InputEvent::PointerMotion { x, y } => {
@@ -1052,6 +1070,78 @@ pub async fn disconnect_session<R: Runtime>(app: AppHandle<R>, sid: u32) -> Resu
         peer.kick.notify_one();
     }
     Ok(())
+}
+
+// ── Control-service notice (DataMsg::InputUnavailable) ──────────────────────
+
+/// Why remote control cannot reach this phone, if it cannot: this build has no control
+/// AccessibilityService (the default release APK; only the host-control build has it, so
+/// "switch it on" would not help), or it is there but off. `None` = control works.
+fn control_failure<R: Runtime>(app: &AppHandle<R>) -> Option<pulsar_core::input::InputFailure> {
+    use pulsar_core::input::InputFailure;
+    let v = app.pulsar_video();
+    if !v.a11y_available().map(|r| r.ok).unwrap_or(false) {
+        Some(InputFailure::AndroidControlMissing)
+    } else if !v.a11y_enabled().map(|r| r.ok).unwrap_or(false) {
+        Some(InputFailure::AndroidControlOff)
+    } else {
+        None
+    }
+}
+
+/// Tell the client its input does not reach this phone, and why (it shows a localized notice;
+/// an old client shows its generic text for a token it does not know).
+async fn tell_control_off(sender: &pulsar_core::SessionSender, f: pulsar_core::input::InputFailure) {
+    log::warn!("pulsar host: remote control unavailable ({}) → client notice", f.as_wire());
+    let reason = f.as_wire().to_string();
+    let _ = pulsar_core::service::send_data_via(sender, &pulsar_core::service::DataMsg::InputUnavailable { reason }).await;
+}
+
+/// Rate limit for the mid-session check: look at the service at most every
+/// [`ControlNotice::CHECK`] (a JNI call per press would be wasteful) and tell the client at
+/// most every [`ControlNotice::REPEAT`].
+#[derive(Default)]
+struct ControlNotice {
+    checked: Option<std::time::Instant>,
+    told: Option<std::time::Instant>,
+}
+
+impl ControlNotice {
+    const CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+    const REPEAT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Whether to look at the service now (and records the look).
+    fn due(&mut self, now: std::time::Instant) -> bool {
+        if self.told.is_some_and(|t| now.duration_since(t) < Self::REPEAT)
+            || self.checked.is_some_and(|t| now.duration_since(t) < Self::CHECK)
+        {
+            return false;
+        }
+        self.checked = Some(now);
+        true
+    }
+
+    fn told(&mut self, now: std::time::Instant) {
+        self.told = Some(now);
+    }
+}
+
+#[cfg(test)]
+mod control_notice_tests {
+    use super::ControlNotice;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn checks_sparsely_and_repeats_once_a_minute() {
+        let mut c = ControlNotice::default();
+        let t0 = Instant::now();
+        assert!(c.due(t0));
+        assert!(!c.due(t0 + Duration::from_secs(1)), "checked a moment ago");
+        assert!(c.due(t0 + ControlNotice::CHECK));
+        c.told(t0 + ControlNotice::CHECK);
+        assert!(!c.due(t0 + ControlNotice::CHECK + Duration::from_secs(30)), "told recently");
+        assert!(c.due(t0 + ControlNotice::CHECK + ControlNotice::REPEAT));
+    }
 }
 
 // ── open_a11y_settings / a11y_enabled ────────────────────────────────────────

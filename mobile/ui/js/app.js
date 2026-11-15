@@ -568,6 +568,22 @@ function wireTouchForwarding() {
 		}).catch(() => {});
 		if (bus && bus.on) bus.on('session-ended', hide);
 	})();
+	// The host cannot pass our input to its desktop (`input-unavailable` {slot, reason}: no
+	// /dev/uinput access, no Accessibility grant on a Mac, an elevated window in front of a
+	// non-elevated Windows host, the control service off on an Android host). Say why instead
+	// of leaving a picture that ignores every tap. The host rate-limits these.
+	(() => {
+		if (!hasTauri) return;
+		const REASONS = ['uinput_denied', 'mac_accessibility', 'win_elevated', 'win_secure_desktop', 'android_control_off', 'android_control_missing'];
+		const { listen } = window.__TAURI__.event;
+		listen('input-unavailable', (e) => {
+			const p = e.payload || {};
+			const why = REASONS.includes(p.reason) ? p.reason : 'unavailable';
+			import('./toast.js')
+				.then((m) => m.toast(t('m.input.title') + ': ' + t('m.input.' + why), 7000))
+				.catch(() => {});
+		}).catch(() => {});
+	})();
 
 	// B2: queue the move; flushed once per frame by _flushSends (coalesces a burst).
 	const sendMoveAt  = (px, py) => { const p = norm(px, py); _pendingMove = { slot: p.slot, x: p.x, y: p.y }; _scheduleFlush(); };

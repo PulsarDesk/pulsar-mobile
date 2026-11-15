@@ -486,6 +486,14 @@ export default {
 	"m.settings.hostCursor": "Show the other side's cursor",
 	"m.settings.hostCursorHint": "In remote desktop, while the person at the host uses their own mouse, their pointer is marked «Host».",
 	"m.hostptr.notice": "The other side is using the mouse",
+	"m.input.title": "Your touches and keys do not reach the other side",
+	"m.input.uinput_denied": "no access to /dev/uinput on Linux (udev rule missing)",
+	"m.input.mac_accessibility": "Pulsar has no Accessibility permission on the Mac",
+	"m.input.win_elevated": "the window you tap or type into runs as administrator and Pulsar there does not",
+	"m.input.win_secure_desktop": "a UAC prompt or the lock screen is open there; input does not reach it without the Pulsar helper service",
+	"m.input.android_control_off": "the Pulsar control service (Accessibility) is off on the phone",
+	"m.input.android_control_missing": "this Pulsar build on the phone cannot be controlled; install the host-control version",
+	"m.input.unavailable": "the other side cannot pass input to its device",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Audio",
