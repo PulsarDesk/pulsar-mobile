@@ -16,6 +16,10 @@
     <!-- Touch haptics: navigator.vibrate() in the client input layer (long-press,
          double-tap, double-tap-drag) is a no-op without this. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- WifiLock.acquire() and the PARTIAL_WAKE_LOCK (client perf locks, host Wi-Fi locks)
+         throw SecurityException without it; normal-level, no prompt. No manifest here declared
+         it, so the client perf locks could fail silently (caught + logged). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Remote-control cursor: the injected pointer is drawn as a system overlay
          (TYPE_APPLICATION_OVERLAY), captured by MediaProjection so the operator sees it
          in the stream. Android only lists an app under "draw over other apps" if it

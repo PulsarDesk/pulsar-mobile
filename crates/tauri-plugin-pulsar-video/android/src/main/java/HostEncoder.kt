@@ -13,8 +13,6 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import java.net.DatagramPacket
@@ -60,7 +58,18 @@ class HostEncoder(
     private var curW = width
     private var curH = height
 
-    private fun videoFormat(w: Int, h: Int): MediaFormat =
+    /**
+     * The encoder format. [tryNumber] walks a ladder of realtime hints from most to least
+     * (1.17), like the decoder's low-latency options: the first format that configures wins.
+     *  - try 0: + vendor low-latency keys (only keys the encoder lists, API 31+; Qualcomm's
+     *    key by name on API 26-30)
+     *  - try 0-1: + KEY_PRIORITY 0 (realtime), KEY_LATENCY 1 (API 30+: one frame in flight),
+     *    KEY_OPERATING_RATE = fps
+     *  - try 0-2: + CBR when the encoder supports it — a steady per-frame size is what a
+     *    paced, loss-sensitive stream wants; VBR overshoots on scene changes
+     *  - try 3: the plain format the host always used
+     */
+    private fun videoFormat(w: Int, h: Int, tryNumber: Int = 3, codec: MediaCodec? = null): MediaFormat =
         MediaFormat.createVideoFormat(mime, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
@@ -97,18 +106,73 @@ class HostEncoder(
             // remote sees a frozen image. Repeat the last frame every ~frame-interval so the
             // stream keeps flowing (repeated static frames compress to almost nothing).
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
+            if (codec != null) applyRealtimeHints(this, tryNumber, codec)
         }
 
+    private fun applyRealtimeHints(fmt: MediaFormat, tryNumber: Int, codec: MediaCodec) {
+        if (tryNumber < 1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = codec.name.lowercase()
+            val known = listOf(
+                "vendor.qti-ext-enc-low-latency.enable",
+                "vendor.rtc-ext-enc-low-latency.enable",
+                "vendor.hisi-ext-low-latency-video-enc.video-scene-for-low-latency-req",
+            )
+            val supported: List<String>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                try { codec.supportedVendorParameters } catch (_: Exception) { null }
+            } else null
+            for (k in known) {
+                // API 31+: set only what the encoder declares. Older: Qualcomm's key by name
+                // (unknown keys are ignored; one that breaks configure is dropped by try 1).
+                val use = supported?.any { it.equals(k, ignoreCase = true) }
+                    ?: (k.startsWith("vendor.qti") && (name.startsWith("omx.qcom") || name.startsWith("c2.qti")))
+                if (use) fmt.setInteger(k, 1)
+            }
+        }
+        if (tryNumber < 2 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            fmt.setInteger(MediaFormat.KEY_PRIORITY, 0)
+            fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) fmt.setInteger(MediaFormat.KEY_LATENCY, 1)
+        }
+        if (tryNumber < 3) {
+            val cbr = try {
+                codec.codecInfo.getCapabilitiesForType(mime).encoderCapabilities
+                    ?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true
+            } catch (_: Exception) { false }
+            if (cbr) fmt.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+        }
+    }
+
+    /** A started encoder + its input surface at [w]x[h], with the richest hint set that
+     *  configures (see [videoFormat]). A fresh MediaCodec per try: a failed configure can
+     *  leave the instance unusable. */
+    private fun createEncoder(w: Int, h: Int): Pair<MediaCodec, Surface> {
+        var last: Exception? = null
+        for (tryNumber in 0..3) {
+            var c: MediaCodec? = null
+            try {
+                c = MediaCodec.createEncoderByType(mime)
+                c.configure(videoFormat(w, h, tryNumber, c), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                val surface = c.createInputSurface()
+                c.start()
+                Log.i(TAG, "encoder ${c.name} ${w}x${h} configured (hints try=$tryNumber)")
+                return Pair(c, surface)
+            } catch (e: Exception) {
+                last = e
+                Log.w(TAG, "encoder configure try=$tryNumber failed: ${e.message}")
+                try { c?.release() } catch (_: Exception) {}
+            }
+        }
+        throw last ?: RuntimeException("encoder configure failed")
+    }
+
     fun start() {
-        val codec = MediaCodec.createEncoderByType(mime)
-        codec.configure(videoFormat(width, height), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val surface = codec.createInputSurface()
-        codec.start()
+        val (codec, surface) = createEncoder(width, height)
         encoder = codec
         inputSurface = surface
 
-        // API 34+ requires a registered callback before createVirtualDisplay.
-        projection.registerCallback(object : MediaProjection.Callback() {}, Handler(Looper.getMainLooper()))
+        // API 34+ requires a registered MediaProjection callback before createVirtualDisplay:
+        // the plugin registers it when it obtains the projection (PulsarVideoPlugin
+        // .watchProjection — its onStop ends the stream), so not again here per encoder.
         // FLAG_PUBLIC (the standard MediaProjection screen-capture flag) keeps capturing
         // when our app is backgrounded; AUTO_MIRROR couples to the source display state and
         // pauses on the emulator when the app leaves the foreground → remote freeze.
@@ -169,10 +233,7 @@ class HostEncoder(
         if (newW <= 0 || newH <= 0 || (newW == curW && newH == curH)) return
         try {
             // 1) New encoder + surface at the new size (started before we repoint the VD).
-            val codec = MediaCodec.createEncoderByType(mime)
-            codec.configure(videoFormat(newW, newH), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            val surface = codec.createInputSurface()
-            codec.start()
+            val (codec, surface) = createEncoder(newW, newH)
             // 2) Repoint the SAME virtual display at the new surface + size.
             vd.resize(newW, newH, densityDpi)
             vd.setSurface(surface)
@@ -234,6 +295,7 @@ class HostEncoder(
     }
 
     private fun audioLoop(rec: AudioRecord, enc: MediaCodec) {
+        try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO) } catch (_: Exception) {}
         val sock = DatagramSocket()
         val addr = InetAddress.getByName("127.0.0.1")
         val info = MediaCodec.BufferInfo()
@@ -275,6 +337,9 @@ class HostEncoder(
         // Captured once per invocation. reconfigure() stops + joins this loop BEFORE swapping
         // `encoder`, so the captured ref stays valid for this loop's lifetime.
         val codec = encoder ?: return
+        // The capture -> encode -> send path is latency-critical (the client's decode thread
+        // runs at this priority too).
+        try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Exception) {}
         val sock = DatagramSocket()
         val addr = InetAddress.getByName("127.0.0.1")
         val info = MediaCodec.BufferInfo()
