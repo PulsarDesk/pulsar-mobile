@@ -53,10 +53,16 @@ object DecoderProbe {
         return HARDWARE_PREFIXES.any { n.startsWith(it) }
     }
 
+    /** The device's codec list, built once per process: building MediaCodecList is slow
+     *  (it parses every codec's capabilities) and the list does not change at runtime. */
+    private val allCodecs: Array<MediaCodecInfo> by lazy {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+    }
+
     /** Every decoder that takes [mime], in MediaCodecList order (the platform's own
      *  preference). Aliases (API 29+) are skipped: they duplicate a real entry. */
     fun decodersFor(mime: String): List<MediaCodecInfo> = try {
-        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
+        allCodecs.filter { info ->
             !info.isEncoder &&
                 !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && info.isAlias) &&
                 info.supportedTypes.any { it.equals(mime, ignoreCase = true) }

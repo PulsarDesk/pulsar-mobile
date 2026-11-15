@@ -115,7 +115,7 @@ fn bump_slot_gen(slot: u8) -> u64 {
 }
 
 /// The current reconnect generation for `slot` (0 if never connected).
-fn current_slot_gen(slot: u8) -> u64 {
+pub(crate) fn current_slot_gen(slot: u8) -> u64 {
     *SLOT_GEN.lock().unwrap().get(&slot).unwrap_or(&0)
 }
 
@@ -1119,10 +1119,15 @@ pub async fn connect_host<R: Runtime>(
     };
 
     // Codec (audit 1.1): the host's best codec this phone decodes in HARDWARE (or the
-    // caller's explicit pick), plus the full decodable list for the request's
-    // `decode_codecs` so the host's own codec fallback can't land outside it.
-    let dcaps = crate::decode_caps::query(&app, eff_width, eff_height);
-    let (resolved_codec, decode_codecs) = crate::decode_caps::pick_codec(&caps.codecs, &codec, &dcaps);
+    // caller's explicit pick). `decode_codecs` on the wire is just this codec: the decoder
+    // and depacketizer are armed for it, and the host never says if it fell back.
+    let dcaps = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::decode_caps::query(&app, eff_width, eff_height))
+            .await
+            .unwrap_or_default()
+    };
+    let resolved_codec = crate::decode_caps::pick_codec(&caps.codecs, &codec, &dcaps);
     let mime = mime_for(&resolved_codec);
     let cenum = codec_enum(&resolved_codec);
 
@@ -1196,6 +1201,8 @@ pub async fn connect_host<R: Runtime>(
     // Hz, 120+ on a gaming PC, with no mobile cap). "Unlimited" (0) means this phone's
     // highest panel refresh; every value is capped by what the decoder declares for this
     // codec and size, instead of the old fixed 60 that kept 90/120/144 Hz phones at 60.
+    // The asked-for value is kept (stream_ctx) so a later codec/size change re-caps from it.
+    let want_fps = fps;
     let fps = crate::decode_caps::effective_fps(fps, &resolved_codec, &dcaps);
 
     // The shared adaptive controller: the phone's requested size is the ladder's top rung
@@ -1264,7 +1271,7 @@ pub async fn connect_host<R: Runtime>(
         quality: quality_pref,
         hdr,
         yuv444: false,
-        decode_codecs,
+        decode_codecs: vec![resolved_codec.clone()],
         media_over_session: mos,
         cursor_external: false,
         // W5: use the claimed display index (freeDisplayFor logic).
@@ -1307,6 +1314,9 @@ pub async fn connect_host<R: Runtime>(
 
     // Store the initial req so quality patch commands can build from it.
     app.state::<SessionRegistry>().update_last_req(slot, req.clone());
+    // What set_play_codec / _fps / _resolution re-resolve from: the host's codecs, the fps
+    // the user asked for, and the decoder caps already probed for this size.
+    app.state::<SessionRegistry>().set_stream_ctx(slot, caps.codecs.clone(), want_fps, (eff_width, eff_height, dcaps));
     // Physical controllers -> this session's host (once started, the feed follows the
     // active pane).
     crate::pad_feed::ensure_started(&app);

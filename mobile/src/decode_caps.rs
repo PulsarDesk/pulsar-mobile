@@ -2,8 +2,13 @@
 //!
 //! * Codec (audit 1.1): "auto" picks the host's best codec that has a HARDWARE decoder here
 //!   — not simply the host's first, which on an AV1-capable host meant software AV1 on most
-//!   phones (lag, heat, or a black screen without any AV1 decoder). The request carries the
-//!   whole decodable list as `decode_codecs`, so the host's codec fallback stays inside it.
+//!   phones (lag, heat, or a black screen without any AV1 decoder). AV1 ranks last in the
+//!   auto pick until the mobile AV1 path has been tested on a device.
+//! * The request's `decode_codecs` is ONLY the resolved codec. The phone arms MediaCodec and
+//!   the depacketizer for that codec before the first frame and the host never says which
+//!   codec it actually encodes, so the host must not fall back to another one: with a
+//!   one-entry list its clamp (desktop host handlers.rs) stays on the codec the phone armed.
+//!   A longer list let it switch to H.264 into an HEVC/AV1 decoder (black screen / garbage).
 //! * Frame rate (audit 1.3): capped by what the decoder declares for the stream size
 //!   (`areSizeAndRateSupported`), not a fixed 60; "unlimited" (0) means the panel's highest
 //!   refresh.
@@ -59,56 +64,38 @@ fn decodable(caps: &DecoderCaps) -> Vec<String> {
     caps.sw.iter().map(|c| norm(c)).filter(|c| c != "av1").collect()
 }
 
-/// Resolve the codec for a stream request and the `decode_codecs` list to send with it.
+/// Resolve the codec for a stream request (`host` = the host's codecs, its preference
+/// order). The request sends `decode_codecs = [this]` (see the module doc).
 ///
 /// * An explicit pick (`pref` other than `"auto"`/empty) the host offers is honored even
-///   without a hardware decoder (the user asked for it); it is then appended to the list.
-/// * `"auto"`: the host's first codec this phone decodes in hardware (host order = its
-///   preference); without any overlap, H.264 when the host has it (a software H.264 decoder
+///   without a hardware decoder (the user asked for it).
+/// * `"auto"`: the host's first codec this phone decodes in hardware, AV1 last (untested on
+///   a device); without any overlap, H.264 when the host has it (a software H.264 decoder
 ///   exists nearly everywhere), else the host's first.
-/// * `decode_codecs` = the decodable codecs in host-preference order, then the remaining
-///   decodable ones, then the resolved codec if missing — stable across codec switches, so
-///   a later "auto" re-resolves to its first entry.
 /// * Unknown caps: the old choice (`pref`, else the host's first codec) except that a
-///   host-first AV1 is skipped for its next codec; `decode_codecs` = just that codec.
-pub fn pick_codec(host: &[String], pref: &str, caps: &DecoderCaps) -> (String, Vec<String>) {
+///   host-first AV1 is skipped for its next codec.
+pub fn pick_codec(host: &[String], pref: &str, caps: &DecoderCaps) -> String {
     let host: Vec<String> = host.iter().map(|c| norm(c)).collect();
     let pref = norm(pref);
-    let explicit = !pref.is_empty() && pref != "auto";
+    if !pref.is_empty() && pref != "auto" && host.contains(&pref) {
+        return pref;
+    }
     let dec = decodable(caps);
-
+    let not_av1 = |c: &&String| c.as_str() != "av1";
     if dec.is_empty() {
-        let resolved = if explicit && host.contains(&pref) {
-            pref
-        } else {
-            host.iter()
-                .find(|c| c.as_str() != "av1")
-                .or_else(|| host.first())
-                .cloned()
-                .unwrap_or_else(|| "h264".into())
-        };
-        return (resolved.clone(), vec![resolved]);
+        return host.iter().find(not_av1).or_else(|| host.first()).cloned().unwrap_or_else(|| "h264".into());
     }
-
-    let mut list: Vec<String> = host.iter().filter(|c| dec.contains(c)).cloned().collect();
-    for c in &dec {
-        if !list.contains(c) {
-            list.push(c.clone());
-        }
+    if let Some(c) = host.iter().filter(not_av1).find(|c| dec.contains(c)) {
+        return c.clone();
     }
-    let resolved = if explicit && host.contains(&pref) {
-        pref
-    } else if let Some(c) = host.iter().find(|c| dec.contains(c)) {
-        c.clone()
-    } else if host.iter().any(|c| c == "h264") || host.is_empty() {
+    if let Some(c) = host.iter().find(|c| dec.contains(c)) {
+        return c.clone();
+    }
+    if host.iter().any(|c| c == "h264") || host.is_empty() {
         "h264".into()
     } else {
         host[0].clone()
-    };
-    if !list.contains(&resolved) {
-        list.push(resolved.clone());
     }
-    (resolved, list)
 }
 
 /// The fps to request: `requested` (0 = "unlimited" -> the panel's highest refresh), capped
@@ -158,61 +145,53 @@ mod tests {
     fn auto_skips_software_av1() {
         // AV1-first host, phone with HW HEVC/H.264 only (software AV1 present).
         let c = caps(&["h265", "h264"], &["h265", "h264", "av1"], &[], 120);
-        let (codec, list) = pick_codec(&v(&["av1", "h265", "h264"]), "auto", &c);
-        assert_eq!(codec, "h265");
-        assert_eq!(list, v(&["h265", "h264"]));
+        assert_eq!(pick_codec(&v(&["av1", "h265", "h264"]), "auto", &c), "h265");
     }
 
     #[test]
-    fn auto_takes_hw_av1_in_host_order() {
+    fn auto_ranks_hw_av1_last() {
+        // AV1 is untested on devices: a HW HEVC/H.264 decoder wins over HW AV1 in auto.
         let c = caps(&["h265", "h264", "av1"], &["h265", "h264", "av1"], &[], 120);
-        let (codec, list) = pick_codec(&v(&["av1", "h265", "h264"]), "auto", &c);
-        assert_eq!(codec, "av1");
-        assert_eq!(list, v(&["av1", "h265", "h264"]));
+        assert_eq!(pick_codec(&v(&["av1", "h265", "h264"]), "auto", &c), "h265");
+        // ...but HW AV1 still beats a codec without a HW decoder, and an explicit pick wins.
+        assert_eq!(pick_codec(&v(&["av1", "vp9"]), "auto", &c), "av1");
+        assert_eq!(pick_codec(&v(&["av1", "h265", "h264"]), "av1", &c), "av1");
     }
 
     #[test]
-    fn explicit_pick_is_honored_and_listed() {
+    fn explicit_pick_is_honored() {
         let c = caps(&["h264"], &["h264", "h265"], &[], 60);
-        let (codec, list) = pick_codec(&v(&["h265", "h264"]), "h265", &c);
-        assert_eq!(codec, "h265");
-        assert_eq!(list, v(&["h264", "h265"]));
+        assert_eq!(pick_codec(&v(&["h265", "h264"]), "h265", &c), "h265");
         // An explicit pick the host lacks falls back to auto.
-        let (codec, _) = pick_codec(&v(&["h264"]), "h265", &c);
-        assert_eq!(codec, "h264");
+        assert_eq!(pick_codec(&v(&["h264"]), "h265", &c), "h264");
     }
 
     #[test]
     fn no_overlap_prefers_h264() {
         let c = caps(&["h264"], &["h264"], &[], 60);
-        let (codec, list) = pick_codec(&v(&["av1", "h265"]), "auto", &c);
-        assert_eq!(codec, "av1"); // host has no h264: its first codec
-        assert_eq!(list, v(&["h264", "av1"]));
-        let (codec, _) = pick_codec(&v(&["av1", "h265", "h264"]), "auto", &caps(&["vp9"], &[], &[], 60));
-        assert_eq!(codec, "h264");
+        assert_eq!(pick_codec(&v(&["av1", "h265"]), "auto", &c), "av1"); // no h264: host's first
+        assert_eq!(pick_codec(&v(&["av1", "h265", "h264"]), "auto", &caps(&["vp9"], &[], &[], 60)), "h264");
     }
 
     #[test]
     fn software_only_device_avoids_av1() {
         let c = caps(&[], &["h264", "av1"], &[], 60);
-        let (codec, list) = pick_codec(&v(&["av1", "h264"]), "auto", &c);
-        assert_eq!(codec, "h264");
-        assert_eq!(list, v(&["h264"]));
+        assert_eq!(pick_codec(&v(&["av1", "h264"]), "auto", &c), "h264");
     }
 
     #[test]
     fn unknown_caps_keep_old_choice_minus_av1() {
         let c = DecoderCaps::default();
-        assert_eq!(pick_codec(&v(&["av1", "h265"]), "auto", &c), ("h265".into(), v(&["h265"])));
-        assert_eq!(pick_codec(&v(&["h265", "h264"]), "h264", &c), ("h264".into(), v(&["h264"])));
-        assert_eq!(pick_codec(&v(&["av1"]), "auto", &c), ("av1".into(), v(&["av1"])));
-        assert_eq!(pick_codec(&[], "auto", &c), ("h264".into(), v(&["h264"])));
+        assert_eq!(pick_codec(&v(&["av1", "h265"]), "auto", &c), "h265");
+        assert_eq!(pick_codec(&v(&["h265", "h264"]), "h264", &c), "h264");
+        assert_eq!(pick_codec(&v(&["av1"]), "auto", &c), "av1");
+        assert_eq!(pick_codec(&[], "auto", &c), "h264");
     }
 
     #[test]
     fn names_are_normalized() {
         let c = caps(&["h265"], &["h265"], &[], 60);
-        assert_eq!(pick_codec(&v(&["hevc"]), "auto", &c).0, "h265");
+        assert_eq!(pick_codec(&v(&["hevc"]), "auto", &c), "h265");
     }
 
     #[test]
