@@ -106,6 +106,16 @@ class HostEncoder(
             // remote sees a frozen image. Repeat the last frame every ~frame-interval so the
             // stream keeps flowing (repeated static frames compress to almost nothing).
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
+            // Pulsar's SDR colour rule (every host, every client): BT.709, limited range. A
+            // surface-input encoder converts the screen's RGB with these aspects and writes
+            // them into the VUI; left unset, the vendor picks (often BT.601, untagged) and the
+            // desktop clients decode BT.709 — shifted reds / greens. API 24+; an encoder that
+            // ignores the keys keeps its default.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+            }
             if (codec != null) applyRealtimeHints(this, tryNumber, codec)
         }
 
