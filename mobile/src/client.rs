@@ -46,6 +46,12 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use pulsar_core::proto::DeviceId;
+use pulsar_core::adapt::caps::{mobile_auto_cap_kbps, path_cap_kbps};
+use pulsar_core::adapt::pong::PongMatcher;
+use pulsar_core::adapt::repair::{
+    decoder_sheds, rtp_timestamp, FecShare, FrameClock, KeyframePacer, RepairTracker, KF_GAP_MAX_FROZEN,
+    REPAIR_SWEEP_MS,
+};
 use pulsar_core::adapt::{self, Controller};
 use pulsar_core::service::{
     self, query_stream_caps, recv_host_auth, request_games, request_launch, request_stream,
@@ -350,6 +356,33 @@ fn emit_play_stall<R: Runtime>(app: &AppHandle<R>, slot: u8, stalled: bool) {
     let _ = app.emit("play-stall", PlayStallPayload { slot, stalled });
 }
 
+// ── play-decode-limit event ───────────────────────────────────────────────────
+
+/// The phone's decoder could not keep up and the stream runs at `fps` instead of the
+/// session's `user_fps` (`fps < user_fps`), or a retry put it back (`fps == user_fps`).
+/// The UI shows a short note either way.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PlayDecodeLimitPayload {
+    slot: u8,
+    fps: u32,
+    user_fps: u32,
+}
+
+fn emit_play_decode_limit<R: Runtime>(app: &AppHandle<R>, slot: u8, fps: u32, user_fps: u32) {
+    let _ = app.emit("play-decode-limit", PlayDecodeLimitPayload { slot, fps, user_fps });
+}
+
+/// What `SessionRegistry::last_req` keeps: the stream request with the SESSION's fps, not
+/// a decoder-forced lower one (`Controller::client_decoder_sheds`). A session-menu restream
+/// (codec, bitrate, ...) builds on `last_req` and rebuilds the controller from its fps: a
+/// stored 30 would become the session's new top for good.
+fn user_view(req: &StreamReq, user_fps: u32) -> StreamReq {
+    let mut r = req.clone();
+    r.fps = user_fps;
+    r
+}
+
 // ── auth-prompt event ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -376,9 +409,25 @@ fn emit_auth_prompt<R: Runtime>(app: &AppHandle<R>, slot: u8, peer: &str, kind: 
 
 /// Decision cadence (the controller works on 2 s windows).
 const ABR_TICK: Duration = Duration::from_millis(2000);
-/// Auto-rate cap / start (kbit/s) when the user did not pick a bitrate.
-const AUTO_CAP_KBPS: u32 = 12_000;
+/// Auto-rate start when neither the bandwidth probe nor the path's memory has a rate. The
+/// ceiling is `adapt::caps::mobile_auto_cap_kbps` (what the phone's point needs, at most
+/// 50 Mbit; was a flat 12 Mbit that also cut the probe's plan short), under the relay's cap
+/// while relayed.
 const AUTO_START_KBPS: u32 = 8_000;
+/// After a stream re-request that rebuilds the host's encoder (a new size / fps), the next
+/// windows' loss is that rebuild gap, not congestion: the controller skips them (desktop
+/// hold.rs does the same).
+const SWITCH_QUIET: Duration = Duration::from_millis(2500);
+/// Consecutive decoder-stat windows (~2 s each) a decoder must shed frames before the fps
+/// steps down one rung for it (`Controller::client_decoder_sheds`, retried upward later).
+const DECODE_OVER_WINDOWS: u32 = 3;
+/// More access units than this handed to the decoder in one drain of the reorder buffer is a
+/// network burst (the frames held behind a repaired hole, a Wi-Fi power-save batch): the
+/// Kotlin backlog guard (16 AUs) may drop some of them however fast the decoder is, so that
+/// stat window says nothing about the decoder (`decoder_sheds`).
+const DECODE_BURST_AUS: u32 = 8;
+/// Decoder counters are compared over at least this long.
+const DECODE_STAT_WINDOW: Duration = Duration::from_secs(2);
 
 #[tauri::command]
 pub async fn send_pointer<R: Runtime>(
@@ -1221,12 +1270,22 @@ pub async fn connect_host<R: Runtime>(
     // The shared adaptive controller: the phone's requested size is the ladder's top rung
     // (the host scales its capture down to it); the mobile depacketizer waits for an IDR
     // after a loss, so it asks for the short-GOP recovery (not intra refresh).
-    let mut acfg = adapt::Config::new(
-        adapt::codec_from_wire(&resolved_codec),
-        if auto_rate { AUTO_CAP_KBPS } else { bitrate_kbps },
-    );
+    // The ceiling: the user's pick, else what a clean picture of this point needs (scaled by
+    // pixels, fps and codec, at most 50 Mbit on a phone) — and while relayed, the relay's
+    // per-session forwarding cap (10 % headroom), so the encoder starts inside the pipe. A
+    // relayed session that upgrades to a direct path goes back to `direct_cap` (read loop).
+    let direct_cap = if auto_rate {
+        mobile_auto_cap_kbps(&resolved_codec, (eff_width, eff_height, fps), game_mode)
+    } else {
+        bitrate_kbps
+    };
+    let start_relay = matches!(sess.transport(), Transport::Relay);
+    let cap_kbps = path_cap_kbps(start_relay, sess.rate_cap_kbps(), direct_cap);
+    let mut acfg = adapt::Config::new(adapt::codec_from_wire(&resolved_codec), cap_kbps);
     acfg.native = (eff_width, eff_height, fps);
-    // Start near the peer's last known-good rate (60 % of it), else the auto start.
+    // Start near the peer's last known-good rate ON THIS KIND OF PATH (60 % of it, never under
+    // ~2 Mbit — one bad session must not start every later one at the floor), else the auto
+    // start.
     // The memory is per peer AND per kind of path (pulsar-core `netpath`, shared with the
     // desktop): the same host over the home LAN, over a ZeroTier / WireGuard / Tailscale overlay
     // (private address, internet underneath) and through the relay are different paths, and a
@@ -1246,11 +1305,10 @@ pub async fn connect_host<R: Runtime>(
             .unwrap_or(pulsar_core::netpath::PathClass::Wan)
     };
     log::info!("pulsar: path class {}", path_class.as_str());
-    let peer_key = format!("{target}|{}", path_class.as_str());
+    let peer_key = target.clone();
     // The session-start path and its verdict (judged with the round trip too): a relay <->
-    // direct move mid-session re-keys the memory (see the stats tick), and a move back to
-    // this path keeps this verdict.
-    let peer_target = target.clone();
+    // direct move mid-session re-classifies (see the stats tick), and a move back to this
+    // path keeps this verdict.
     let start_path = (
         sess.transport(),
         if matches!(sess.transport(), Transport::Direct) {
@@ -1259,7 +1317,8 @@ pub async fn connect_host<R: Runtime>(
             None
         },
     );
-    let hint = crate::adapt_memory::hint(&app, &peer_key).map(|k| (k * 3 / 5).max(adapt::FLOOR_KBPS));
+    let hint = crate::adapt_memory::hint(&app, &peer_key, path_class)
+        .map(|k| (k * 3 / 5).max(2_000).clamp(adapt::FLOOR_KBPS, cap_kbps));
     // Session-start bandwidth probe (pulsar-core `adapt::probe`, hosts advertising FEAT_PROBE):
     // ~1 s of packet trains measured before the stream starts, so an auto-rate session opens at
     // what this path carries now instead of a remembered or fixed guess.
@@ -1272,11 +1331,11 @@ pub async fn connect_host<R: Runtime>(
             None => None,
         }
         .unwrap_or(100.0);
-        let rates = adapt::probe::plan_rates(AUTO_CAP_KBPS);
+        let rates = adapt::probe::plan_rates(cap_kbps);
         match service::run_probe(&mut sess, rates, adapt::probe::TRAIN_MS, rtt).await {
             Ok(Some(e)) => {
                 log::info!("pulsar: bandwidth probe {} kbps (at least: {})", e.kbps, e.at_least);
-                Some((e.kbps as u64 * 4 / 5).clamp(adapt::FLOOR_KBPS as u64, AUTO_CAP_KBPS as u64) as u32)
+                Some((e.kbps as u64 * 4 / 5).clamp(adapt::FLOOR_KBPS as u64, cap_kbps as u64) as u32)
             }
             _ => None,
         }
@@ -1287,7 +1346,7 @@ pub async fn connect_host<R: Runtime>(
     // starts AT the pick (start_kbps 0 would now mean the controller's cautious no-memory
     // start, not the cap).
     acfg.start_kbps = if auto_rate {
-        probed.or(hint).unwrap_or(AUTO_START_KBPS).min(AUTO_CAP_KBPS)
+        probed.or(hint).unwrap_or(AUTO_START_KBPS).min(cap_kbps)
     } else {
         bitrate_kbps
     };
@@ -1296,7 +1355,9 @@ pub async fn connect_host<R: Runtime>(
         acfg.startup_windows = 0;
     }
     acfg.ir_capable = false;
-    // Size/fps are fixed for the session (settings / screen); only the bitrate adapts.
+    // Size/fps are fixed for the session (settings / screen); only the bitrate adapts. The one
+    // exception: a decoder that sheds frames steps the fps down one rung (`client_decoder_sheds`),
+    // retried upward after a while, and the UI is told (`play-decode-limit`).
     acfg.ladder = false;
     let ctl = Controller::new(acfg);
     let start_point = ctl.point();
@@ -1459,11 +1520,12 @@ pub async fn connect_host<R: Runtime>(
                 );
             });
         }
+        // Keepalive Pings at uneven 350-650 ms gaps; `PongMatcher` times the host's Pongs
+        // (which carry no id) against them — a Pong that arrives after the next Ping went out,
+        // or after a lost one, is still read right (shared with the desktop client).
+        let mut pings = PongMatcher::new();
         let _ = service::send_keepalive(&mut sess).await;
-        let mut last_ka = Instant::now();
-        // RTT: timestamp the outstanding keepalive Ping; the matching Pong (is_pong)
-        // in the recv path measures the network round-trip for the perf HUD.
-        let mut ping_at: Option<Instant> = Some(Instant::now());
+        let mut next_ping = Instant::now() + pings.on_ping(Instant::now());
 
         // ── Adaptive bitrate + loss tracking (ported from desktop play/hold.rs) ──
         // Measure video RTP sequence-gap loss; every ~2 s step the host's encode
@@ -1477,26 +1539,49 @@ pub async fn connect_host<R: Runtime>(
         let adapt_enabled = cur_req.media_over_session;
         let mut ctl = ctl;
         let mut reorder = crate::rtp::ReorderBuffer::new();
+        // The shared repair loop (pulsar-core `adapt::repair`, the desktop client's): seq-gap
+        // tracking with the reorder / FEC waits before a NACK, one re-NACK ~1 RTT later, the
+        // write-off after the RTT-derived repair window; the FEC decoders; the window counters
+        // the controller runs on (loss, NACK repairs, goodput, the parity share); the RTT.
+        let mut repair_st = RepairTracker::new();
+        let mut last_sweep = Instant::now();
         let mut nack_seqs: Vec<u16> = Vec::new();
         let mut loss_corrupt = false;
         let mut waiting_idr = false;
+        // A keyframe is wanted (a torn / reference-less AU was dropped, the decoder lost one):
+        // asked for as soon as the shared keyframe pacing allows (gaps double during a loss
+        // streak — the old fixed 400 ms re-ask was a keyframe storm on a lossy link).
+        let mut want_idr = false;
+        // Capped at 1 s: this client freezes until the keyframe (no RFI / intra refresh), so
+        // the desktop's back-off to 4 s would freeze it up to 4 s per loss.
+        let mut kf_pacer = KeyframePacer::with_max(Instant::now(), KF_GAP_MAX_FROZEN);
         let mut total_lost: u64 = 0;
-        let mut last_idr_req = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
         let mut framed: Vec<u8> = Vec::new();
         let mut last_abr = Instant::now();
-        let mut rtt_samples: Vec<f32> = Vec::with_capacity(8);
-        // FEC parity decoding (Phase 2.1) + per-frame delay sampling (Phase 3).
-        let mut fec_dec = service::media::FecDecoder::default();
-        let mut fec_rs = service::media::RsFecDecoder::default();
-        let mut win_fec_ok: u32 = 0;
         let mut remembered_kbps: u32 = 0;
-        let mut peer_key = peer_key;
+        // Per-frame delay sampling (Phase 3): only a NEWER RTP timestamp closes a frame.
         let epoch = Instant::now();
         let mono_ms = move || epoch.elapsed().as_secs_f64() * 1000.0;
-        let mut frame_ts: Option<u32> = None;
-        let mut frame_last_arrival_ms: f64 = 0.0;
+        let mut frame_clock = FrameClock::default();
+        // The path the media runs on now: a relay ↔ direct change restarts the controller on
+        // the new path under its own cap (`path_changed`), and the memory is kept per class.
+        let mut on_relay = matches!(sess.transport(), Transport::Relay);
+        let mut direct_cap = direct_cap;
+        let mut cur_class = path_class;
+        // When a re-request rebuilt the host's encoder (the next windows are skipped).
+        let mut last_switch_at: Option<Instant> = None;
+        // Decoder load: AUs fed vs pictures out / input-buffer stalls over ~2 s
+        // (`decoder_sheds`). A window with a network burst, a declared gap, a rebuilt or absent
+        // decoder (`dec_disturbed`) gives no verdict; one with nothing decoded (surface gone,
+        // app in the background) resets the count and disturbs the next (partial) one too.
+        let mut aus_fed: u64 = 0;
+        let mut dec_base: Option<(Instant, u64, u64, u64)> = None;
+        let mut dec_verdict: Option<bool> = None;
+        let mut dec_over_windows: u32 = 0;
+        let mut dec_disturbed = false;
+        // The session's own fps (the controller's top rung): what `last_req` keeps, and what a
+        // decoder-forced step goes back to.
+        let mut user_fps = cur_req.fps;
 
         // ── W3: stats tracking ───────────────────────────────────────────────
         let mut frames: u64 = 0;
@@ -1580,7 +1665,9 @@ pub async fn connect_host<R: Runtime>(
                         // The host restarts its RTP sequence base on a restream → reset the
                         // reorder buffer so the discontinuity isn't counted as loss.
                         reorder.reset();
+                        repair_st.reset_stream();
                         nack_seqs.clear();
+                        want_idr = false;
 
                         // Re-seat the adaptive-bitrate baseline to the user's new pick
                         // so ABR ramps relative to it (and doesn't fight a manual change).
@@ -1590,24 +1677,31 @@ pub async fn connect_host<R: Runtime>(
                         // just running at — a 0 start would now mean the core's cautious
                         // no-memory start (~4 Mbit), a needless drop mid-session.
                         let running_kbps = ctl.target_kbps();
-                        let mut acfg = adapt::Config::new(
-                            adapt::codec_from_wire(&new_req.codec),
-                            if new_req.bitrate_kbps > 0 { new_req.bitrate_kbps } else { AUTO_CAP_KBPS },
-                        );
+                        direct_cap = if new_req.bitrate_kbps > 0 {
+                            new_req.bitrate_kbps
+                        } else {
+                            mobile_auto_cap_kbps(&new_req.codec, (new_req.width, new_req.height, new_req.fps), new_req.game_mode)
+                        };
+                        let cap = path_cap_kbps(on_relay, sess.rate_cap_kbps(), direct_cap);
+                        let mut acfg = adapt::Config::new(adapt::codec_from_wire(&new_req.codec), cap);
                         acfg.start_kbps = if new_req.bitrate_kbps > 0 {
                             new_req.bitrate_kbps
                         } else {
-                            running_kbps.clamp(adapt::FLOOR_KBPS, AUTO_CAP_KBPS)
+                            running_kbps.clamp(adapt::FLOOR_KBPS, cap)
                         };
                         acfg.startup_windows = 0;
                         acfg.native = (new_req.width, new_req.height, new_req.fps);
                         acfg.ir_capable = false;
                         acfg.ladder = false;
                         ctl = Controller::new(acfg);
-                        fec_dec.reset();
-                        fec_rs.reset();
-                        frame_ts = None;
+                        frame_clock.reset();
                         last_abr = Instant::now();
+                        last_switch_at = Some(Instant::now());
+                        dec_base = None;
+                        dec_verdict = None;
+                        dec_over_windows = 0;
+                        dec_disturbed = true;
+                        user_fps = new_req.fps;
                         let new_codec = new_req.codec.clone();
                         app2.state::<SessionRegistry>().update_last_req(slot, new_req);
                         log::info!("pulsar: restream applied slot={slot} codec={new_codec}");
@@ -1615,8 +1709,11 @@ pub async fn connect_host<R: Runtime>(
                 }
 
                 // ── Normal recv path ─────────────────────────────────────────
+                // Times out every repair sweep (50 ms, was 400): the sweep, the reorder
+                // buffer's flush past a hole and the uneven Pings run on time even while no
+                // packet arrives.
                 result = tokio::time::timeout(
-                    Duration::from_millis(400),
+                    Duration::from_millis(REPAIR_SWEEP_MS),
                     sess.recv(),
                 ) => {
                     // B13: read the clock ONCE per recv-arm iteration and thread it
@@ -1637,30 +1734,22 @@ pub async fn connect_host<R: Runtime>(
                             for bytes in &batch {
                                 let byte_len = bytes.len() as u64;
                                 if let Some((tag, rtp)) = service::media::parse(bytes) {
-                                    if tag == service::media::TAG_FEC_RS {
-                                        // Reed-Solomon parity (Phase 2.1): rebuild the frame's
-                                        // missing packets with zero round-trips and feed them like
-                                        // late arrivals; the parity share is deducted from the
-                                        // encoder rate.
-                                        for (seq, pkt) in fec_rs.on_parity(rtp) {
-                                            reorder.push(seq, &pkt, &mut nack_seqs);
-                                            win_fec_ok += 1;
+                                    if tag == service::media::TAG_FEC_RS || tag == service::media::TAG_FEC {
+                                        // FEC parity (Phase 2.1): Reed-Solomon rebuilds a frame's
+                                        // missing packets with zero round-trips (XOR, older hosts:
+                                        // one per group); they are fed like late arrivals. What the
+                                        // block's parity can't rebuild is NACKed now. The parity
+                                        // share is deducted from the encoder rate per window
+                                        // (`update_fec_share`, released when parity stops).
+                                        let po = if tag == service::media::TAG_FEC_RS {
+                                            repair_st.on_rs_parity(rtp, now, host_nack)
+                                        } else {
+                                            repair_st.on_xor_parity(rtp, now, host_nack)
+                                        };
+                                        for (seq, pkt) in &po.rebuilt {
+                                            reorder.push(*seq, pkt);
                                         }
-                                        let r = fec_rs.last_ratio();
-                                        if (r - ctl.fec_overhead()).abs() > 1e-3 {
-                                            ctl.set_fec_overhead(r);
-                                        }
-                                    } else if tag == service::media::TAG_FEC {
-                                        // XOR parity (older hosts): one loss per group.
-                                        if let Some((seq, pkt)) = fec_dec.on_parity(rtp) {
-                                            reorder.push(seq, &pkt, &mut nack_seqs);
-                                            win_fec_ok += 1;
-                                        }
-                                        let n = fec_dec.last_n();
-                                        let r = if n == 0 { 0.0 } else { 1.0 / n as f32 };
-                                        if (r - ctl.fec_overhead()).abs() > 1e-3 {
-                                            ctl.set_fec_overhead(r);
-                                        }
+                                        nack_seqs.extend(po.nacks);
                                     } else if tag == service::media::TAG_VIDEO {
                                         frames += 1;
                                         stats_window_bytes += byte_len;
@@ -1673,25 +1762,25 @@ pub async fn connect_host<R: Runtime>(
                                         // ABR crash. Packets are released in seq order after a
                                         // short RTT-sized hold; NACK retransmits usually land
                                         // WITHIN the hold window, so a real single-packet loss
-                                        // heals with no gap at all. The buffer owns NACK generation
-                                        // (once per hole) and the ABR's true-loss window. Draining
-                                        // happens after the batch loop (and on idle ticks, so a
-                                        // blocked head can't stall past its hold window).
+                                        // heals with no gap at all. NACKs and the ABR's loss come
+                                        // from the shared repair loop (`repair_st`); the buffer
+                                        // only orders. Draining happens after the batch loop (and
+                                        // on idle ticks, so a blocked head can't stall past its
+                                        // hold window).
                                         if let Some(seq) = service::media::rtp_seq(rtp) {
-                                            fec_dec.on_packet(seq, rtp);
-                                            fec_rs.on_packet(seq, rtp);
-                                            if rtp.len() >= 8 {
-                                                let ts = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
-                                                let now_ms = mono_ms();
-                                                if frame_ts != Some(ts) {
-                                                    if let Some(prev) = frame_ts {
-                                                        ctl.on_frame(prev, frame_last_arrival_ms);
-                                                    }
-                                                    frame_ts = Some(ts);
+                                            if let Some(ts) = rtp_timestamp(rtp) {
+                                                if let Some((prev, arr)) = frame_clock.on_packet(ts, mono_ms()) {
+                                                    ctl.on_frame(prev, arr);
                                                 }
-                                                frame_last_arrival_ms = now_ms;
                                             }
-                                            reorder.push(seq, rtp, &mut nack_seqs);
+                                            let vo = repair_st.on_video(seq, rtp, now, host_nack, cur_req.fps);
+                                            if vo.restart {
+                                                // A fresh RTP base (the host rebuilt its encoder).
+                                                ctl.on_stream_restart();
+                                                frame_clock.reset();
+                                            }
+                                            nack_seqs.extend(vo.nacks);
+                                            reorder.push(seq, rtp);
                                         }
                                     } else if tag == service::media::TAG_AUDIO || tag == service::media::TAG_AUDIO_FEC {
                                         if tag == service::media::TAG_AUDIO {
@@ -1712,14 +1801,17 @@ pub async fn connect_host<R: Runtime>(
                                         }
                                     }
                                 } else if service::is_pong(bytes) {
-                                    // Keepalive Pong → network round-trip latency. Feeds BOTH the
-                                    // HUD and the delay-aware ABR (bufferbloat shows here as RTT
-                                    // climbing over the baseline, with ~zero packet loss).
-                                    if let Some(t0) = ping_at.take() {
-                                        let sample = t0.elapsed().as_secs_f64() * 1000.0;
-                                        rtt_samples.push(sample as f32);
-                                        reorder.set_rtt_ms(sample);
-                                        emit_play_rtt(&app2, slot, sample);
+                                    // Keepalive Pong → network round-trip latency. Feeds the HUD,
+                                    // the delay-aware ABR (bufferbloat shows here as RTT climbing
+                                    // over the baseline, with ~zero packet loss; a far sample is a
+                                    // stall the fast reflex holds off for), and the repair window
+                                    // — which also sizes the reorder buffer's hold (its wait is
+                                    // one sweep longer, so the write-off reaches it first).
+                                    if let Some(rtt) = pings.on_pong(Instant::now()) {
+                                        repair_st.on_rtt(rtt);
+                                        ctl.on_rtt(rtt, mono_ms());
+                                        reorder.set_max_delay_ms(repair_st.renderer_wait_ms(now, cur_req.fps, false));
+                                        emit_play_rtt(&app2, slot, rtt as f64);
                                     }
                                 } else if service::is_bye(bytes) {
                                     // Host kicked us / went offline — tear down immediately
@@ -1770,13 +1862,16 @@ pub async fn connect_host<R: Runtime>(
                     }
 
                     // ── Drain reorder buffer → depacketize → gate → feed ─────────
-                    // Runs EVERY loop iteration (arrivals AND the 400 ms recv timeout)
+                    // Runs EVERY loop iteration (arrivals AND the 50 ms recv timeout)
                     // so a blocked head-of-line hole is flushed once its RTT-sized
                     // hold window expires even when no new packets arrive.
+                    let mut fed_this_drain: u32 = 0;
                     while let Some(pkt) = reorder.pop_ready(Instant::now()) {
                         if reorder.take_gap_declared() {
                             // A real (post-hold) gap: whatever AU it lands in is torn.
                             loss_corrupt = true;
+                            // Everything held behind it goes out at once (decoder stats: a burst).
+                            dec_disturbed = true;
                         }
                         if let Some(au) = depack.push(&pkt) {
                             aus += 1;
@@ -1805,14 +1900,16 @@ pub async fn connect_host<R: Runtime>(
                                 true
                             };
                             if !feed {
-                                if host_nack && last_idr_req.elapsed() >= Duration::from_millis(400) {
-                                    last_idr_req = Instant::now();
-                                    log::info!("pulsar: loss detected slot={slot} — requesting IDR");
-                                    let _ = send_data_via(&data_sender, &DataMsg::MediaNack(vec![0])).await;
-                                }
+                                want_idr = true;
                                 depack.recycle_au(au);
                             } else {
+                                // A clean keyframe goes to the decoder: nothing more to ask for.
+                                if want_idr && crate::rtp::au_is_keyframe(cenum, &au) {
+                                    want_idr = false;
+                                }
                                 stats_window_frames += 1;
+                                aus_fed += 1;
+                                fed_this_drain += 1;
                                 let mut sent = false;
                                 if let Some(stream) = au_stream.as_mut() {
                                     framed.clear();
@@ -1833,6 +1930,48 @@ pub async fn connect_host<R: Runtime>(
                         }
                         reorder.recycle(pkt);
                     }
+                    if fed_this_drain > DECODE_BURST_AUS {
+                        dec_disturbed = true;
+                    }
+
+                    // ── Repair sweep (every REPAIR_SWEEP_MS) ─────────────────────
+                    // Held-back NACKs whose wait ran out with no packet to carry them, one
+                    // re-NACK ~1 RTT after a NACK, and the write-offs: a written-off packet is a
+                    // failed repair — the reference chain is broken until a keyframe (asked for
+                    // at most once a second from here; the gate below asks too).
+                    let now_s = Instant::now();
+                    if now_s.saturating_duration_since(last_sweep) >= Duration::from_millis(REPAIR_SWEEP_MS) {
+                        last_sweep = now_s;
+                        let sw = repair_st.sweep(now_s, cur_req.fps, false, host_nack);
+                        nack_seqs.extend(sw.nacks);
+                        if sw.expired > 0
+                            && host_nack
+                            && cur_req.loss_recovery != LossRecovery::IntraRefresh
+                            && kf_pacer.try_request(now_s, Duration::from_secs(1), repair_st.rtt().ema())
+                        {
+                            want_idr = false;
+                            log::info!("pulsar: unrepaired video loss slot={slot} ({} written off) — requesting IDR", sw.expired);
+                            let _ = send_data_via(&data_sender, &DataMsg::MediaNack(vec![0])).await;
+                        }
+                        if host_nack {
+                            nack_seqs.retain(|&s| s != 0);
+                            if !nack_seqs.is_empty() {
+                                let _ = send_data_via(&data_sender, &DataMsg::MediaNack(std::mem::take(&mut nack_seqs))).await;
+                            }
+                        }
+                        nack_seqs.clear();
+                    }
+                    // A keyframe is wanted (the gate dropped a torn / reference-less AU, or the
+                    // decoder lost its reference): ask when the pacing allows.
+                    if want_idr {
+                        if !host_nack {
+                            want_idr = false;
+                        } else if kf_pacer.try_request(now_s, Duration::ZERO, repair_st.rtt().ema()) {
+                            want_idr = false;
+                            log::info!("pulsar: loss detected slot={slot} — requesting IDR");
+                            let _ = send_data_via(&data_sender, &DataMsg::MediaNack(vec![0])).await;
+                        }
+                    }
 
                     // ── Stats emission every STATS_INTERVAL ──────────────────
                     let stats_elapsed = now.duration_since(last_stats);
@@ -1846,6 +1985,30 @@ pub async fn connect_host<R: Runtime>(
                         // Poll the live value once per stats tick (one mutex lock/s) so
                         // the HUD badge, bar meta and session cards track reality.
                         let live_t = sess.live_transport().await;
+                        // Relay → direct upgrade, or a direct path that fell back to the relay:
+                        // what the controller learned on the old path does not describe the new
+                        // one — it starts over under the new path's own cap (the relay's only
+                        // while relayed). Onto the relay: come under its cap now, not at the
+                        // next window's decision (a rate above it is dropped there).
+                        let now_relay = matches!(live_t, Transport::Relay);
+                        if adapt_enabled && now_relay != on_relay {
+                            on_relay = now_relay;
+                            ctl.path_changed(path_cap_kbps(on_relay, sess.rate_cap_kbps(), direct_cap));
+                            log::info!(
+                                "pulsar: media path changed slot={slot} to {} cap={} kbps={} — the adaptive rate starts over",
+                                if on_relay { "relay" } else { "direct" },
+                                ctl.cap(),
+                                ctl.target_kbps()
+                            );
+                            let under = ctl.encoder_kbps();
+                            if on_relay && under < cur_req.bitrate_kbps {
+                                cur_req.bitrate_kbps = under;
+                                if request_stream(&mut sess, &cur_req).await.is_err() {
+                                    break 'read;
+                                }
+                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
+                            }
+                        }
                         let live = transport_str(live_t);
                         if live != transport_owned {
                             log::info!("pulsar: transport changed {transport_owned} -> {live} slot={slot}");
@@ -1875,10 +2038,9 @@ pub async fn connect_host<R: Runtime>(
                                 .await
                                 .unwrap_or(pulsar_core::netpath::PathClass::Wan)
                             };
-                            let key = format!("{peer_target}|{}", class.as_str());
-                            if key != peer_key {
-                                log::info!("pulsar: path class -> {} slot={slot}", class.as_str());
-                                peer_key = key;
+                            if class != cur_class {
+                                log::info!("pulsar: media path class {} -> {} slot={slot}", cur_class.as_str(), class.as_str());
+                                cur_class = class;
                                 remembered_kbps = ctl.last_good_kbps();
                             }
                             // NOT phase "transport": connecting.js maps that to a handshake
@@ -1927,28 +2089,56 @@ pub async fn connect_host<R: Runtime>(
                                 if request_stream(&mut sess, &cur_req).await.is_err() {
                                     break 'read;
                                 }
-                                app2.state::<SessionRegistry>().update_last_req(slot, cur_req.clone());
+                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
                             }
                         }
                     }
 
                     if adapt_enabled && now.saturating_duration_since(last_abr) >= ABR_TICK {
+                        // The real window length: the controller turns the bytes into goodput.
+                        let window_ms = now.saturating_duration_since(last_abr).as_millis().min(u32::MAX as u128) as u32;
                         last_abr = now;
-                        let (recv, lost) = reorder.take_loss_window();
-                        total_lost += lost as u64;
-                        let sample = adapt::Sample {
-                            recv,
-                            lost,
-                            rtt_ms: std::mem::take(&mut rtt_samples),
-                            nack_sent: 0,
-                            nack_ok: 0,
-                            fec_ok: win_fec_ok,
-                            // Received bytes / window length (goodput) aren't measured here
-                            // yet: 0 keeps the controller on its unmeasured path.
-                            ..Default::default()
+                        let _ = reorder.take_loss_window();
+                        // The window's loss (gaps not repaired), NACK repairs, FEC rebuilds,
+                        // first-copy bytes and RTT samples (the desktop client's measurement).
+                        let win = repair_st.take_window();
+                        total_lost += win.lost as u64;
+                        if repair_st.update_fec_share(&mut ctl, now, &win) == FecShare::Released {
+                            log::info!("pulsar: no parity from the host lately slot={slot} — FEC share released");
+                        }
+                        let sample = win.sample(window_ms);
+                        // The decoder's verdict for the last stat window (see the keepalive poll).
+                        if let Some(sheds) = dec_verdict.take() {
+                            dec_over_windows = if sheds { dec_over_windows + 1 } else { 0 };
+                        }
+                        let was_limited = ctl.decoder_limited();
+                        let quiet = last_switch_at.is_some_and(|t| now.saturating_duration_since(t) < SWITCH_QUIET);
+                        let mut d = if quiet {
+                            // A re-request rebuilt the host's encoder: that gap is not congestion.
+                            adapt::Decision::default()
+                        } else {
+                            ctl.tick(&sample)
                         };
-                        win_fec_ok = 0;
-                        let d = ctl.tick(&sample);
+                        // The phone's decoder can't keep up (it puts out far fewer pictures than it
+                        // is fed, or finds no input buffer, 3 windows running; a window with a
+                        // network burst does not count): one fps rung lower, as the desktop does
+                        // for its decoder; no bitrate fixes a decoder limit. The rung it left is
+                        // retried later (the controller).
+                        if !quiet && d.point.is_none() && dec_over_windows >= DECODE_OVER_WINDOWS {
+                            let cb = ctl.client_decoder_sheds();
+                            if let Some(p) = cb.point {
+                                log::info!("pulsar: decoder can't keep up slot={slot} — {}", p.label());
+                                d.point = Some(p);
+                                d.reason = cb.reason;
+                                emit_play_decode_limit(&app2, slot, p.fps, user_fps);
+                            }
+                            dec_over_windows = 0;
+                        } else if was_limited && !ctl.decoder_limited() {
+                            if let Some(p) = d.point {
+                                log::info!("pulsar: decoder retry slot={slot} — back to {}", p.label());
+                                emit_play_decode_limit(&app2, slot, p.fps, user_fps);
+                            }
+                        }
                         let sig = ctl.last();
                         let mut changed = false;
                         if let Some(r) = d.recovery {
@@ -1963,6 +2153,10 @@ pub async fn connect_host<R: Runtime>(
                             cur_req.width = p.width;
                             cur_req.height = p.height;
                             cur_req.fps = p.fps;
+                            // The host rebuilds its encoder for a size / fps change.
+                            last_switch_at = Some(now);
+                            dec_base = None;
+                            dec_verdict = None;
                             changed = true;
                         }
                         if d.is_change() {
@@ -1977,7 +2171,7 @@ pub async fn connect_host<R: Runtime>(
                         let good = ctl.last_good_kbps();
                         if good > 0 && good != remembered_kbps {
                             remembered_kbps = good;
-                            crate::adapt_memory::remember(&app2, &peer_key, good);
+                            crate::adapt_memory::remember(&app2, &peer_key, cur_class, good);
                         }
                         // Client → host feedback (the host sizes its FEC parity from the loss).
                         let stats = ClientStats {
@@ -1987,8 +2181,8 @@ pub async fn connect_host<R: Runtime>(
                             jitter_ms: sig.jitter_ms,
                             kbps: cur_req.bitrate_kbps,
                             recovery: cur_req.loss_recovery,
-                            nack_sent: 0,
-                            nack_ok: 0,
+                            nack_sent: sample.nack_sent,
+                            nack_ok: sample.nack_ok,
                             fec_ok: sample.fec_ok,
                             point: ctl.point().label(),
                         };
@@ -1997,14 +2191,13 @@ pub async fn connect_host<R: Runtime>(
                             if request_stream(&mut sess, &cur_req).await.is_err() {
                                 break 'read;
                             }
-                            app2.state::<SessionRegistry>().update_last_req(slot, cur_req.clone());
+                            app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
                         }
                     }
 
-                    if now.saturating_duration_since(last_ka) >= Duration::from_millis(350) {
+                    if now >= next_ping {
                         let _ = service::send_keepalive(&mut sess).await;
-                        last_ka = now;
-                        ping_at = Some(now);
+                        next_ping = now + pings.on_ping(now);
                         log::info!(
                             "pulsar: keepalive slot={slot} rtp={frames} aus={aus} audio={audio_pkts} \
                              lost={total_lost} transport={transport_owned} codec={codec_owned}"
@@ -2015,9 +2208,54 @@ pub async fn connect_host<R: Runtime>(
                         // parameter sets but needs an IDR to resume — nudge the host now
                         // (MediaNack([0]) keyframe sentinel) instead of freezing until the
                         // 10 s safety GOP.
-                        if host_nack && app2.pulsar_video().decoder_failed(slot).unwrap_or(false) {
-                            log::warn!("pulsar: decoder failed slot={slot} — requesting IDR");
-                            let _ = send_data_via(&data_sender, &DataMsg::MediaNack(vec![0])).await;
+                        // The same poll says when an AU was thrown away before decode (input
+                        // backlog over its cap, no input buffer in time): the reference chain is
+                        // broken → an IDR too. Those drops used to be silent.
+                        match app2.pulsar_video().decoder_status(slot) {
+                            Ok(st) => {
+                                if st.failed() || st.need_idr {
+                                    log::warn!(
+                                        "pulsar: decoder {} slot={slot} — requesting IDR",
+                                        if st.failed() { "failed" } else { "dropped an AU" }
+                                    );
+                                    want_idr = true;
+                                }
+                                // Decoder load over ~2 s: AUs fed vs pictures out / input-buffer
+                                // stalls. A rebuilt codec (failed, or a counter that went
+                                // backwards) starts the window over.
+                                match dec_base {
+                                    Some((t0, fed0, dec0, stall0))
+                                        if !st.failed() && st.decoded >= dec0 && st.stalled >= stall0 && aus_fed >= fed0 =>
+                                    {
+                                        if now.saturating_duration_since(t0) >= DECODE_STAT_WINDOW {
+                                            let (fed, dec, stalled) = (aus_fed - fed0, st.decoded - dec0, st.stalled - stall0);
+                                            if dec == 0 {
+                                                // Nothing decoded: the surface is gone (background,
+                                                // hidden pane), not a verdict on the decoder; and
+                                                // the next window starts part-way through it.
+                                                dec_verdict = None;
+                                                dec_over_windows = 0;
+                                                dec_disturbed = true;
+                                            } else if std::mem::take(&mut dec_disturbed) {
+                                                dec_verdict = None;
+                                            } else {
+                                                dec_verdict = Some(decoder_sheds(fed, dec, stalled));
+                                            }
+                                            dec_base = Some((now, aus_fed, st.decoded, st.stalled));
+                                        }
+                                    }
+                                    _ => {
+                                        dec_base = Some((now, aus_fed, st.decoded, st.stalled));
+                                        dec_disturbed = false;
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // No status (an older plugin, iOS): no verdict.
+                                dec_base = None;
+                                dec_verdict = None;
+                                dec_over_windows = 0;
+                            }
                         }
                     }
 

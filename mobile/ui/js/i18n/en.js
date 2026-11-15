@@ -162,6 +162,8 @@ export default {
 	"approve.autoDeny": "Auto-deny in:",
 	"session.videoErr": "Could not establish the video connection.",
 	"session.streamStopped": "Stream stopped — the host may have stopped screen sharing.",
+	"session.decodeLimit": "This device can't decode {userFps} fps — using {fps} fps",
+	"session.decodeRestored": "Trying {fps} fps again",
 	"session.connecting": "Connecting…",
 	"session.waiting": "The host is preparing the video — approve the screen-share permission.",
 	"session.end": "End session",

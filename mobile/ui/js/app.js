@@ -38,6 +38,7 @@ import { withRelayAuth } from './relay-auth.js';
 import { getPref, setPref } from './store/prefs.js';
 import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill, setNetPillMode } from './router.js';
 import * as tauri            from './tauri.js';
+import { toast }             from './toast.js';
 const { invoke, hasTauri, listen } = tauri;
 
 // Screen modules — each calls registerScreen() at import time
@@ -231,6 +232,16 @@ async function boot() {
 	listen('play-ended', (payload) => {
 		// payload: {slot, reason}
 		bus.emit('play-ended', payload);
+	}).catch(() => { /* no Tauri — ok */ });
+
+	// 7. The phone's decoder could not keep up: the stream runs one fps rung lower than the
+	// session's (fps < userFps), or a later retry put it back (fps === userFps).
+	// payload: {slot, fps, userFps}
+	listen('play-decode-limit', (p) => {
+		if (!p || !p.fps || !p.userFps) return;
+		toast(p.fps < p.userFps
+			? t('session.decodeLimit', { fps: p.fps, userFps: p.userFps })
+			: t('session.decodeRestored', { fps: p.fps }), 4000);
 	}).catch(() => { /* no Tauri — ok */ });
 }
 

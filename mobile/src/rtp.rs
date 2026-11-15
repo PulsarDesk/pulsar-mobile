@@ -25,7 +25,7 @@
 //! the last packet of a frame/TU; a defensive timestamp-change flush fires when the
 //! marker was lost.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Annex-B start code prepended to every emitted H.264/H.265 NAL unit.
@@ -464,17 +464,39 @@ fn read_leb128(buf: &[u8]) -> Option<(usize, usize)> {
 // and releases them in sequence order. In-order packets (the steady-state common
 // case) fall straight through with no added latency.
 //
+// It only ORDERS: the NACKs (reorder / FEC waits, one re-NACK, the write-off) and the
+// loss the ABR runs on come from the shared repair loop (`pulsar_core::adapt::repair::
+// RepairTracker`, the desktop client's), which also sizes this buffer's wait
+// (`set_max_delay_ms` = its repair window plus one sweep — the desktop renderer's
+// `maxdelay`), so both give up on a hole together.
+//
 // Packets are keyed by a 64-bit *extended* sequence number reconstructed from the
 // 16-bit RTP seq (so the map orders correctly across the 16-bit wrap). On a stream
 // discontinuity (encoder restart with a fresh RTP base — every codec / monitor
 // switch rebuilds it) the buffer resyncs to the new base instead of stalling.
 
-/// Max buffered packets before we force a flush (overflow guard).
-const REORDER_CAPACITY: usize = 128;
+/// Max buffered packets before we force a flush. A MEMORY guard only: the buffer is bounded
+/// by time (`max_delay`, at most `MAX_DELAY_CAP_MS`), and a hole must be able to wait out its
+/// repair window at any rate this client streams. The old 128 flushed past a hole after
+/// 25-40 ms at 30-50 Mbit (3-5k packets/s), often before its delayed NACK had even left, so
+/// no hole could be repaired at those rates. 4096 holds 250 ms up to ~16k packets/s (the
+/// desktop renderer holds 512); ~6 MB at worst, only while a hole is held.
+const REORDER_CAPACITY: usize = 4096;
+
+/// Free-list bound for recycled packet buffers (separate from the hold bound above: the
+/// steady state needs only a handful).
+const POOL_CAPACITY: usize = 128;
 
 /// Seq distance beyond which a jump is a stream restart (fresh RTP base) rather
 /// than ordinary loss/reorder — resync to it instead of NACK-flooding / stalling.
+/// Measured outside the window the buffer covers: behind the release cursor, or ahead
+/// of the newest packet held (packets held behind a hole can be far more than this
+/// ahead of the cursor).
 const REORDER_RESYNC_DISTANCE: i32 = 256;
+
+/// The longest a hole may hold the packets behind it (ms): the repair loop's bound
+/// (`pulsar_core::adapt::repair::RENDERER_WAIT_MAX_MS`, the desktop renderer's cap).
+const MAX_DELAY_CAP_MS: f32 = pulsar_core::adapt::repair::RENDERER_WAIT_MAX_MS;
 
 pub struct ReorderBuffer {
     /// Out-of-order packets awaiting release, keyed by extended seq. Owned copies
@@ -482,12 +504,11 @@ pub struct ReorderBuffer {
     buf: BTreeMap<u64, Vec<u8>>,
     /// Extended seq of the next packet to release in order (`None` until primed).
     next: Option<u64>,
-    /// Highest extended seq observed — used to spot new holes to NACK.
-    seen_hi: Option<u64>,
-    /// Outstanding holes already NACKed (so we don't re-NACK the same seq).
-    missing: BTreeSet<u64>,
+    /// Extended seq of the newest packet seen (restart detection, see
+    /// `REORDER_RESYNC_DISTANCE`).
+    highest: u64,
     /// Max time the head-of-line packet may wait for a missing predecessor before
-    /// we flush past the hole (a "declared gap"). clamp(2.5*RTT, 30, 120) ms.
+    /// we flush past the hole (a "declared gap"). See `set_max_delay_ms`.
     max_delay: Duration,
     /// When the current head-of-line block started waiting.
     blocked_since: Option<Instant>,
@@ -512,9 +533,9 @@ impl ReorderBuffer {
         Self {
             buf: BTreeMap::new(),
             next: None,
-            seen_hi: None,
-            missing: BTreeSet::new(),
-            max_delay: Duration::from_millis(40),
+            highest: 0,
+            // No RTT yet: the repair loop's upper bound (it is sized from the first Pong on).
+            max_delay: Duration::from_secs_f32(MAX_DELAY_CAP_MS / 1000.0),
             blocked_since: None,
             gap_declared: false,
             win_recv: 0,
@@ -532,22 +553,26 @@ impl ReorderBuffer {
             self.recycle(v);
         }
         self.next = None;
-        self.seen_hi = None;
-        self.missing.clear();
         self.blocked_since = None;
         self.gap_declared = false;
         self.win_recv = 0;
         self.win_lost = 0;
     }
 
-    /// Size the hold window from the measured network RTT: clamp(2.5*RTT, 30, 120) ms.
-    pub fn set_rtt_ms(&mut self, rtt_ms: f64) {
-        // Adaptive streaming Phase 0.5: a NACK retransmit needs ~1 RTT to land, so wait
-        // `1.5 × RTT + 100 ms` (100–500 ms) before skipping a hole — the same window the
-        // desktop client and renderer use. The old 30–120 ms cap made every repair "too
-        // late" on any route slower than a LAN.
-        let ms = (rtt_ms * 1.5 + 100.0).clamp(100.0, 500.0);
-        self.max_delay = Duration::from_millis(ms as u64);
+    /// How long a hole may hold the packets behind it (ms): the shared repair loop's
+    /// `RepairTracker::renderer_wait_ms` — its RTT-derived repair window plus one sweep
+    /// (60-250 ms), the desktop renderer's `maxdelay`. The old `1.5 × RTT + 100 ms`
+    /// (100-500 ms) froze every frame behind a hole for half a second on a jittery mobile
+    /// link. Capped at `MAX_DELAY_CAP_MS`, never under 1 ms.
+    pub fn set_max_delay_ms(&mut self, ms: f32) {
+        let ms = if ms.is_finite() { ms.clamp(1.0, MAX_DELAY_CAP_MS) } else { MAX_DELAY_CAP_MS };
+        self.max_delay = Duration::from_secs_f32(ms / 1000.0);
+    }
+
+    /// The current hold window (see `set_max_delay_ms`).
+    #[cfg(test)]
+    pub fn max_delay(&self) -> Duration {
+        self.max_delay
     }
 
     fn take_buf(&mut self, data: &[u8]) -> Vec<u8> {
@@ -559,15 +584,13 @@ impl ReorderBuffer {
 
     /// Return a released buffer to the free list for reuse.
     pub fn recycle(&mut self, buf: Vec<u8>) {
-        if self.pool.len() < REORDER_CAPACITY {
+        if self.pool.len() < POOL_CAPACITY {
             self.pool.push(buf);
         }
     }
 
-    /// Insert one video RTP packet (an owned copy is taken). Newly-detected missing
-    /// seqs (holes ahead of the release cursor) are appended to `nacks` (16-bit) so
-    /// the caller can send ONE coalesced retransmit request per batch (A23).
-    pub fn push(&mut self, seq: u16, pkt: &[u8], nacks: &mut Vec<u16>) {
+    /// Insert one video RTP packet (an owned copy is taken).
+    pub fn push(&mut self, seq: u16, pkt: &[u8]) {
         self.win_recv = self.win_recv.saturating_add(1);
 
         let next = match self.next {
@@ -576,7 +599,7 @@ impl ReorderBuffer {
                 // First packet primes the release cursor.
                 let ext = seq as u64;
                 self.next = Some(ext);
-                self.seen_hi = Some(ext);
+                self.highest = ext;
                 let b = self.take_buf(pkt);
                 self.buf.insert(ext, b);
                 return;
@@ -587,19 +610,21 @@ impl ReorderBuffer {
         // the signed 16-bit delta picks the nearest extended value).
         let delta = seq.wrapping_sub(next as u16) as i16 as i32;
         let ext = (next as i64 + delta as i64) as u64;
+        let ahead_of_newest = seq.wrapping_sub(self.highest as u16) as i16 as i32;
 
         // A jump larger than any plausible reorder/loss burst = the encoder restarted
         // with a fresh RTP base. Resync to it (re-anchoring the decoder) instead of
         // treating the whole distance as loss and NACK-flooding / stalling forever.
-        if delta.abs() > REORDER_RESYNC_DISTANCE {
+        // Far behind the cursor, or far ahead of the newest packet: everything between
+        // (a retransmit of a held hole, packets queued behind it) is this stream.
+        if delta < -REORDER_RESYNC_DISTANCE || ahead_of_newest > REORDER_RESYNC_DISTANCE {
             let drained: Vec<Vec<u8>> = self.buf.values_mut().map(std::mem::take).collect();
             self.buf.clear();
             for v in drained {
                 self.recycle(v);
             }
-            self.missing.clear();
             self.next = Some(ext);
-            self.seen_hi = Some(ext);
+            self.highest = ext;
             self.blocked_since = None;
             self.gap_declared = true; // ask the decoder to re-anchor on the new stream
             let b = self.take_buf(pkt);
@@ -611,21 +636,7 @@ impl ReorderBuffer {
         if ext < next || self.buf.contains_key(&ext) {
             return;
         }
-
-        // New hole(s) between the highest seq seen and this one → NACK once each.
-        if let Some(hi) = self.seen_hi {
-            let mut s = hi + 1;
-            while s < ext {
-                if self.missing.insert(s) {
-                    nacks.push(s as u16);
-                }
-                s += 1;
-            }
-        }
-        self.missing.remove(&ext); // this seq has now arrived
-        if self.seen_hi.is_none_or(|hi| ext > hi) {
-            self.seen_hi = Some(ext);
-        }
+        self.highest = self.highest.max(ext);
 
         let b = self.take_buf(pkt);
         self.buf.insert(ext, b);
@@ -650,7 +661,6 @@ impl ReorderBuffer {
             if first == next {
                 let v = self.buf.remove(&first).expect("key just observed");
                 self.next = Some(next.wrapping_add(1));
-                self.missing.remove(&first);
                 self.blocked_since = None;
                 return Some(v);
             }
@@ -671,11 +681,6 @@ impl ReorderBuffer {
             // Declare a gap: count the skipped seqs as true loss and jump the cursor
             // to the next available packet (released in order on the next iteration).
             self.win_lost = self.win_lost.saturating_add((first - next) as u32);
-            let mut s = next;
-            while s < first {
-                self.missing.remove(&s);
-                s += 1;
-            }
             self.next = Some(first);
             self.blocked_since = None;
             self.gap_declared = true;
@@ -688,9 +693,9 @@ impl ReorderBuffer {
         std::mem::replace(&mut self.gap_declared, false)
     }
 
-    /// Window `(received, lost)` packet counts for the ABR controller's *true* loss,
-    /// resetting the window. `lost` counts only declared gaps — NOT reordering — so
-    /// the controller no longer double-reacts to packets that merely arrived early.
+    /// Window `(received, lost)` packet counts, resetting the window. `lost` counts only
+    /// declared gaps (holes flushed past) — NOT reordering. Diagnostics: the ABR runs on
+    /// the repair loop's window (`RepairTracker::take_window`).
     pub fn take_loss_window(&mut self) -> (u32, u32) {
         let out = (self.win_recv, self.win_lost);
         self.win_recv = 0;
@@ -1067,12 +1072,10 @@ mod tests {
     #[test]
     fn reorder_in_order_passes_through() {
         let mut rb = ReorderBuffer::new();
-        let mut nacks = Vec::new();
         let now = Instant::now();
-        rb.push(10, &[0xAA], &mut nacks);
-        rb.push(11, &[0xBB], &mut nacks);
-        rb.push(12, &[0xCC], &mut nacks);
-        assert!(nacks.is_empty(), "no holes in an in-order run");
+        rb.push(10, &[0xAA]);
+        rb.push(11, &[0xBB]);
+        rb.push(12, &[0xCC]);
         assert_eq!(rb.pop_ready(now), Some(vec![0xAA]));
         assert_eq!(rb.pop_ready(now), Some(vec![0xBB]));
         assert_eq!(rb.pop_ready(now), Some(vec![0xCC]));
@@ -1083,14 +1086,12 @@ mod tests {
     #[test]
     fn reorder_holds_out_of_order_then_releases() {
         let mut rb = ReorderBuffer::new();
-        let mut nacks = Vec::new();
         let now = Instant::now();
-        rb.push(1, &[1], &mut nacks);
-        rb.push(3, &[3], &mut nacks); // gap at 2 → NACK 2
-        assert_eq!(nacks, vec![2]);
+        rb.push(1, &[1]);
+        rb.push(3, &[3]); // gap at 2
         assert_eq!(rb.pop_ready(now), Some(vec![1]));
         assert_eq!(rb.pop_ready(now), None, "2 still missing, within window");
-        rb.push(2, &[2], &mut nacks); // the missing packet arrives (reordered)
+        rb.push(2, &[2]); // the missing packet arrives (reordered)
         assert_eq!(rb.pop_ready(now), Some(vec![2]));
         assert_eq!(rb.pop_ready(now), Some(vec![3]));
         assert!(!rb.take_gap_declared(), "filled before timeout → no gap");
@@ -1100,25 +1101,110 @@ mod tests {
     #[test]
     fn reorder_timeout_declares_gap() {
         let mut rb = ReorderBuffer::new();
-        let mut nacks = Vec::new();
         let t0 = Instant::now();
-        rb.push(1, &[1], &mut nacks);
-        rb.push(3, &[3], &mut nacks);
+        rb.push(1, &[1]);
+        rb.push(3, &[3]);
         assert_eq!(rb.pop_ready(t0), Some(vec![1]));
         assert_eq!(rb.pop_ready(t0), None); // arms the wait timer
-        let later = t0 + Duration::from_millis(200);
+        // Not before the wait (the 250 ms bound until an RTT sized it)...
+        assert_eq!(rb.pop_ready(t0 + Duration::from_millis(200)), None);
+        let later = t0 + Duration::from_millis(260);
         assert_eq!(rb.pop_ready(later), Some(vec![3]), "flush past the hole");
         assert!(rb.take_gap_declared(), "skipping seq 2 declared a gap");
         assert_eq!(rb.take_loss_window().1, 1, "one truly-lost packet");
     }
 
     #[test]
+    fn reorder_wait_follows_the_repair_loop_bounded() {
+        let mut rb = ReorderBuffer::new();
+        assert_eq!(rb.max_delay(), Duration::from_millis(250));
+        rb.set_max_delay_ms(80.0);
+        assert!((rb.max_delay().as_secs_f32() * 1000.0 - 80.0).abs() < 0.01);
+        rb.set_max_delay_ms(900.0);
+        assert_eq!(rb.max_delay(), Duration::from_millis(250), "never the old 500 ms");
+        rb.set_max_delay_ms(f32::NAN);
+        assert_eq!(rb.max_delay(), Duration::from_millis(250));
+        // A short wait flushes a hole sooner.
+        rb.set_max_delay_ms(60.0);
+        let t0 = Instant::now();
+        rb.push(1, &[1]);
+        rb.push(3, &[3]);
+        assert_eq!(rb.pop_ready(t0), Some(vec![1]));
+        assert_eq!(rb.pop_ready(t0), None);
+        assert_eq!(rb.pop_ready(t0 + Duration::from_millis(61)), Some(vec![3]));
+        assert!(rb.take_gap_declared());
+    }
+
+    /// At 5k packets/s (~50 Mbit) a hole with a 120 ms wait holds ~600 packets: it is
+    /// released by its timeout (the repair window), not by the overflow guard, and the
+    /// packets queued far ahead of the cursor are not mistaken for an encoder restart.
+    #[test]
+    fn reorder_high_rate_hole_waits_its_window() {
+        let mut rb = ReorderBuffer::new();
+        rb.set_max_delay_ms(120.0);
+        let t0 = Instant::now();
+        rb.push(1000, &[0]);
+        assert_eq!(rb.pop_ready(t0), Some(vec![0]));
+        // seq 1001 is lost; 600 packets (120 ms at 5k/s) arrive behind it.
+        for i in 0..600u16 {
+            rb.push(1002 + i, &[1]);
+            if i % 50 == 0 {
+                let t = t0 + Duration::from_micros(200 * i as u64);
+                assert_eq!(rb.pop_ready(t), None, "held at packet {i}");
+            }
+        }
+        assert!(!rb.take_gap_declared(), "no overflow flush, no false resync");
+        // The retransmit lands inside the window: no gap at all.
+        rb.push(1001, &[2]);
+        assert_eq!(rb.pop_ready(t0 + Duration::from_millis(110)), Some(vec![2]));
+        let mut n = 0;
+        while rb.pop_ready(t0 + Duration::from_millis(110)).is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 600);
+        assert!(!rb.take_gap_declared());
+        assert_eq!(rb.take_loss_window().1, 0);
+        // An unrepaired hole at that rate is released by the timeout.
+        rb.push(1603, &[3]);
+        for i in 0..600u16 {
+            rb.push(1604 + i, &[4]);
+        }
+        let t1 = t0 + Duration::from_millis(200);
+        assert_eq!(rb.pop_ready(t1), None, "arms the wait");
+        assert_eq!(rb.pop_ready(t1 + Duration::from_millis(100)), None);
+        assert!(rb.pop_ready(t1 + Duration::from_millis(121)).is_some(), "timeout flush");
+        assert!(rb.take_gap_declared());
+        assert_eq!(rb.take_loss_window().1, 1);
+    }
+
+    /// A fresh RTP base (encoder restart) still resyncs, ahead or behind.
+    #[test]
+    fn reorder_resyncs_on_a_restart_but_not_on_a_retransmit() {
+        let mut rb = ReorderBuffer::new();
+        let now = Instant::now();
+        rb.push(100, &[1]);
+        assert_eq!(rb.pop_ready(now), Some(vec![1]));
+        rb.push(40_000, &[2]); // far ahead of the newest: restart
+        assert!(rb.take_gap_declared());
+        assert_eq!(rb.pop_ready(now), Some(vec![2]));
+        rb.push(39_000, &[3]); // far behind the cursor: restart
+        assert!(rb.take_gap_declared());
+        assert_eq!(rb.pop_ready(now), Some(vec![3]));
+        // A hole with 400 packets behind it; its retransmit is 400 behind the newest.
+        for i in 2..402u16 {
+            rb.push(39_000 + i, &[4]);
+        }
+        rb.push(39_001, &[5]);
+        assert!(!rb.take_gap_declared(), "a late retransmit is this stream");
+        assert_eq!(rb.pop_ready(now), Some(vec![5]));
+    }
+
+    #[test]
     fn reorder_dedup_drops_duplicates() {
         let mut rb = ReorderBuffer::new();
-        let mut nacks = Vec::new();
         let now = Instant::now();
-        rb.push(5, &[5], &mut nacks);
-        rb.push(5, &[0xFF], &mut nacks); // duplicate seq → dropped
+        rb.push(5, &[5]);
+        rb.push(5, &[0xFF]); // duplicate seq → dropped
         assert_eq!(rb.pop_ready(now), Some(vec![5]));
         assert_eq!(rb.pop_ready(now), None);
     }
@@ -1126,12 +1212,11 @@ mod tests {
     #[test]
     fn reorder_reset_clears_state() {
         let mut rb = ReorderBuffer::new();
-        let mut nacks = Vec::new();
         let now = Instant::now();
-        rb.push(100, &[1], &mut nacks);
+        rb.push(100, &[1]);
         rb.reset();
         // After reset the next packet re-primes the cursor at its own seq.
-        rb.push(7, &[7], &mut nacks);
+        rb.push(7, &[7]);
         assert_eq!(rb.pop_ready(now), Some(vec![7]));
     }
 

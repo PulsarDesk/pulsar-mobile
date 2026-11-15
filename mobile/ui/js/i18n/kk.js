@@ -158,6 +158,8 @@ export default {
 	"approve.autoDeny": "Авто бас тарту:",
 	"session.videoErr": "Бейне байланысын орнату мүмкін болмады.",
 	"session.streamStopped": "Ағын тоқтады — хост экранды бөлісуді тоқтатқан болуы мүмкін.",
+	"session.decodeLimit": "Құрылғы {userFps} fps декодтай алмайды — {fps} fps қолданылуда",
+	"session.decodeRestored": "{fps} fps қайта сыналуда",
 	"session.connecting": "Қосылуда…",
 	"session.waiting": "Хост бейнені дайындап жатыр — экранды бөлісу рұқсатын растаңыз.",
 	"session.end": "Сеансты аяқтау",

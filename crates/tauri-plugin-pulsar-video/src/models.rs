@@ -18,6 +18,34 @@ pub struct AttachResponse {
   pub detail: String,
 }
 
+/// A slot's decoder health (`decoder_status`, polled by the read loop on its keepalive tick).
+/// All counters are cumulative since the slot's decoder was (re)configured; a decrease means
+/// it was rebuilt. Older plugin builds answer only `ok`/`detail` (the rest defaults).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DecoderStatus {
+  pub ok: bool,
+  /// `"failed"` = the decode path threw and the codec was rebuilt since the last poll.
+  pub detail: String,
+  /// An access unit was thrown away since the last poll (input backlog over its cap, or no
+  /// input buffer in time): the reference chain is broken until a keyframe.
+  pub need_idr: bool,
+  /// Pictures the decoder put out.
+  pub decoded: u64,
+  /// Access units dropped before decode (backlog guard + input-buffer timeout).
+  pub dropped: u64,
+  /// Of those, the ones that found no free decoder input buffer in time: the decoder still
+  /// held every buffer, it is behind. (Backlog-guard drops also follow a network burst.)
+  pub stalled: u64,
+}
+
+impl DecoderStatus {
+  /// The decode path threw and the codec was rebuilt since the last poll.
+  pub fn failed(&self) -> bool {
+    self.detail == "failed"
+  }
+}
+
 /// In-app update: `update_status` result. `downloaded` = this version's APK is complete on
 /// disk; `active`/`received`/`total`/`bps` = live download progress (the UI polls this —
 /// plugin `trigger()` events don't reach JS in this build); `error` = last failure.
