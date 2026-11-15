@@ -1335,6 +1335,8 @@ pub async fn connect_host<R: Runtime>(
         rfi: false,
         // Opus at the standard rate; the higher qualities (and raw PCM) are desktop-only so far.
         audio_quality: Default::default(),
+        // Audio parity (rides the session); the feeder rebuilds lost packets from it.
+        audio_fec: mos,
     };
 
     timeout(POST_AUTH_TIMEOUT, request_stream(&mut sess, &req))
@@ -1407,13 +1409,49 @@ pub async fn connect_host<R: Runtime>(
         // packets that looked like "wifi loss" (torn frames → IDR churn). The loop now
         // just hands packets to a bounded channel; a full channel drops the packet
         // (a stale-audio glitch beats stalling video).
-        let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+        //
+        // The feeder also repairs the stream first (pulsar-core `audio::AudioRepair`, the same
+        // as the desktop player): RTP sequence order, lost packets rebuilt from the host's
+        // audio parity (`TAG_AUDIO_FEC`), a hole held up to `AUDIO_HOLD` for a reordered
+        // packet before it is given up (MediaCodec has no PLC: a lost packet is a short gap).
+        // The channel carries whole RTP datagrams, and parity frames WITH their tag byte (never
+        // the first byte of an RTP v2 datagram). 64 items ≈ 0.4 s of audio + parity: a deeper
+        // backlog (it was 256 ≈ 2.5 s) is only stale audio (hidden-gaps 1.11d).
+        let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
         {
             let app3 = app2.clone();
             std::thread::spawn(move || {
-                while let Ok(op) = audio_rx.recv() {
-                    let _ = app3.pulsar_video().feed_audio(&op);
+                use pulsar_core::audio::{AudioRepair, Repaired};
+                const AUDIO_HOLD: Duration = Duration::from_millis(20);
+                let mut repair = AudioRepair::new();
+                loop {
+                    let wait = repair
+                        .deadline(AUDIO_HOLD)
+                        .map(|d| d.saturating_duration_since(Instant::now()))
+                        .unwrap_or(Duration::from_millis(500));
+                    match audio_rx.recv_timeout(wait) {
+                        Ok(p) if p.first() == Some(&service::media::TAG_AUDIO_FEC) => {
+                            repair.push_parity(&p[1..], Instant::now());
+                        }
+                        Ok(p) => repair.push(p, Instant::now()),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    while let Some(step) = repair.pop(Instant::now(), AUDIO_HOLD) {
+                        if let Repaired::Packet(pkt) = step {
+                            if let Some(op) = crate::rtp::rtp_payload(&pkt) {
+                                let _ = app3.pulsar_video().feed_audio(op);
+                            }
+                        }
+                    }
                 }
+                let st = repair.stats();
+                log::info!(
+                    "pulsar: audio feeder ended (recovered {}, lost {}, late {})",
+                    st.recovered,
+                    st.lost,
+                    st.late
+                );
             });
         }
         let _ = service::send_keepalive(&mut sess).await;
@@ -1648,18 +1686,20 @@ pub async fn connect_host<R: Runtime>(
                                             }
                                             reorder.push(seq, rtp, &mut nack_seqs);
                                         }
-                                    } else if tag == service::media::TAG_AUDIO {
-                                        audio_pkts += 1;
+                                    } else if tag == service::media::TAG_AUDIO || tag == service::media::TAG_AUDIO_FEC {
+                                        if tag == service::media::TAG_AUDIO {
+                                            audio_pkts += 1;
+                                        }
                                         let is_active = app2.state::<ActivePane>().get() == slot;
-                                        if is_active {
-                                            if let Some(op) = crate::rtp::rtp_payload(rtp) {
-                                                // Hand off to the audio feeder thread — NEVER block
-                                                // the read loop on the main-thread plugin invoke.
-                                                if audio_tx.try_send(op.to_vec()).is_err() {
-                                                    audio_feed_fails += 1;
-                                                    if audio_feed_fails == 1 || audio_feed_fails % 500 == 0 {
-                                                        log::warn!("pulsar: audio feeder backlogged ({audio_feed_fails} drops)");
-                                                    }
+                                        // RTP as is; parity with its tag (the feeder tells them apart).
+                                        let item: &[u8] = if tag == service::media::TAG_AUDIO { rtp } else { &bytes[..] };
+                                        if is_active && (tag != service::media::TAG_AUDIO || crate::rtp::rtp_payload(rtp).is_some()) {
+                                            // Hand off to the audio feeder thread — NEVER block
+                                            // the read loop on the main-thread plugin invoke.
+                                            if audio_tx.try_send(item.to_vec()).is_err() {
+                                                audio_feed_fails += 1;
+                                                if audio_feed_fails == 1 || audio_feed_fails % 500 == 0 {
+                                                    log::warn!("pulsar: audio feeder backlogged ({audio_feed_fails} drops)");
                                                 }
                                             }
                                         }
