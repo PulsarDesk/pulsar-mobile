@@ -17,6 +17,19 @@
 import { toast } from '../toast.js';
 import { t } from '../i18n.js';
 import { invoke, hasTauri } from '../tauri.js';
+import { getPref } from '../store/prefs.js';
+
+/**
+ * Push the per-controller host emulation (Settings: Auto / Xbox 360 / DualShock 4) to the
+ * native pad feed (pad_feed.rs), which sends the physical pads to the host. Keys are the
+ * short controller names shown in Settings.
+ */
+export function pushGamepadTargets() {
+	if (!hasTauri) return;
+	const targets = getPref('gamepadTargets') || {};
+	invoke('set_gamepad_targets', { targets }).catch(() => {});
+}
+pushGamepadTargets();
 
 /** Latest native list: [{ name, level }] (level 0..100, or -1 if unknown). */
 let _list = [];

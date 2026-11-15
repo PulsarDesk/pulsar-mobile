@@ -4,9 +4,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.net.wifi.WifiManager
 import android.os.IBinder
 
 /** M16: foreground service of type mediaProjection — required to capture the screen. */
@@ -26,7 +28,38 @@ class HostService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-    override fun onDestroy() { ready = false; super.onDestroy() }
+    override fun onDestroy() {
+        ready = false
+        releaseWifiLocks()
+        super.onDestroy()
+    }
+
+    // 1.17: keep Wi-Fi out of power save while the screen is shared — PSM batches the
+    // outgoing stream into ~100 ms bursts (latency spikes, AP queue loss). HIGH_PERF works
+    // while our app is in the background (the usual hosting case; the platform stopped
+    // honouring it on newer releases), LOW_LATENCY (API 29+) only while the app is in the
+    // foreground with the screen on. Both are held; each applies when it can.
+    private var wifiLocks: List<WifiManager.WifiLock> = emptyList()
+
+    private fun acquireWifiLocks() {
+        if (wifiLocks.isNotEmpty()) return
+        try {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val modes = mutableListOf(@Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) modes.add(WifiManager.WIFI_MODE_FULL_LOW_LATENCY)
+            wifiLocks = modes.map { m ->
+                wm.createWifiLock(m, "pulsar:host-$m").apply { setReferenceCounted(false); acquire() }
+            }
+            android.util.Log.i("PulsarHostSvc", "wifi locks acquired (${wifiLocks.size})")
+        } catch (e: Exception) {
+            android.util.Log.w("PulsarHostSvc", "wifi lock failed: ${e.message}")
+        }
+    }
+
+    private fun releaseWifiLocks() {
+        for (l in wifiLocks) try { if (l.isHeld) l.release() } catch (_: Exception) {}
+        wifiLocks = emptyList()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -71,6 +104,7 @@ class HostService : Service() {
             }
             ready = true
             android.util.Log.i("PulsarHostSvc", "startForeground OK (mediaProjection)")
+            acquireWifiLocks()
         } catch (e: Exception) {
             android.util.Log.e("PulsarHostSvc", "startForeground FAILED", e)
         }

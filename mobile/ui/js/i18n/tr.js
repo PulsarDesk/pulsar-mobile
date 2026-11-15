@@ -113,6 +113,7 @@ export default {
 	"m.host.online": "Çevrimiçi — Cihaz kimliği",
 	"m.host.goOnline": "Çevrimiçi ol",
 	"m.host.goOffline": "Çevrimdışı ol",
+	"m.host.projectionStopped": "Ekran paylaşımı telefonda durduruldu — bağlantı kapatıldı. Yeniden bağlanıldığında izin tekrar istenecek.",
 	"m.host.password": "Tek seferlik şifre",
 	"m.host.share": "Paylaş",
 	"m.host.rotate": "Şifreyi yenile",

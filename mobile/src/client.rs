@@ -115,7 +115,7 @@ fn bump_slot_gen(slot: u8) -> u64 {
 }
 
 /// The current reconnect generation for `slot` (0 if never connected).
-fn current_slot_gen(slot: u8) -> u64 {
+pub(crate) fn current_slot_gen(slot: u8) -> u64 {
     *SLOT_GEN.lock().unwrap().get(&slot).unwrap_or(&0)
 }
 
@@ -676,6 +676,10 @@ pub(crate) fn parse_mode(s: &str) -> NetworkMode {
 fn codec_enum(codec: &str) -> Codec {
     match codec {
         "h265" | "hevc" => Codec::H265,
+        // AV1 had no arm and fell to H.264, so an AV1 stream was depacketized as H.264
+        // (FU-A parsing of OBUs = garbage) while the decoder was armed for video/av01. Auto
+        // now picks AV1 only with a hardware AV1 decoder, so it must depacketize right.
+        "av1" => Codec::Av1,
         _ => Codec::H264,
     }
 }
@@ -685,17 +689,6 @@ fn transport_str(t: Transport) -> &'static str {
         Transport::Direct => "direct",
         Transport::Relay => "relay",
     }
-}
-
-/// Pick the best codec from host caps honoring the caller's preference.
-/// Returns the negotiated codec string (`"h264"` / `"h265"` / etc.).
-fn pick_codec(caps_codecs: &[String], pref: &str) -> String {
-    if pref != "auto" && !pref.is_empty() {
-        if caps_codecs.iter().any(|c| c == pref) {
-            return pref.to_string();
-        }
-    }
-    caps_codecs.first().cloned().unwrap_or_else(|| "h264".into())
 }
 
 fn parse_quality(s: &str) -> QualityPref {
@@ -1117,8 +1110,37 @@ pub async fn connect_host<R: Runtime>(
         let _ = app.emit("host-displays", HostDisplaysPayload { slot, displays });
     }
 
-    // Honor the caller's codec preference; fall back to host's best.
-    let resolved_codec = pick_codec(&caps.codecs, &codec);
+    // ── W5: per-cell reduced resolution for secondary panes ─────────────────
+    // A 2nd (or higher) slot in a split view streams 720p to save bandwidth and
+    // decode load on the phone. The 1st slot (slot 0) keeps whatever the caller
+    // asked for (or host default if 0×0). This mirrors the desktop
+    // `paneResolution` logic: 2-up → 720p, 4-up → 540p.
+    //
+    // Only applied when the caller did NOT explicitly request a resolution
+    // (width == 0 means "host default") — if the JS layer already specified
+    // a size (e.g. from the quality card), we honour that instead.
+    let (eff_width, eff_height) = if slot > 0 && width == 0 && height == 0 {
+        (1280u32, 720u32)
+    } else if width == 0 && height == 0 {
+        // Mobile default: 1080p, NOT the host's native resolution. A 1440p+ desktop
+        // encoded for a phone screen spends the (ABR-limited) bitrate on pixels the
+        // phone can't show — at the same kbps, 1080p is visibly cleaner (more bits
+        // per pixel). An explicit user pick (quality preset / restream) still wins.
+        (1920u32, 1080u32)
+    } else {
+        (width, height)
+    };
+
+    // Codec (audit 1.1): the host's best codec this phone decodes in HARDWARE (or the
+    // caller's explicit pick). `decode_codecs` on the wire is just this codec: the decoder
+    // and depacketizer are armed for it, and the host never says if it fell back.
+    let dcaps = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::decode_caps::query(&app, eff_width, eff_height))
+            .await
+            .unwrap_or_default()
+    };
+    let resolved_codec = crate::decode_caps::pick_codec(&caps.codecs, &codec, &dcaps);
     let mime = mime_for(&resolved_codec);
     let cenum = codec_enum(&resolved_codec);
 
@@ -1172,27 +1194,6 @@ pub async fn connect_host<R: Runtime>(
         .state::<ClaimedDisplays>()
         .claim(slot, &target);
 
-    // ── W5: per-cell reduced resolution for secondary panes ─────────────────
-    // A 2nd (or higher) slot in a split view streams 720p to save bandwidth and
-    // decode load on the phone. The 1st slot (slot 0) keeps whatever the caller
-    // asked for (or host default if 0×0). This mirrors the desktop
-    // `paneResolution` logic: 2-up → 720p, 4-up → 540p.
-    //
-    // Only applied when the caller did NOT explicitly request a resolution
-    // (width == 0 means "host default") — if the JS layer already specified
-    // a size (e.g. from the quality card), we honour that instead.
-    let (eff_width, eff_height) = if slot > 0 && width == 0 && height == 0 {
-        (1280u32, 720u32)
-    } else if width == 0 && height == 0 {
-        // Mobile default: 1080p, NOT the host's native resolution. A 1440p+ desktop
-        // encoded for a phone screen spends the (ABR-limited) bitrate on pixels the
-        // phone can't show — at the same kbps, 1080p is visibly cleaner (more bits
-        // per pixel). An explicit user pick (quality preset / restream) still wins.
-        (1920u32, 1080u32)
-    } else {
-        (width, height)
-    };
-
     // Auto bitrate: NEVER send 0 to the host — 0 means "host default" (30 Mbit CBR),
     // which blasts the wifi downlink for the first ~1-2 s until the ABR's first
     // request lands (observed live: 20% loss + RTT panic within 2 s of connect →
@@ -1209,17 +1210,13 @@ pub async fn connect_host<R: Runtime>(
     let active_slot = app.state::<ActivePane>().get();
     let transmit_audio = slot == active_slot;
 
-    // fps 0 = "host default" — but the host's default is its own config/panel Hz
-    // (120+ on a gaming PC), with NO cap for mobile clients. The phone pipeline is
-    // sized for ~60 fps (decode + touch UI share the SoC); 120+ fps just floods the
-    // input queue. Cap BOTH modes at 60 on mobile: the JS "auto" fps pref resolves
-    // to the panel Hz (120 on this phone), and 120 fps on a software-x264 / relay
-    // host starves each frame of bits AND overloads the encoder — with any wire loss
-    // the client then never gets a CLEAN keyframe (the host can't force one on the
-    // gst-launch path), so it drops every AU waiting for an IDR and the screen stays
-    // black. 60 fps halves the per-frame load and keeps frames robust; a 120 Hz
-    // gaming feel isn't reachable through a phone decoder + relay anyway.
-    let fps = if fps == 0 { 60 } else { fps.min(60) };
+    // fps (audit 1.3): never 0 on the wire — 0 would be the host's own default (its panel
+    // Hz, 120+ on a gaming PC, with no mobile cap). "Unlimited" (0) means this phone's
+    // highest panel refresh; every value is capped by what the decoder declares for this
+    // codec and size, instead of the old fixed 60 that kept 90/120/144 Hz phones at 60.
+    // The asked-for value is kept (stream_ctx) so a later codec/size change re-caps from it.
+    let want_fps = fps;
+    let fps = crate::decode_caps::effective_fps(fps, &resolved_codec, &dcaps);
 
     // The shared adaptive controller: the phone's requested size is the ladder's top rung
     // (the host scales its capture down to it); the mobile depacketizer waits for an IDR
@@ -1343,6 +1340,8 @@ pub async fn connect_host<R: Runtime>(
         .await
         .map_err(|_| "connect-timed-out".to_string())?
         .map_err(|e| format!("request_stream failed: {e:?}"))?;
+    // Run the display at a refresh that matches the stream (Surface.setFrameRate).
+    crate::decode_caps::vote_refresh(&app, slot, req.fps);
 
     let detail = format!(
         "connected; codec={resolved_codec} mos={mos} transport={transport_s} game={game_mode} \
@@ -1361,6 +1360,12 @@ pub async fn connect_host<R: Runtime>(
 
     // Store the initial req so quality patch commands can build from it.
     app.state::<SessionRegistry>().update_last_req(slot, req.clone());
+    // What set_play_codec / _fps / _resolution re-resolve from: the host's codecs, the fps
+    // the user asked for, and the decoder caps already probed for this size.
+    app.state::<SessionRegistry>().set_stream_ctx(slot, caps.codecs.clone(), want_fps, (eff_width, eff_height, dcaps));
+    // Physical controllers -> this session's host (once started, the feed follows the
+    // active pane).
+    crate::pad_feed::ensure_started(&app);
     // Baseline StreamReq for the adaptive-bitrate controller (read loop). Cloned
     // before the spawn; the loop steps its `bitrate_kbps` up/down on measured loss.
     let abr_req0 = req.clone();
@@ -1558,6 +1563,8 @@ pub async fn connect_host<R: Runtime>(
                     if let Err(e) = request_stream(&mut sess, &new_req).await {
                         log::warn!("pulsar: restream request_stream failed: {e:?}");
                     } else {
+                        // stop_stream dropped the pane's refresh vote; re-vote at the new fps.
+                        crate::decode_caps::vote_refresh(&app2, slot, new_req.fps);
                         // Reset depacketizer for potentially new codec.
                         depack = Depacketizer::new(new_cenum);
                         // Re-seat the active codec so the keyframe gate (au_is_keyframe)

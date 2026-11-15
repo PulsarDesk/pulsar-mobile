@@ -42,8 +42,8 @@ phone's screen and let someone control it. iOS is not available yet.
 
 ### 🎮 Game streaming
 - **Game mode:** stream the desktop, one screen or a game picked from the computer's library.
-- **Controllers:** an on-screen gamepad with rumble, or a real one (battery level shown); the computer sees an
-  Xbox controller.
+- **Controllers:** a real controller over Bluetooth or USB, with rumble and its battery level shown; the
+  computer sees an Xbox 360 controller or a DualShock 4 (your pick per controller).
 - **Picture options:** H.264 / H.265, HDR, resolution, frame rate, bitrate and presets from *Data saver* to
   *Low latency*, with a live stats overlay (fps, ping, loss).
 - **Android TV:** navigate the whole app with the remote's D-pad.

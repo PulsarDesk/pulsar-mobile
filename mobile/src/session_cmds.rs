@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::decode_caps::DecoderCaps;
 use pulsar_core::service::{DataMsg, QualityPref, StreamReq};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -89,6 +90,15 @@ pub struct SessionControl {
     /// W5: whether FEAT_NACK was advertised by the host for this slot. If true,
     /// `request_keyframe` can send `DataMsg::MediaNack` to nudge an IDR.
     pub feat_nack: bool,
+    /// The host's codecs (its `StreamCaps`, preference order): what `set_play_codec`
+    /// re-resolves "auto" / an explicit pick from (audit 1.1).
+    pub host_codecs: Vec<String>,
+    /// The fps the user asked for (0 = unlimited), before the decoder cap. `req.fps` holds
+    /// the capped value, so re-capping from it would never climb back (audit 1.3).
+    pub want_fps: u32,
+    /// Decoder caps already probed for this session, keyed by stream size: the probe is a
+    /// blocking JNI hop that walks the codec list, so it runs once per size, not per change.
+    pub dcaps: Option<(u32, u32, DecoderCaps)>,
 }
 
 // ── Managed state: session registry ──────────────────────────────────────────
@@ -127,6 +137,9 @@ impl SessionRegistry {
             last_monitor_switch: None,
             host_target,
             feat_nack,
+            host_codecs: Vec::new(),
+            want_fps: 0,
+            dcaps: None,
         };
         {
             let mut g = self.0.lock().unwrap();
@@ -179,6 +192,15 @@ impl SessionRegistry {
     pub fn update_last_req(&self, slot: u8, req: StreamReq) {
         if let Some(ctrl) = self.0.lock().unwrap().get_mut(&slot) {
             ctrl.last_req = Some(req);
+        }
+    }
+
+    /// Store what quality changes re-resolve from (set once at connect).
+    pub fn set_stream_ctx(&self, slot: u8, host_codecs: Vec<String>, want_fps: u32, dcaps: (u32, u32, DecoderCaps)) {
+        if let Some(ctrl) = self.0.lock().unwrap().get_mut(&slot) {
+            ctrl.host_codecs = host_codecs;
+            ctrl.want_fps = want_fps;
+            ctrl.dcaps = Some(dcaps);
         }
     }
 
@@ -393,9 +415,71 @@ pub async fn set_play_codec<R: Runtime>(
     codec: String,
 ) -> Result<(), String> {
     let mut req = build_patch(&app, slot)?;
-    req.codec = codec.clone();
-    req.decode_codecs = vec![codec];
+    let (host_codecs, _) = stream_ctx(&app, slot);
+    let caps = caps_for(&app, slot, req.width, req.height).await;
+    // Re-resolve from the host's codecs, as at connect ("auto" = the hardware pick; sending
+    // "auto" itself made the host pick its default while the phone armed H.264). Without a
+    // stored host list, keep the old behavior: the explicit pick, else the current codec.
+    let codec = if !host_codecs.is_empty() {
+        crate::decode_caps::pick_codec(&host_codecs, &codec, &caps)
+    } else if codec.is_empty() || codec == "auto" {
+        req.codec.clone()
+    } else {
+        codec
+    };
+    // Pinned: the decoder is re-armed for exactly this codec (decode_caps module doc).
+    req.decode_codecs = vec![codec.clone()];
+    req.codec = codec;
+    fit_fps(&app, slot, &mut req, None).await;
     push_restream(&app, slot, req).await
+}
+
+/// The slot's stored host codecs and asked-for fps (empty / 0 when unknown).
+fn stream_ctx<R: Runtime>(app: &AppHandle<R>, slot: u8) -> (Vec<String>, u32) {
+    app.state::<SessionRegistry>()
+        .0
+        .lock()
+        .unwrap()
+        .get(&slot)
+        .map(|c| (c.host_codecs.clone(), c.want_fps))
+        .unwrap_or_default()
+}
+
+/// Decoder caps for `width`x`height`: the session's cached probe when the size matches,
+/// else a fresh probe (off the async workers: it is a blocking JNI hop), then cached.
+async fn caps_for<R: Runtime>(app: &AppHandle<R>, slot: u8, width: u32, height: u32) -> DecoderCaps {
+    let cached = app.state::<SessionRegistry>().0.lock().unwrap().get(&slot).and_then(|c| {
+        c.dcaps.as_ref().filter(|(w, h, _)| *w == width && *h == height).map(|(_, _, caps)| caps.clone())
+    });
+    if let Some(c) = cached {
+        return c;
+    }
+    let a = app.clone();
+    let caps = tauri::async_runtime::spawn_blocking(move || crate::decode_caps::query(&a, width, height))
+        .await
+        .unwrap_or_default();
+    if let Some(ctrl) = app.state::<SessionRegistry>().0.lock().unwrap().get_mut(&slot) {
+        ctrl.dcaps = Some((width, height, caps.clone()));
+    }
+    caps
+}
+
+/// Cap `req.fps` to what this phone's decoder declares for `req.codec` at the request's
+/// size (audit 1.3) — the same rule the connect uses, so a mid-session change can't exceed
+/// it either. `want`: a new asked-for fps (stored for later changes), or `None` to re-cap
+/// from the stored one (0 = "unlimited" = the panel's highest refresh).
+async fn fit_fps<R: Runtime>(app: &AppHandle<R>, slot: u8, req: &mut StreamReq, want: Option<u32>) {
+    let want = match want {
+        Some(w) => {
+            if let Some(ctrl) = app.state::<SessionRegistry>().0.lock().unwrap().get_mut(&slot) {
+                ctrl.want_fps = w;
+            }
+            w
+        }
+        None => stream_ctx(app, slot).1,
+    };
+    let caps = caps_for(app, slot, req.width, req.height).await;
+    req.fps = crate::decode_caps::effective_fps(want, &req.codec, &caps);
 }
 
 /// Change the encode bitrate (kbps) for the active stream on `slot`.
@@ -422,7 +506,7 @@ pub async fn set_play_fps<R: Runtime>(
     fps: u32,
 ) -> Result<(), String> {
     let mut req = build_patch(&app, slot)?;
-    req.fps = fps;
+    fit_fps(&app, slot, &mut req, Some(fps)).await;
     push_restream(&app, slot, req).await
 }
 
@@ -439,6 +523,9 @@ pub async fn set_play_resolution<R: Runtime>(
     let mut req = build_patch(&app, slot)?;
     req.width = width;
     req.height = height;
+    // A bigger size can lower the decoder's rate limit (and a smaller one lift it back
+    // toward the asked-for fps).
+    fit_fps(&app, slot, &mut req, None).await;
     push_restream(&app, slot, req).await
 }
 

@@ -44,7 +44,7 @@ use tokio::sync::{oneshot, Notify};
 
 use pulsar_core::service::{
     accept, gen_password, media, need_password, recv_auth, reject, serve_with, Credential,
-    DataHandlers, InputEvent, StreamCaps,
+    DataHandlers, DataMsg, InputEvent, StreamCaps,
 };
 use crate::client::parse_mode;
 use crate::config::load_config;
@@ -999,6 +999,19 @@ pub async fn go_online<R: Runtime>(
                                 on_input,
                                 data,
                             ) => {}
+                            // Screen sharing was stopped outside Pulsar (system "Stop sharing",
+                            // another app took the projection): the picture can't continue.
+                            // Tell the viewer why (a "!" stats line = stream error on the
+                            // desktop client), give it a moment on screen, then end cleanly.
+                            msg = projection_stopped(&app3) => {
+                                log::info!("pulsar host: screen projection stopped - ending sid={sid} peer={peer}");
+                                let reason = DataMsg::Stats(format!("!{msg}"));
+                                let _ = pulsar_core::service::send_data_via(&bye_sender, &reason).await;
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                let _ = pulsar_core::service::send_data_via(&bye_sender, &reason).await;
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                let _ = pulsar_core::service::send_bye_via(&bye_sender).await;
+                            }
                             _ = kick2.notified() => {
                                 // Tell the client it was kicked so it tears down INSTANTLY
                                 // (a clean disconnect) instead of hanging on the frozen last
@@ -1049,6 +1062,28 @@ pub async fn go_online<R: Runtime>(
         String::new()
     };
     Ok(OnlineResult { ok: true, id: id.0, password, addr })
+}
+
+/// Resolves (with the viewer-facing reason) once the plugin reports that the screen
+/// projection was stopped outside Pulsar after this call began (audit 2.21); pending forever
+/// where there is no projection to lose (non-Android builds, a failed first poll).
+async fn projection_stopped<R: Runtime>(app: &AppHandle<R>) -> String {
+    #[cfg(mobile)]
+    {
+        use tauri_plugin_pulsar_video::PulsarVideoW5Ext as _;
+        if let Ok(first) = app.pulsar_video().host_status() {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if let Ok(s) = app.pulsar_video().host_status() {
+                    if s.stop_gen != first.stop_gen {
+                        return s.message;
+                    }
+                }
+            }
+        }
+    }
+    let _ = app;
+    std::future::pending::<String>().await
 }
 
 // ── go_offline ────────────────────────────────────────────────────────────────

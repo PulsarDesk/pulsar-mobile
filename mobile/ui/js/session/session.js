@@ -517,6 +517,28 @@ function openRenameSheet(slot) {
  *
  * @param {{ slot:number, id:string, mode:'remote'|'game', reason:string }} opts
  */
+function escHtml(s) {
+	return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+/**
+ * The host's stream error (2.21, `host-stream-error`) carried as a "!…" play-ended reason:
+ * plain text, or "@key" = an i18n key (desktop hosts send e.g. "@session.rendererFailed";
+ * a key this catalog lacks falls back to the generic text). HTML-escaped: it comes from the
+ * remote host. null = not a host error.
+ */
+export function hostErrorText(reason) {
+	if (typeof reason !== 'string' || !reason.startsWith('!')) return null;
+	const msg = reason.slice(1).trim();
+	if (!msg) return null;
+	if (msg.startsWith('@')) {
+		const key = msg.slice(1);
+		const s = t(key);
+		return s === key ? null : escHtml(s);
+	}
+	return escHtml(msg.slice(0, 300));
+}
+
 function renderDisconnectCard({ slot, id, mode, reason }) {
 	const mount = MOUNT();
 	if (!mount) return;
@@ -527,7 +549,7 @@ function renderDisconnectCard({ slot, id, mode, reason }) {
 		'peer-unreachable':  t('connErr.peerUnreachable'),
 		'relay-down':        t('connErr.relayDown'),
 	};
-	const reasonText = reasonMap[reason] || t('session.streamStopped');
+	const reasonText = hostErrorText(reason) || reasonMap[reason] || t('session.streamStopped');
 
 	// Mode-aware brand class
 	const brandClass = mode === 'game' ? 'brand-game' : 'brand-remote';
@@ -1046,7 +1068,15 @@ async function init() {
 			invoke('plugin:pulsar-video|detach').catch(() => {});
 		}
 
-		_dropSlot(slot, /* fromRust */ true, reason);
+		// The host said why its stream died just before the Bye: show that, not a guess.
+		const hostEnded = entry.hostError && reason !== 'cancelled';
+		_dropSlot(slot, /* fromRust */ true, hostEnded ? `!${entry.hostError}` : reason);
+	});
+
+	// host-stream-error: the host's reason for a dead stream ("!" stats line, 2.21).
+	await listen('host-stream-error', ({ slot, message }) => {
+		const entry = registry.find((e) => e.slot === slot);
+		if (entry && typeof message === 'string') entry.hostError = message;
 	});
 
 	// play-stall: video stall state change

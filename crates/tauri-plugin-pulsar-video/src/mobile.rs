@@ -529,6 +529,31 @@ struct NotifyRequestArgs<'a> {
 }
 
 #[derive(Serialize)]
+struct DecoderCapsArgs {
+  width: u32,
+  height: u32,
+}
+
+#[derive(Serialize)]
+struct StreamFpsArgs {
+  slot: u8,
+  fps: u32,
+}
+
+#[derive(Serialize)]
+struct PadFeedArgs<'a> {
+  port: u16,
+  token: &'a str,
+}
+
+#[derive(Serialize)]
+struct PadRumbleArgs {
+  pad: u8,
+  large: u8,
+  small: u8,
+}
+
+#[derive(Serialize)]
 struct NotifLangArgs<'a> {
   lang: &'a str,
 }
@@ -602,6 +627,24 @@ pub trait PulsarVideoW5Ext<R: Runtime> {
   ///
   /// Native-only — not a JS command.
   fn set_hdr_mode(&self, slot: u8, mode: &str) -> crate::Result<HdrResponse>;
+
+  /// Hardware/software decodable codecs, per-codec decoder fps limit at `width`x`height`
+  /// and the panel's highest refresh (connect-time codec + fps choice). Native-only.
+  fn decoder_caps(&self, width: u32, height: u32) -> crate::Result<DecoderCaps>;
+
+  /// The stream on `slot` runs at `fps`: vote for a matching display refresh
+  /// (Surface.setFrameRate / preferredDisplayModeId). 0 drops the vote. Native-only.
+  fn set_stream_fps(&self, slot: u8, fps: u32) -> crate::Result<AttachResponse>;
+
+  /// Mobile host: projection-stop generation + end reason (see [`HostStatus`]). Native-only.
+  fn host_status(&self) -> crate::Result<HostStatus>;
+
+  /// Physical gamepads: send pad state to this loopback UDP port, each datagram prefixed
+  /// with `token` (hex; the receiver drops datagrams without it). Native-only.
+  fn pad_feed_start(&self, port: u16, token: &str) -> crate::Result<AttachResponse>;
+
+  /// Host rumble for physical pad `pad` (0..255 per motor, both 0 = stop). Native-only.
+  fn pad_rumble(&self, pad: u8, large: u8, small: u8) -> crate::Result<AttachResponse>;
 }
 
 impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
@@ -626,6 +669,38 @@ impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
         "setHdrMode",
         SetHdrModeArgs { slot, mode: mode.to_string() },
       )
+      .map_err(Into::into)
+  }
+
+  fn decoder_caps(&self, width: u32, height: u32) -> crate::Result<DecoderCaps> {
+    self
+      .0
+      .run_mobile_plugin("decoderCaps", DecoderCapsArgs { width, height })
+      .map_err(Into::into)
+  }
+
+  fn set_stream_fps(&self, slot: u8, fps: u32) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("setStreamFps", StreamFpsArgs { slot, fps })
+      .map_err(Into::into)
+  }
+
+  fn host_status(&self) -> crate::Result<HostStatus> {
+    self.0.run_mobile_plugin("hostStatus", ()).map_err(Into::into)
+  }
+
+  fn pad_feed_start(&self, port: u16, token: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("padFeedStart", PadFeedArgs { port, token })
+      .map_err(Into::into)
+  }
+
+  fn pad_rumble(&self, pad: u8, large: u8, small: u8) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("padRumble", PadRumbleArgs { pad, large, small })
       .map_err(Into::into)
   }
 }

@@ -181,6 +181,14 @@ struct RumblePayload {
     small: u8,
 }
 
+/// `host-stream-error`: the host's reason for a dead stream (2.21), text or `@i18n.key`.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct HostStreamErrorPayload {
+    slot: u8,
+    message: String,
+}
+
 // ── SendFileResult ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -578,11 +586,14 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
                 );
             });
         }
-        DataMsg::Rumble { large, small, .. } => {
+        DataMsg::Rumble { slot: pad, large, small } => {
             // The `slot` field in `Rumble` is the GAMEPAD slot on the host; the
             // outer `slot` arg is the SESSION slot — use the session slot for the
             // event so JS knows which session it came from.
             let _ = app.emit("rumble", RumblePayload { slot, large, small });
+            // The physical pad at that gamepad slot (pad_feed.rs numbers pads the same
+            // way the host does) gets the motors natively.
+            crate::pad_feed::rumble(app, pad, large, small);
         }
         DataMsg::HostPointer { active, x, y } => {
             // The person at the host is on their own mouse (remote mode, issue #7): the UI
@@ -598,6 +609,14 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             // the host).
             log::warn!("host reports remote input does not reach its desktop: {reason}");
             let _ = app.emit("input-unavailable", InputUnavailablePayload { slot, reason });
+        }
+        // A "!" stats line is the host's stream error (2.21: encoder died, screen sharing
+        // stopped on a phone host); the desktop client shows it the same way. Plain stats
+        // labels are the desktop HUD's and are not used here.
+        DataMsg::Stats(s) if s.starts_with('!') => {
+            let message = s[1..].to_string();
+            log::warn!("pulsar: host stream error (slot={slot}): {message}");
+            let _ = app.emit("host-stream-error", HostStreamErrorPayload { slot, message });
         }
         // All other variants are host-only or handled by another wave.
         _ => {}
