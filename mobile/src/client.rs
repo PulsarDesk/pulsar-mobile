@@ -1068,8 +1068,21 @@ pub async fn connect_host<R: Runtime>(
     }
 
     // ── Query caps + pick codec ───────────────────────────────────────────────
-    let caps = query_stream_caps(&mut sess).await.unwrap_or_default();
-    let mos = caps.features.iter().any(|f| f == "mos");
+    // SECURITY: no answer is NOT "empty caps", and a host without media-over-session would
+    // stream plain (unencrypted) RTP. Defaulting turned a caps exchange an on-path attacker
+    // dropped for ~3 s into a plaintext stream; refuse instead (desktop parity, play.rs).
+    let caps = match query_stream_caps(&mut sess).await {
+        Ok(caps) => caps,
+        Err(e) => {
+            log::warn!("pulsar: host caps query failed ({e}) — refusing to stream without them");
+            return Err("host-caps-missing".into());
+        }
+    };
+    if !service::media::encrypted_media(&caps.features) {
+        log::warn!("pulsar: host offers no encrypted media (features {:?}) — refusing a plaintext stream", caps.features);
+        return Err("host-no-encrypted-media".into());
+    }
+    let mos = true;
     // W5: detect FEAT_NACK support so request_keyframe knows whether MediaNack works.
     let feat_nack = caps.features.iter().any(|f| f == service::media::FEAT_NACK);
 
@@ -1217,7 +1230,38 @@ pub async fn connect_host<R: Runtime>(
     );
     acfg.native = (eff_width, eff_height, fps);
     // Start near the peer's last known-good rate (60 % of it), else the auto start.
-    let peer_key = target.clone();
+    // The memory is per peer AND per kind of path (pulsar-core `netpath`, shared with the
+    // desktop): the same host over the home LAN, over a ZeroTier / WireGuard / Tailscale overlay
+    // (private address, internet underneath) and through the relay are different paths, and a
+    // LAN rate must not seed an overlay session.
+    let path_class = {
+        let rtt = match sess.path_latency().await {
+            Some((d, r)) => match sess.transport() {
+                Transport::Direct => d,
+                Transport::Relay => r,
+            },
+            None => None,
+        };
+        let peer_ip = sess.peer_addr().await.map(|a| a.ip());
+        let transport = sess.transport();
+        tauri::async_runtime::spawn_blocking(move || pulsar_core::netpath::classify(transport, peer_ip, rtt))
+            .await
+            .unwrap_or(pulsar_core::netpath::PathClass::Wan)
+    };
+    log::info!("pulsar: path class {}", path_class.as_str());
+    let peer_key = format!("{target}|{}", path_class.as_str());
+    // The session-start path and its verdict (judged with the round trip too): a relay <->
+    // direct move mid-session re-keys the memory (see the stats tick), and a move back to
+    // this path keeps this verdict.
+    let peer_target = target.clone();
+    let start_path = (
+        sess.transport(),
+        if matches!(sess.transport(), Transport::Direct) {
+            sess.peer_addr().await.map(|a| a.ip())
+        } else {
+            None
+        },
+    );
     let hint = crate::adapt_memory::hint(&app, &peer_key).map(|k| (k * 3 / 5).max(adapt::FLOOR_KBPS));
     // Session-start bandwidth probe (pulsar-core `adapt::probe`, hosts advertising FEAT_PROBE):
     // ~1 s of packet trains measured before the stream starts, so an auto-rate session opens at
@@ -1405,6 +1449,7 @@ pub async fn connect_host<R: Runtime>(
         let mut fec_rs = service::media::RsFecDecoder::default();
         let mut win_fec_ok: u32 = 0;
         let mut remembered_kbps: u32 = 0;
+        let mut peer_key = peer_key;
         let epoch = Instant::now();
         let mono_ms = move || epoch.elapsed().as_secs_f64() * 1000.0;
         let mut frame_ts: Option<u32> = None;
@@ -1753,10 +1798,42 @@ pub async fn connect_host<R: Runtime>(
                         // hole-punch ack upgrades the session relay→direct mid-stream.
                         // Poll the live value once per stats tick (one mutex lock/s) so
                         // the HUD badge, bar meta and session cards track reality.
-                        let live = transport_str(sess.live_transport().await);
+                        let live_t = sess.live_transport().await;
+                        let live = transport_str(live_t);
                         if live != transport_owned {
                             log::info!("pulsar: transport changed {transport_owned} -> {live} slot={slot}");
                             transport_owned = live.to_string();
+                            // The rate memory is per kind of path: re-classify the new one, and
+                            // treat the last good rate learned so far as the OLD path's (already
+                            // remembered), so only a rate found clean on the new path is stored
+                            // under the new key. Desktop parity: play/hold.rs.
+                            let ip = if matches!(live_t, Transport::Direct) {
+                                sess.peer_addr().await.map(|a| a.ip())
+                            } else {
+                                None
+                            };
+                            let class = if (live_t, ip) == start_path {
+                                path_class
+                            } else {
+                                let rtt = match sess.path_latency().await {
+                                    Some((d, r)) => match live_t {
+                                        Transport::Direct => d,
+                                        Transport::Relay => r,
+                                    },
+                                    None => None,
+                                };
+                                tauri::async_runtime::spawn_blocking(move || {
+                                    pulsar_core::netpath::classify(live_t, ip, rtt)
+                                })
+                                .await
+                                .unwrap_or(pulsar_core::netpath::PathClass::Wan)
+                            };
+                            let key = format!("{peer_target}|{}", class.as_str());
+                            if key != peer_key {
+                                log::info!("pulsar: path class -> {} slot={slot}", class.as_str());
+                                peer_key = key;
+                                remembered_kbps = ctl.last_good_kbps();
+                            }
                             // NOT phase "transport": connecting.js maps that to a handshake
                             // step and would drag a still-open overlay's indicator backwards.
                             emit_phase(&app2, slot, "transport-changed", Some(live));

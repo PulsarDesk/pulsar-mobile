@@ -315,17 +315,40 @@ pub(crate) async fn announce_as_host<R: Runtime>(
 ) {
     let cfg = crate::config::load_config(app);
     let pubkey = load_identity(app).public_bytes();
+    HOSTING.store(true, std::sync::atomic::Ordering::Relaxed);
     match Discovery::start(cfg.device_name, node_port, pubkey, id).await {
         Ok(disc) => {
+            // An unattended host (no password, no approval) stays silent: the beacon's
+            // address + port are all a stranger on a shared network (café, hotel) needs to
+            // connect. Clients that know its id still reach it over the LAN (the relay
+            // rendezvous carries both sides' LAN candidates). Desktop parity:
+            // host.rs `beacon_silent`.
+            disc.set_paused(cfg.unattended_access);
             *app.state::<SharedDiscovery>().0.lock().await = Some(disc);
         }
         Err(e) => log::warn!("pulsar: host LAN beacon failed to start: {e}"),
     }
 }
 
+/// Whether this device is online as a host (between `announce_as_host` and
+/// `stop_announcing`): the beacon announces then, unless unattended access is on.
+static HOSTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Settings changed the unattended switch: an online host goes silent (on) or announces
+/// again (off) at once, not at the next go_online. Desktop parity: `host::refresh_beacon`.
+pub(crate) async fn apply_unattended<R: Runtime>(app: &AppHandle<R>, unattended: bool) {
+    if !HOSTING.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(d) = app.state::<SharedDiscovery>().0.lock().await.as_ref() {
+        d.set_paused(unattended);
+    }
+}
+
 /// Go back to receive-only on the LAN (stop advertising) — called when the host goes
 /// offline so the device stops appearing/being reachable to other devices.
 pub(crate) async fn stop_announcing<R: Runtime>(app: &AppHandle<R>) {
+    HOSTING.store(false, std::sync::atomic::Ordering::Relaxed);
     if let Some(d) = app.state::<SharedDiscovery>().0.lock().await.as_ref() {
         d.set_paused(true);
     }

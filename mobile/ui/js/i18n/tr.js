@@ -20,6 +20,8 @@ export default {
 	"connErr.timeout": "Bağlantı zaman aşımına uğradı — el sıkışma tamamlanamadı. Cihaz çevrimdışı veya erişilemiyor olabilir.",
 	"connErr.incompatibleVersion": "Aktarıcı daha yeni bir sürüm gerektiriyor — lütfen Pulsar'ı güncelleyin.",
 	"connErr.peerOutdated": "Karşı cihazda eski bir Pulsar sürümü var — şifreyle bağlanmak için onu güncelleyin.",
+	"connErr.hostCaps": "Host akış yeteneklerini bildirmedi; bağlantı güvenli kurulamadı. Tekrar dene.",
+	"connErr.noEncryptedMedia": "Host şifreli görüntü aktarımını desteklemiyor (eski sürüm). Pulsar şifresiz akış başlatmaz; host'u güncelle.",
 	"home.title": "Bağlan",
 	"home.sub": "Uzak bir cihaza bağlan.",
 	"home.modeRemote": "Uzaktan masaüstü",
