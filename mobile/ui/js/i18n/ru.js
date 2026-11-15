@@ -155,6 +155,8 @@ export default {
 	"approve.autoDeny": "Автоотклонение через:",
 	"session.videoErr": "Не удалось установить видеосоединение.",
 	"session.streamStopped": "Поток остановлен — возможно, хост прекратил показ экрана.",
+	"session.decodeLimit": "Устройство не успевает декодировать {userFps} к/с — используется {fps} к/с",
+	"session.decodeRestored": "Снова пробуем {fps} к/с",
 	"session.connecting": "Подключение…",
 	"session.waiting": "Хост готовит видео — разрешите доступ к показу экрана.",
 	"session.end": "Завершить сеанс",

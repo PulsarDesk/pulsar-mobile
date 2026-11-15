@@ -34,6 +34,9 @@ pub struct DecoderStatus {
   pub decoded: u64,
   /// Access units dropped before decode (backlog guard + input-buffer timeout).
   pub dropped: u64,
+  /// Of those, the ones that found no free decoder input buffer in time: the decoder still
+  /// held every buffer, it is behind. (Backlog-guard drops also follow a network burst.)
+  pub stalled: u64,
 }
 
 impl DecoderStatus {

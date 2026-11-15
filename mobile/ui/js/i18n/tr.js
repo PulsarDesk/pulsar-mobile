@@ -159,6 +159,8 @@ export default {
 	"approve.autoDeny": "Otomatik reddet:",
 	"session.videoErr": "Video bağlantısı kurulamadı.",
 	"session.streamStopped": "Yayın durdu — host ekran paylaşımını durdurmuş olabilir.",
+	"session.decodeLimit": "Cihaz {userFps} fps çözemiyor — {fps} fps kullanılıyor",
+	"session.decodeRestored": "{fps} fps yeniden deneniyor",
 	"session.connecting": "Bağlanılıyor…",
 	"session.waiting": "Host görüntüyü hazırlıyor — ekran paylaşım iznini onayla.",
 	"session.end": "Oturumu bitir",

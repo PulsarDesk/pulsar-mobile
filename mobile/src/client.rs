@@ -49,7 +49,8 @@ use pulsar_core::proto::DeviceId;
 use pulsar_core::adapt::caps::{mobile_auto_cap_kbps, path_cap_kbps};
 use pulsar_core::adapt::pong::PongMatcher;
 use pulsar_core::adapt::repair::{
-    decoder_sheds, rtp_timestamp, FecShare, FrameClock, KeyframePacer, RepairTracker, REPAIR_SWEEP_MS,
+    decoder_sheds, rtp_timestamp, FecShare, FrameClock, KeyframePacer, RepairTracker, KF_GAP_MAX_FROZEN,
+    REPAIR_SWEEP_MS,
 };
 use pulsar_core::adapt::{self, Controller};
 use pulsar_core::service::{
@@ -355,6 +356,33 @@ fn emit_play_stall<R: Runtime>(app: &AppHandle<R>, slot: u8, stalled: bool) {
     let _ = app.emit("play-stall", PlayStallPayload { slot, stalled });
 }
 
+// ── play-decode-limit event ───────────────────────────────────────────────────
+
+/// The phone's decoder could not keep up and the stream runs at `fps` instead of the
+/// session's `user_fps` (`fps < user_fps`), or a retry put it back (`fps == user_fps`).
+/// The UI shows a short note either way.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PlayDecodeLimitPayload {
+    slot: u8,
+    fps: u32,
+    user_fps: u32,
+}
+
+fn emit_play_decode_limit<R: Runtime>(app: &AppHandle<R>, slot: u8, fps: u32, user_fps: u32) {
+    let _ = app.emit("play-decode-limit", PlayDecodeLimitPayload { slot, fps, user_fps });
+}
+
+/// What `SessionRegistry::last_req` keeps: the stream request with the SESSION's fps, not
+/// a decoder-forced lower one (`Controller::client_decoder_sheds`). A session-menu restream
+/// (codec, bitrate, ...) builds on `last_req` and rebuilds the controller from its fps: a
+/// stored 30 would become the session's new top for good.
+fn user_view(req: &StreamReq, user_fps: u32) -> StreamReq {
+    let mut r = req.clone();
+    r.fps = user_fps;
+    r
+}
+
 // ── auth-prompt event ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -391,8 +419,13 @@ const AUTO_START_KBPS: u32 = 8_000;
 /// hold.rs does the same).
 const SWITCH_QUIET: Duration = Duration::from_millis(2500);
 /// Consecutive decoder-stat windows (~2 s each) a decoder must shed frames before the fps
-/// steps down for it (`Controller::client_decode_bound`).
-const DECODE_OVER_WINDOWS: u32 = 2;
+/// steps down one rung for it (`Controller::client_decoder_sheds`, retried upward later).
+const DECODE_OVER_WINDOWS: u32 = 3;
+/// More access units than this handed to the decoder in one drain of the reorder buffer is a
+/// network burst (the frames held behind a repaired hole, a Wi-Fi power-save batch): the
+/// Kotlin backlog guard (16 AUs) may drop some of them however fast the decoder is, so that
+/// stat window says nothing about the decoder (`decoder_sheds`).
+const DECODE_BURST_AUS: u32 = 8;
 /// Decoder counters are compared over at least this long.
 const DECODE_STAT_WINDOW: Duration = Duration::from_secs(2);
 
@@ -1283,7 +1316,9 @@ pub async fn connect_host<R: Runtime>(
         acfg.startup_windows = 0;
     }
     acfg.ir_capable = false;
-    // Size/fps are fixed for the session (settings / screen); only the bitrate adapts.
+    // Size/fps are fixed for the session (settings / screen); only the bitrate adapts. The one
+    // exception: a decoder that sheds frames steps the fps down one rung (`client_decoder_sheds`),
+    // retried upward after a while, and the UI is told (`play-decode-limit`).
     acfg.ladder = false;
     let ctl = Controller::new(acfg);
     let start_point = ctl.point();
@@ -1432,7 +1467,9 @@ pub async fn connect_host<R: Runtime>(
         // asked for as soon as the shared keyframe pacing allows (gaps double during a loss
         // streak — the old fixed 400 ms re-ask was a keyframe storm on a lossy link).
         let mut want_idr = false;
-        let mut kf_pacer = KeyframePacer::new(Instant::now());
+        // Capped at 1 s: this client freezes until the keyframe (no RFI / intra refresh), so
+        // the desktop's back-off to 4 s would freeze it up to 4 s per loss.
+        let mut kf_pacer = KeyframePacer::with_max(Instant::now(), KF_GAP_MAX_FROZEN);
         let mut total_lost: u64 = 0;
         let mut framed: Vec<u8> = Vec::new();
         let mut last_abr = Instant::now();
@@ -1448,11 +1485,18 @@ pub async fn connect_host<R: Runtime>(
         let mut cur_class = path_class;
         // When a re-request rebuilt the host's encoder (the next windows are skipped).
         let mut last_switch_at: Option<Instant> = None;
-        // Decoder load: AUs fed vs pictures out / AUs dropped over ~2 s (`decoder_sheds`).
+        // Decoder load: AUs fed vs pictures out / input-buffer stalls over ~2 s
+        // (`decoder_sheds`). A window with a network burst, a declared gap, a rebuilt or absent
+        // decoder (`dec_disturbed`) gives no verdict; one with nothing decoded (surface gone,
+        // app in the background) resets the count and disturbs the next (partial) one too.
         let mut aus_fed: u64 = 0;
         let mut dec_base: Option<(Instant, u64, u64, u64)> = None;
-        let mut dec_verdict: Option<(bool, f32)> = None;
+        let mut dec_verdict: Option<bool> = None;
         let mut dec_over_windows: u32 = 0;
+        let mut dec_disturbed = false;
+        // The session's own fps (the controller's top rung): what `last_req` keeps, and what a
+        // decoder-forced step goes back to.
+        let mut user_fps = cur_req.fps;
 
         // ── W3: stats tracking ───────────────────────────────────────────────
         let mut frames: u64 = 0;
@@ -1569,6 +1613,8 @@ pub async fn connect_host<R: Runtime>(
                         dec_base = None;
                         dec_verdict = None;
                         dec_over_windows = 0;
+                        dec_disturbed = true;
+                        user_fps = new_req.fps;
                         let new_codec = new_req.codec.clone();
                         app2.state::<SessionRegistry>().update_last_req(slot, new_req);
                         log::info!("pulsar: restream applied slot={slot} codec={new_codec}");
@@ -1730,10 +1776,13 @@ pub async fn connect_host<R: Runtime>(
                     // Runs EVERY loop iteration (arrivals AND the 50 ms recv timeout)
                     // so a blocked head-of-line hole is flushed once its RTT-sized
                     // hold window expires even when no new packets arrive.
+                    let mut fed_this_drain: u32 = 0;
                     while let Some(pkt) = reorder.pop_ready(Instant::now()) {
                         if reorder.take_gap_declared() {
                             // A real (post-hold) gap: whatever AU it lands in is torn.
                             loss_corrupt = true;
+                            // Everything held behind it goes out at once (decoder stats: a burst).
+                            dec_disturbed = true;
                         }
                         if let Some(au) = depack.push(&pkt) {
                             aus += 1;
@@ -1771,6 +1820,7 @@ pub async fn connect_host<R: Runtime>(
                                 }
                                 stats_window_frames += 1;
                                 aus_fed += 1;
+                                fed_this_drain += 1;
                                 let mut sent = false;
                                 if let Some(stream) = au_stream.as_mut() {
                                     framed.clear();
@@ -1790,6 +1840,9 @@ pub async fn connect_host<R: Runtime>(
                             }
                         }
                         reorder.recycle(pkt);
+                    }
+                    if fed_this_drain > DECODE_BURST_AUS {
+                        dec_disturbed = true;
                     }
 
                     // ── Repair sweep (every REPAIR_SWEEP_MS) ─────────────────────
@@ -1864,7 +1917,7 @@ pub async fn connect_host<R: Runtime>(
                                 if request_stream(&mut sess, &cur_req).await.is_err() {
                                     break 'read;
                                 }
-                                app2.state::<SessionRegistry>().update_last_req(slot, cur_req.clone());
+                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
                             }
                         }
                         // The path class (memory key) the media runs on now; on a change the last
@@ -1929,7 +1982,7 @@ pub async fn connect_host<R: Runtime>(
                                 if request_stream(&mut sess, &cur_req).await.is_err() {
                                     break 'read;
                                 }
-                                app2.state::<SessionRegistry>().update_last_req(slot, cur_req.clone());
+                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
                             }
                         }
                     }
@@ -1948,10 +2001,10 @@ pub async fn connect_host<R: Runtime>(
                         }
                         let sample = win.sample(window_ms);
                         // The decoder's verdict for the last stat window (see the keepalive poll).
-                        let verdict = dec_verdict.take();
-                        if let Some((sheds, _)) = verdict {
+                        if let Some(sheds) = dec_verdict.take() {
                             dec_over_windows = if sheds { dec_over_windows + 1 } else { 0 };
                         }
+                        let was_limited = ctl.decoder_limited();
                         let quiet = last_switch_at.is_some_and(|t| now.saturating_duration_since(t) < SWITCH_QUIET);
                         let mut d = if quiet {
                             // A re-request rebuilt the host's encoder: that gap is not congestion.
@@ -1959,20 +2012,24 @@ pub async fn connect_host<R: Runtime>(
                         } else {
                             ctl.tick(&sample)
                         };
-                        // The phone's decoder can't keep up (it drops AUs / puts out far fewer
-                        // pictures than it is fed, 2 windows running): a lower fps, as the
-                        // desktop does for its decoder. No bitrate fixes a decoder limit.
+                        // The phone's decoder can't keep up (it puts out far fewer pictures than it
+                        // is fed, or finds no input buffer, 3 windows running; a window with a
+                        // network burst does not count): one fps rung lower, as the desktop does
+                        // for its decoder; no bitrate fixes a decoder limit. The rung it left is
+                        // retried later (the controller).
                         if !quiet && d.point.is_none() && dec_over_windows >= DECODE_OVER_WINDOWS {
-                            let dec_ms = verdict.map(|(_, ms)| ms).unwrap_or(0.0);
-                            let cb = ctl.client_decode_bound(dec_ms);
+                            let cb = ctl.client_decoder_sheds();
                             if let Some(p) = cb.point {
-                                log::info!(
-                                    "pulsar: decoder can't keep up slot={slot} (~{dec_ms:.1} ms/frame) — {}",
-                                    p.label()
-                                );
+                                log::info!("pulsar: decoder can't keep up slot={slot} — {}", p.label());
                                 d.point = Some(p);
                                 d.reason = cb.reason;
-                                dec_over_windows = 0;
+                                emit_play_decode_limit(&app2, slot, p.fps, user_fps);
+                            }
+                            dec_over_windows = 0;
+                        } else if was_limited && !ctl.decoder_limited() {
+                            if let Some(p) = d.point {
+                                log::info!("pulsar: decoder retry slot={slot} — back to {}", p.label());
+                                emit_play_decode_limit(&app2, slot, p.fps, user_fps);
                             }
                         }
                         let sig = ctl.last();
@@ -2027,7 +2084,7 @@ pub async fn connect_host<R: Runtime>(
                             if request_stream(&mut sess, &cur_req).await.is_err() {
                                 break 'read;
                             }
-                            app2.state::<SessionRegistry>().update_last_req(slot, cur_req.clone());
+                            app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
                         }
                     }
 
@@ -2047,27 +2104,50 @@ pub async fn connect_host<R: Runtime>(
                         // The same poll says when an AU was thrown away before decode (input
                         // backlog over its cap, no input buffer in time): the reference chain is
                         // broken → an IDR too. Those drops used to be silent.
-                        if let Ok(st) = app2.pulsar_video().decoder_status(slot) {
-                            if st.failed() || st.need_idr {
-                                log::warn!(
-                                    "pulsar: decoder {} slot={slot} — requesting IDR",
-                                    if st.failed() { "failed" } else { "dropped an AU" }
-                                );
-                                want_idr = true;
-                            }
-                            // Decoder load over ~2 s: AUs fed vs pictures out / AUs dropped. A
-                            // counter that went backwards = a rebuilt codec: start over.
-                            match dec_base {
-                                Some((t0, fed0, dec0, drop0)) if st.decoded >= dec0 && st.dropped >= drop0 && aus_fed >= fed0 => {
-                                    let span = now.saturating_duration_since(t0);
-                                    if span >= DECODE_STAT_WINDOW {
-                                        let (fed, dec, dropped) = (aus_fed - fed0, st.decoded - dec0, st.dropped - drop0);
-                                        let ms_per_frame = if dec > 0 { span.as_secs_f32() * 1000.0 / dec as f32 } else { 0.0 };
-                                        dec_verdict = Some((decoder_sheds(fed, dec, dropped), ms_per_frame));
-                                        dec_base = Some((now, aus_fed, st.decoded, st.dropped));
+                        match app2.pulsar_video().decoder_status(slot) {
+                            Ok(st) => {
+                                if st.failed() || st.need_idr {
+                                    log::warn!(
+                                        "pulsar: decoder {} slot={slot} — requesting IDR",
+                                        if st.failed() { "failed" } else { "dropped an AU" }
+                                    );
+                                    want_idr = true;
+                                }
+                                // Decoder load over ~2 s: AUs fed vs pictures out / input-buffer
+                                // stalls. A rebuilt codec (failed, or a counter that went
+                                // backwards) starts the window over.
+                                match dec_base {
+                                    Some((t0, fed0, dec0, stall0))
+                                        if !st.failed() && st.decoded >= dec0 && st.stalled >= stall0 && aus_fed >= fed0 =>
+                                    {
+                                        if now.saturating_duration_since(t0) >= DECODE_STAT_WINDOW {
+                                            let (fed, dec, stalled) = (aus_fed - fed0, st.decoded - dec0, st.stalled - stall0);
+                                            if dec == 0 {
+                                                // Nothing decoded: the surface is gone (background,
+                                                // hidden pane), not a verdict on the decoder; and
+                                                // the next window starts part-way through it.
+                                                dec_verdict = None;
+                                                dec_over_windows = 0;
+                                                dec_disturbed = true;
+                                            } else if std::mem::take(&mut dec_disturbed) {
+                                                dec_verdict = None;
+                                            } else {
+                                                dec_verdict = Some(decoder_sheds(fed, dec, stalled));
+                                            }
+                                            dec_base = Some((now, aus_fed, st.decoded, st.stalled));
+                                        }
+                                    }
+                                    _ => {
+                                        dec_base = Some((now, aus_fed, st.decoded, st.stalled));
+                                        dec_disturbed = false;
                                     }
                                 }
-                                _ => dec_base = Some((now, aus_fed, st.decoded, st.dropped)),
+                            }
+                            Err(_) => {
+                                // No status (an older plugin, iOS): no verdict.
+                                dec_base = None;
+                                dec_verdict = None;
+                                dec_over_windows = 0;
                             }
                         }
                     }
