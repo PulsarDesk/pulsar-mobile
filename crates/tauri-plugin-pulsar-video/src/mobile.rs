@@ -341,6 +341,16 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
+  /// Poll the slot's decoder health and clear its one-shot flags (`failed`, `need_idr`): see
+  /// [`DecoderStatus`]. The caller nudges the host for an IDR on either flag and watches the
+  /// counters for a decoder that sheds what it is fed.
+  pub fn decoder_status(&self, slot: u8) -> crate::Result<DecoderStatus> {
+    self
+      .0
+      .run_mobile_plugin::<DecoderStatus>("decoderStatus", SlotArgs { slot })
+      .map_err(Into::into)
+  }
+
   /// The home-screen wallpaper as a base64 JPEG (≤14 KB) in
   /// `AttachResponse.detail`; `ok:false` when it can't be read. Used as this
   /// device's identity image pushed to peers (mobile analogue of the desktop

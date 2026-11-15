@@ -1003,9 +1003,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     /**
      * Poll+clear a slot's decoder-failed flag (set when the decode path threw and the codec
-     * was released for rebuild). The Rust read loop polls this on its keepalive tick and
-     * nudges the host for an IDR — the plugin's own `trigger()` events never reach JS in
-     * this build, so a pull command is the reliable native→Rust channel.
+     * was released for rebuild) and its need-IDR flag (set when an access unit was thrown
+     * away before decode: the reference chain is broken), plus the decoder's counters. The
+     * Rust read loop polls this on its keepalive tick, nudges the host for an IDR on either
+     * flag, and compares `decoded` / `dropped` with what it fed to see a decoder that can't
+     * keep up — the plugin's own `trigger()` events never reach JS in this build, so a pull
+     * command is the reliable native→Rust channel.
      */
     @Command
     fun decoderStatus(invoke: Invoke) {
@@ -1013,7 +1016,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val pane = panes[slot]
         val failed = pane.decoderFailed
         pane.decoderFailed = false
+        val needIdr = pane.needIdr
+        pane.needIdr = false
         val r = JSObject(); r.put("ok", true); r.put("detail", if (failed) "failed" else "")
+        r.put("needIdr", needIdr)
+        r.put("decoded", pane.decodedFrames())
+        r.put("dropped", pane.droppedAuCount())
         invoke.resolve(r)
     }
 
@@ -2065,6 +2073,11 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         // read loop polls it (decoderStatus command) and requests a host IDR so the fresh
         // decoder gets a reference frame immediately instead of at the 10 s safety GOP.
         @Volatile var decoderFailed = false
+        // Set when an access unit was thrown away before decode (backlog over its cap, or no
+        // input buffer in time): the reference chain is broken until a keyframe, so the Rust
+        // read loop (decoderStatus poll) asks the host for an IDR. These drops used to be
+        // silent — the picture stayed smeared until the ~10 s safety GOP.
+        @Volatile var needIdr = false
 
         // ── Decoupled decode feed (Moonlight-style) ─────────────────────────────
         // feedAu() enqueues + returns IMMEDIATELY; this dedicated thread drains the
@@ -2076,7 +2089,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         @Volatile private var decoderRunning = false
         private var decoderThread: Thread? = null
 
-        private var droppedAus = 0L
+        // AUs thrown away before decode (backlog guard + input-buffer timeout), cumulative.
+        @Volatile private var droppedAus = 0L
+
+        /** Pictures the decoder put out (cumulative; reset when the codec is rebuilt). */
+        fun decodedFrames(): Long = framesOut
+        /** AUs dropped before decode (cumulative). */
+        fun droppedAuCount(): Long = droppedAus
 
         fun enqueue(au: ByteArray) {
             // Runaway guard: steady-state the decoder keeps up so the queue stays ~empty;
@@ -2086,6 +2105,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             while (inputQueue.size > 16) {
                 inputQueue.pollFirst()
                 droppedAus++
+                needIdr = true
                 if (droppedAus % 100 == 1L) Log.w(TAG, "slot $slot input backlog: dropped $droppedAus AUs total")
             }
             inputQueue.offerLast(au)
@@ -2416,6 +2436,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             // from the previous session's surface teardown so it doesn't trigger a spurious
             // early IDR request against the new stream.
             decoderFailed = false
+            needIdr = false
         }
 
         fun feed(au: ByteArray): Boolean = synchronized(lock) {
@@ -2688,7 +2709,14 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 // here — only the render thread may touch the output side (concurrent
                 // dequeueOutputBuffer from two threads crashes MediaCodec).
                 inIdx = c.dequeueInputBuffer(10_000)
-                if (inIdx < 0) { emitDecoderError(); return }
+                if (inIdx < 0) {
+                    // The AU is lost to the decoder: say so (the Rust loop requests an IDR and
+                    // counts the drop toward "decoder can't keep up").
+                    droppedAus++
+                    needIdr = true
+                    emitDecoderError()
+                    return
+                }
             }
             val buf = c.getInputBuffer(inIdx)!!
             buf.clear(); buf.put(au)
