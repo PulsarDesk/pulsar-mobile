@@ -152,6 +152,14 @@ class HostArgs {
     var bitrate_kbps: Int = 0
     // "normal" / "short_gop" / "intra_refresh" (adaptive streaming loss recovery).
     var loss_recovery: String? = null
+    // Host epoch the stream request saw (Rust `host_epoch`): a start older than the last
+    // stopHost is stale and skipped (see `hostStopEpoch`).
+    var epoch: Long = 0
+}
+
+@InvokeArg
+class StopHostArgs {
+    var epoch: Long = 0
 }
 
 @InvokeArg
@@ -494,17 +502,37 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     // applied when the encoder is created — a running MediaCodec keeps its GOP.
     private var hRecovery: String = "normal"
 
+    // Start/stop ordering (Rust `host_epoch`): the highest epoch a stopHost carried, and the
+    // epoch of the start waiting on the screen-capture permission dialog. Rust spawns the
+    // start but stops synchronously on teardown, and the user may answer the dialog long after
+    // the client left: a start older than the last stop must not capture or take the screen
+    // wake lock (nothing would release it until the next stopHost).
+    @Volatile private var hostStopEpoch: Long = 0
+    @Volatile private var pendingStartEpoch: Long = 0
+
+    private fun hostStartStale(epoch: Long): Boolean {
+        val stale = epoch < hostStopEpoch
+        if (stale) Log.i(TAG, "startHost: stale (epoch $epoch < stop $hostStopEpoch) — skipped")
+        return stale
+    }
+
     @Command
     fun startHost(invoke: Invoke) {
         val a = invoke.parseArgs(HostArgs::class.java)
+        if (hostStartStale(a.epoch)) {
+            val r = JSObject(); r.put("ok", false); r.put("detail", "stale"); invoke.resolve(r); return
+        }
         hPort = a.port; hAudioPort = a.audio_port
         hMime = if (a.codec == "h265" || a.codec == "hevc") "video/hevc" else "video/avc"
         hW = a.width; hH = a.height; hFps = if (a.fps > 0) a.fps else 30; hKbps = a.bitrate_kbps
         hRecovery = a.loss_recovery ?: "normal"
         if (projection != null) {
-            activity.runOnUiThread { startCapture(); acquireHostScreenLock() }
+            val epoch = a.epoch
+            // Checked again on the UI thread: a stopHost may land between here and there.
+            activity.runOnUiThread { if (!hostStartStale(epoch)) { startCapture(); acquireHostScreenLock() } }
             val r = JSObject(); r.put("ok", true); invoke.resolve(r); return
         }
+        pendingStartEpoch = a.epoch
         val mpm = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(invoke, mpm.createScreenCaptureIntent(), "onProjResult")
     }
@@ -516,6 +544,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("ekran paylaşım izni reddedildi")
             return
         }
+        // The session ended while the dialog was open: do not start sharing now.
+        val epoch = pendingStartEpoch
+        if (hostStartStale(epoch)) { invoke.reject("host stopped"); return }
         // Android 14+: the mediaProjection FGS must be RUNNING before getMediaProjection
         // (else SecurityException). startForegroundService is async → wait briefly.
         val svc = Intent(activity, HostService::class.java)
@@ -530,6 +561,10 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         var tries = 0
         val attempt = object : Runnable {
             override fun run() {
+                if (hostStartStale(epoch)) {
+                    activity.stopService(Intent(activity, HostService::class.java))
+                    invoke.reject("host stopped"); return
+                }
                 try {
                     val mpm = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     projection = mpm.getMediaProjection(rc, data)
@@ -552,6 +587,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun stopHost(invoke: Invoke) {
+        val a = try { invoke.parseArgs(StopHostArgs::class.java) } catch (_: Exception) { null }
+        // Set before posting: a start's UI-thread block queued earlier sees it and skips.
+        if (a != null && a.epoch > hostStopEpoch) hostStopEpoch = a.epoch
         activity.runOnUiThread {
             unregisterRotationListener()
             releaseHostScreenLock()
@@ -1795,14 +1833,20 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     // ---------------- foreground service (M6) ----------------
 
     // Perf locks: keep the WiFi radio in low-latency mode (no power-save parking, which
-    // causes ~100-300ms random latency spikes during a session) + CPU awake.
+    // causes ~100-300ms random latency spikes during a session) + the screen on.
+    //
+    // No PARTIAL_WAKE_LOCK: it used to be requested here but always threw (WAKE_LOCK was not
+    // declared), and with WAKE_LOCK declared it would keep the CPU and the stream running with
+    // no limit after the power button turns the screen off — the overnight case the desktop
+    // client ends via power_watch, which mobile has no equivalent of yet. StreamService (an
+    // FGS) and audio playback already keep a viewed session running.
     private var wifiLock: WifiManager.WifiLock? = null
-    private var wakeLock: PowerManager.WakeLock? = null
 
     private fun acquirePerfLocks() {
-        // Each lock on its own: one failing (e.g. a SecurityException when WAKE_LOCK is
-        // missing from the merged manifest) must not skip the others — above all not KEEP_SCREEN_ON, without which the
-        // screen times out mid-session (a pad-only or watch-only session gets no touches).
+        // Each lock on its own: one failing must not skip the other — above all not
+        // KEEP_SCREEN_ON, without which the screen times out mid-session (a pad-only or
+        // watch-only session gets no touches). The Wi-Fi lock is newly ACTIVE now that
+        // WAKE_LOCK is declared (it always threw before): device-test it.
         try {
             if (wifiLock == null) {
                 val wm = activity.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -1811,12 +1855,6 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 wifiLock = wm.createWifiLock(mode, "pulsar:stream").apply { setReferenceCounted(false); acquire() }
             }
         } catch (e: Exception) { wifiLock = null; Log.w(TAG, "wifi low-latency lock failed: ${e.message}") }
-        try {
-            if (wakeLock == null) {
-                val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pulsar:stream").apply { setReferenceCounted(false); acquire() }
-            }
-        } catch (e: Exception) { wakeLock = null; Log.w(TAG, "wake lock failed: ${e.message}") }
         // KEEP_SCREEN_ON is REQUIRED for WIFI_MODE_FULL_LOW_LATENCY to stay engaged
         // (it silently disengages when the screen dims → power-save spikes return).
         // SustainedPerformanceMode caps peak clocks slightly to avoid the thermal
@@ -1825,7 +1863,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) activity.window.setSustainedPerformanceMode(true)
         } catch (e: Exception) { Log.w(TAG, "screen-on flag failed: ${e.message}") }
-        Log.i(TAG, "perf locks: wifi=${wifiLock != null} wake=${wakeLock != null} + screen-on + sustained")
+        Log.i(TAG, "perf locks: wifi=${wifiLock != null} + screen-on + sustained")
     }
 
     // Host keep-awake: a screen wake lock while this phone streams its screen. The app is in
@@ -1852,12 +1890,11 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun releasePerfLocks() {
         try { wifiLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
-        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
         try {
             activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) activity.window.setSustainedPerformanceMode(false)
         } catch (_: Exception) {}
-        wifiLock = null; wakeLock = null
+        wifiLock = null
     }
 
     private fun startStreamService() {

@@ -16,6 +16,24 @@ mod models;
 
 pub use error::{Error, Result};
 
+/// Mobile host start/stop ordering. Every `stop_host` bumps this; a `start_host` carries the
+/// epoch its StreamReq saw, and the plugin drops a start older than the last stop. The start
+/// runs on a spawned task (and may wait on the screen-capture permission dialog) while the
+/// session teardown stops synchronously, so a late start could otherwise begin capturing —
+/// and take the screen wake lock — after its session ended, with nothing left to stop it.
+static HOST_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current host epoch: read it where the stream request arrives, pass it to `start_host`.
+pub fn host_epoch() -> u64 {
+  HOST_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A new epoch for a `stop_host` call (invalidates every earlier start).
+#[cfg_attr(desktop, allow(dead_code))]
+pub(crate) fn next_host_epoch() -> u64 {
+  HOST_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
 #[cfg(desktop)]
 use desktop::PulsarVideo;
 #[cfg(mobile)]
