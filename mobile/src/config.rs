@@ -172,6 +172,7 @@ pub async fn set_config<R: Runtime>(
             _ => Language::Tr,
         };
     }
+    let unattended_changed = unattended_access.is_some_and(|v| v != cfg.unattended_access);
     if let Some(v) = unattended_access {
         cfg.unattended_access = v;
     }
@@ -189,6 +190,10 @@ pub async fn set_config<R: Runtime>(
     // codec_pref / quality_pref are mobile-only; not mirrored into core Config.
 
     cfg.save(&path).map_err(|e| format!("config save failed: {e}"))?;
+    // The LAN beacon of an online host follows the unattended switch at once.
+    if unattended_changed {
+        crate::net::apply_unattended(&app, cfg.unattended_access).await;
+    }
 
     let mut mc = MobileConfig::from(&cfg);
     // Preserve caller's codec/quality preferences in the returned object even
