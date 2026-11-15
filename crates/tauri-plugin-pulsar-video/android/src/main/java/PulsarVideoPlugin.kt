@@ -2602,6 +2602,15 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                     hints.colorRange?.let   { fmt.setInteger(MediaFormat.KEY_COLOR_RANGE,    it) }
                 }
             }
+                // SDR: what a stream that carries no colour description is taken to be — Pulsar's
+                // rule, BT.709 limited (the bitstream's own VUI still wins over these keys).
+                ?: run {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        fmt.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                        fmt.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                        fmt.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                    }
+                }
             // A21: if the decoder supports adaptive playback, declare the max resolution +
             // a frame-rate hint up front. Then a mid-session host resolution change
             // (Parsec-style) is absorbed IN-PLACE by the decoder instead of a multi-100ms
