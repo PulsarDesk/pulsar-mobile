@@ -315,6 +315,11 @@ pub(crate) async fn announce_as_host<R: Runtime>(
 ) {
     let cfg = crate::config::load_config(app);
     let pubkey = load_identity(app).public_bytes();
+    // An unattended host (no password, no approval) never broadcasts its relay id: on a
+    // shared network (café, hotel) that id would be all a stranger needs to take control.
+    // A desktop that connected before still finds it by its pinned key; others see an
+    // id-less row (connect by address). Desktop parity: host.rs `beacon_id`.
+    let id = id.filter(|_| !cfg.unattended_access);
     match Discovery::start(cfg.device_name, node_port, pubkey, id).await {
         Ok(disc) => {
             *app.state::<SharedDiscovery>().0.lock().await = Some(disc);

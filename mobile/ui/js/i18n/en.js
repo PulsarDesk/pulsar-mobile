@@ -20,6 +20,8 @@ export default {
 	"connErr.timeout": "Connection timed out — the handshake did not complete in time. The device may be offline or unreachable.",
 	"connErr.incompatibleVersion": "Relay requires a newer version — please update Pulsar.",
 	"connErr.peerOutdated": "The other device runs an older Pulsar — update it to connect with a password.",
+	"connErr.hostCaps": "The host did not report its stream capabilities, so the connection could not be secured. Try again.",
+	"connErr.noEncryptedMedia": "The host does not support encrypted video (old version). Pulsar never starts an unencrypted stream; update the host.",
 	"home.title": "Connect",
 	"home.sub": "Connect to a remote device.",
 	"home.modeRemote": "Remote desktop",

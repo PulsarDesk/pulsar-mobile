@@ -1,6 +1,10 @@
 //! Per-peer adaptive-streaming memory (Phase 1.3, mobile twin of the desktop's): the last
 //! rate a session to a peer ran cleanly at, so the next session starts near it instead of
 //! probing from scratch. A tiny JSON map in the app data dir (`adapt-memory.json`).
+//!
+//! Keys are `"<peer>|<class>"` (`lan` / `wan` / `relay`, pulsar-core `netpath::PathClass`, the
+//! same classification as the desktop): an overlay VPN or relayed session never starts from
+//! the home-LAN rate. Old peer-only keys are ignored and dropped on the next write.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -49,7 +53,7 @@ pub(crate) fn remember<R: Runtime>(app: &AppHandle<R>, peer: &str, kbps: u32) {
     let mut m = load(app);
     m.insert(peer.to_string(), Entry { kbps, at: now_secs() });
     let cutoff = now_secs().saturating_sub(90 * 24 * 3600);
-    m.retain(|_, e| e.at >= cutoff);
+    m.retain(|k, e| e.at >= cutoff && k.contains('|'));
     let p = path(app);
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
