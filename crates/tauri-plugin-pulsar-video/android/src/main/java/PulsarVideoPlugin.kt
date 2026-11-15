@@ -502,7 +502,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         hW = a.width; hH = a.height; hFps = if (a.fps > 0) a.fps else 30; hKbps = a.bitrate_kbps
         hRecovery = a.loss_recovery ?: "normal"
         if (projection != null) {
-            activity.runOnUiThread { startCapture() }
+            activity.runOnUiThread { startCapture(); acquireHostScreenLock() }
             val r = JSObject(); r.put("ok", true); invoke.resolve(r); return
         }
         val mpm = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -534,6 +534,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                     val mpm = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     projection = mpm.getMediaProjection(rc, data)
                     startCapture()
+                    acquireHostScreenLock()
                     registerRotationListener()
                     val r = JSObject(); r.put("ok", true); invoke.resolve(r)
                 } catch (e: SecurityException) {
@@ -553,6 +554,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     fun stopHost(invoke: Invoke) {
         activity.runOnUiThread {
             unregisterRotationListener()
+            releaseHostScreenLock()
             hostEncoder?.stop(); hostEncoder = null
             try { projection?.stop() } catch (_: Exception) {}
             projection = null
@@ -1798,6 +1800,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var wakeLock: PowerManager.WakeLock? = null
 
     private fun acquirePerfLocks() {
+        // Each lock on its own: one failing (e.g. a SecurityException when WAKE_LOCK is
+        // missing from the merged manifest) must not skip the others — above all not KEEP_SCREEN_ON, without which the
+        // screen times out mid-session (a pad-only or watch-only session gets no touches).
         try {
             if (wifiLock == null) {
                 val wm = activity.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -1805,20 +1810,44 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                            else @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
                 wifiLock = wm.createWifiLock(mode, "pulsar:stream").apply { setReferenceCounted(false); acquire() }
             }
+        } catch (e: Exception) { wifiLock = null; Log.w(TAG, "wifi low-latency lock failed: ${e.message}") }
+        try {
             if (wakeLock == null) {
                 val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
                 wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pulsar:stream").apply { setReferenceCounted(false); acquire() }
             }
-            // KEEP_SCREEN_ON is REQUIRED for WIFI_MODE_FULL_LOW_LATENCY to stay engaged
-            // (it silently disengages when the screen dims → power-save spikes return).
-            // SustainedPerformanceMode caps peak clocks slightly to avoid the thermal
-            // cliff on long 120fps sessions. Both are window calls (we're on the UI thread).
-            try {
-                activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) activity.window.setSustainedPerformanceMode(true)
-            } catch (_: Exception) {}
-            Log.i(TAG, "perf locks acquired (wifi low-latency + wake + screen-on + sustained)")
-        } catch (e: Exception) { Log.w(TAG, "perf locks failed: ${e.message}") }
+        } catch (e: Exception) { wakeLock = null; Log.w(TAG, "wake lock failed: ${e.message}") }
+        // KEEP_SCREEN_ON is REQUIRED for WIFI_MODE_FULL_LOW_LATENCY to stay engaged
+        // (it silently disengages when the screen dims → power-save spikes return).
+        // SustainedPerformanceMode caps peak clocks slightly to avoid the thermal
+        // cliff on long 120fps sessions. Both are window calls (we're on the UI thread).
+        try {
+            activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) activity.window.setSustainedPerformanceMode(true)
+        } catch (e: Exception) { Log.w(TAG, "screen-on flag failed: ${e.message}") }
+        Log.i(TAG, "perf locks: wifi=${wifiLock != null} wake=${wakeLock != null} + screen-on + sustained")
+    }
+
+    // Host keep-awake: a screen wake lock while this phone streams its screen. The app is in
+    // the background then (the remote user drives other apps), so the window flag above does
+    // not apply; without it the phone's screen times out and locks mid-session (no local
+    // touches reset the timer) and the client sees the lock screen. A DIM lock: the backlight may dim, the captured
+    // pixels do not. It only holds the IDLE timeout: the power button still turns the screen off.
+    private var hostScreenLock: PowerManager.WakeLock? = null
+
+    private fun acquireHostScreenLock() {
+        if (hostScreenLock != null) return
+        try {
+            val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+            @Suppress("DEPRECATION") val dim = PowerManager.SCREEN_DIM_WAKE_LOCK
+            hostScreenLock = pm.newWakeLock(dim, "pulsar:host").apply { setReferenceCounted(false); acquire() }
+            Log.i(TAG, "host keep-awake: screen wake lock held")
+        } catch (e: Exception) { hostScreenLock = null; Log.w(TAG, "host screen wake lock failed: ${e.message}") }
+    }
+
+    private fun releaseHostScreenLock() {
+        try { hostScreenLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        hostScreenLock = null
     }
 
     private fun releasePerfLocks() {
