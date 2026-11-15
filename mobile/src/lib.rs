@@ -10,10 +10,12 @@ mod adapt_memory;
 mod client;
 mod config;
 mod datachan;
+mod decode_caps;
 mod host;
 mod identity;
 mod input_cmds;
 mod net;
+mod pad_feed;
 mod relay_cmds;
 mod rtp;
 mod session_cmds;
@@ -63,6 +65,8 @@ pub fn run() {
         .manage(net::SharedDiscovery::default())
         // Local relay server task (Settings → Ağ → "Yerel relay").
         .manage(relay_cmds::LocalRelay::default())
+        // Physical gamepads: Settings' per-controller host emulation (pad_feed.rs).
+        .manage(pad_feed::PadTargets::default())
         .invoke_handler(tauri::generate_handler![
             // ── Input / session (client.rs) ───────────────────────────────────
             client::connect_host,
@@ -88,6 +92,9 @@ pub fn run() {
             // by gamepad.js's .catch) → the whole mobile gamepad feature was dead.
             input_cmds::send_gamepad,
             input_cmds::send_gamepad_disconnect,
+            // Physical pads are read natively (pad_feed.rs); the UI only pushes the
+            // per-controller emulation choice.
+            pad_feed::set_gamepad_targets,
             // ── Session lifecycle (W2-teardown, session_cmds.rs) ──────────────
             session_cmds::end_session,
             // ── Auth race (W3-client-authprompt, session_cmds.rs) ─────────────

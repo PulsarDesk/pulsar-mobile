@@ -30,7 +30,7 @@ import { getConfig, setConfig } from '../store/config.js';
 import { getPref, setPref, gamepadTarget, setGamepadTarget } from '../store/prefs.js';
 import { invoke }                   from '../tauri.js';
 import { resolveFrameRate, refreshHz, resolveResolution } from './connect.js';
-import { connectedPads } from '../session/gamepad-monitor.js';
+import { connectedPads, pushGamepadTargets } from '../session/gamepad-monitor.js';
 
 // ── Expose config module on window so i18n.js setLang can call setConfig ──────
 // (i18n.js checks window.__pulsarConfigMod before falling back to raw invoke)
@@ -751,7 +751,10 @@ function renderControllers() {
     </div>`;
   }).join('');
   el.querySelectorAll('.pad-target').forEach((sel) => {
-    sel.addEventListener('change', () => setGamepadTarget(decodeURIComponent(sel.dataset.pad), sel.value));
+    sel.addEventListener('change', () => {
+      setGamepadTarget(decodeURIComponent(sel.dataset.pad), sel.value);
+      pushGamepadTargets();
+    });
   });
 }
 // Keep the Settings list live as controllers connect/disconnect.

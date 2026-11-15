@@ -111,6 +111,7 @@ export default {
 	"m.host.online": "Online — Device ID",
 	"m.host.goOnline": "Go online",
 	"m.host.goOffline": "Go offline",
+	"m.host.projectionStopped": "Screen sharing was stopped on the phone — the connection was closed. Permission is asked again on the next connection.",
 	"m.host.password": "One-time password",
 	"m.host.share": "Share",
 	"m.host.rotate": "Refresh password",

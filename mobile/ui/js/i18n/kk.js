@@ -111,6 +111,7 @@ export default {
 	"m.host.online": "Желіде — Құрылғы ID-і",
 	"m.host.goOnline": "Желіге қосылу",
 	"m.host.goOffline": "Желіден шығу",
+	"m.host.projectionStopped": "Экран бөлісу телефонда тоқтатылды — қосылым жабылды. Қайта қосылғанда рұқсат қайтадан сұралады.",
 	"m.host.password": "Бір реттік құпиясөз",
 	"m.host.share": "Бөлісу",
 	"m.host.rotate": "Құпиясөзді жаңарту",

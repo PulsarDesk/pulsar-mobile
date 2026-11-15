@@ -844,6 +844,11 @@ function wireButtons() {
 		window.addEventListener('pulsar-stop-host', () => {
 			for (const p of [...activePeers]) kickPeer(p.sid);
 		});
+		// The system stopped the screen share (status-bar "Stop sharing", another app took
+		// the projection). The Rust host ends the sessions with a reason; say why here too.
+		window.addEventListener('pulsar-projection-stopped', () => {
+			showToast(t('m.host.projectionStopped'), 5000);
+		});
 	}
 
 	// Approval sheet.

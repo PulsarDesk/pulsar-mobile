@@ -569,11 +569,14 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
                 );
             });
         }
-        DataMsg::Rumble { large, small, .. } => {
+        DataMsg::Rumble { slot: pad, large, small } => {
             // The `slot` field in `Rumble` is the GAMEPAD slot on the host; the
             // outer `slot` arg is the SESSION slot — use the session slot for the
             // event so JS knows which session it came from.
             let _ = app.emit("rumble", RumblePayload { slot, large, small });
+            // The physical pad at that gamepad slot (pad_feed.rs numbers pads the same
+            // way the host does) gets the motors natively.
+            crate::pad_feed::rumble(app, pad, large, small);
         }
         DataMsg::HostPointer { active, x, y } => {
             // The person at the host is on their own mouse (remote mode, issue #7): the UI

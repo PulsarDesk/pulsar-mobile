@@ -79,6 +79,8 @@ private const val MAX_AVATAR_BYTES = 14000
 // W6-host-notify: notification id for the incoming-connection-request heads-up.
 // Distinct from the HostService foreground notification (id 2).
 private const val REQUEST_NOTIF_ID = 7
+// 2.21: "screen sharing stopped" notice (the projection ended outside Pulsar).
+private const val PROJ_STOPPED_NOTIF_ID = 8
 
 @InvokeArg
 class AttachArgs {
@@ -127,6 +129,30 @@ class VideoTransformArgs {
 @InvokeArg
 class VideoSizeArgs {
     var slot: Int = 0
+}
+
+@InvokeArg
+class PadFeedArgs {
+    var port: Int = 0
+}
+
+@InvokeArg
+class PadRumbleArgs {
+    var pad: Int = 0
+    var large: Int = 0
+    var small: Int = 0
+}
+
+@InvokeArg
+class DecoderCapsArgs {
+    var width: Int = 0
+    var height: Int = 0
+}
+
+@InvokeArg
+class StreamFpsArgs {
+    var slot: Int = 0
+    var fps: Int = 0
 }
 
 @InvokeArg
@@ -281,6 +307,10 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
      * audio though packets flowed + the codec was RUNNING). Incremented per packet.
      */
     private var audioPtsUs = 0L
+    /** 2.20: first low-latency options level to try per decoder name (or MIME when no decoder
+     *  was picked) — the level that last configured, raised one step after a decoder died
+     *  mid-stream. Lives for the app process, across sessions. */
+    private val decoderStartTry = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** Per-pane aspect mode: "fit" | "fill" | "stretch". W3-aspect. W5-native: 4 slots. */
     private val aspectMode = Array(MAX_PANES) { "fit" }
     /** W5-native: current layout — "single" | "left-right" | "top-bottom" | "quad". */
@@ -468,7 +498,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val slot = invoke.parseArgs(FeedAuArgs::class.java).slot.coerceIn(0, MAX_PANES - 1)
         activity.runOnUiThread {
             panes[slot].release()
-            if (panes.none { it.active }) { releaseAudio(); stopStreamService() }
+            streamFps[slot] = 0
+            if (panes.none { it.active }) { releaseAudio(); stopStreamService(); padInput.stopAllRumble() }
+            // Drop the refresh vote a moment later, not now: a restream is stopStream +
+            // startStream + setStreamFps, and resetting the display mode in between would
+            // switch the panel twice (a visible blank on some devices).
+            voteHandler.removeCallbacks(clearVote)
+            voteHandler.postDelayed(clearVote, 1500L)
             relayout()
             val ret = JSObject(); ret.put("ok", true); invoke.resolve(ret)
         }
@@ -479,6 +515,10 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             try {
                 panes.forEach { it.release() }
+                streamFps.fill(0)
+                voteHandler.removeCallbacks(clearVote)
+                applyFrameRateVote()
+                padInput.stopAllRumble()
                 releaseAudio()
                 stopStreamService()
                 webView?.setBackgroundColor(Color.TRANSPARENT) // body paints opaque; WHITE flashed in dark theme
@@ -501,6 +541,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         hMime = if (a.codec == "h265" || a.codec == "hevc") "video/hevc" else "video/avc"
         hW = a.width; hH = a.height; hFps = if (a.fps > 0) a.fps else 30; hKbps = a.bitrate_kbps
         hRecovery = a.loss_recovery ?: "normal"
+        if (projectionLost) {
+            // The projection was stopped outside Pulsar while sessions were up; they are
+            // being ended (hostStatus). A restream from one of them must not open the
+            // permission dialog from the background. stopHost (last session gone) re-arms.
+            invoke.reject("screen projection stopped"); return
+        }
         if (projection != null) {
             activity.runOnUiThread { startCapture() }
             val r = JSObject(); r.put("ok", true); invoke.resolve(r); return
@@ -532,7 +578,10 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             override fun run() {
                 try {
                     val mpm = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    projection = mpm.getMediaProjection(rc, data)
+                    val p = mpm.getMediaProjection(rc, data) ?: throw IllegalStateException("getMediaProjection returned null")
+                    projection = p
+                    // Before createVirtualDisplay (API 34+ requires a registered callback).
+                    watchProjection(p)
                     startCapture()
                     registerRotationListener()
                     val r = JSObject(); r.put("ok", true); invoke.resolve(r)
@@ -554,12 +603,87 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             unregisterRotationListener()
             hostEncoder?.stop(); hostEncoder = null
-            try { projection?.stop() } catch (_: Exception) {}
+            // Clear the field BEFORE stop(): onStop fires for our own stop too, and the
+            // callback ignores a projection that is no longer the current one.
+            val p = projection
             projection = null
+            projectionLost = false
+            try { p?.stop() } catch (_: Exception) {}
             hideCursor()
             activity.stopService(Intent(activity, HostService::class.java))
             val r = JSObject(); r.put("ok", true); invoke.resolve(r)
         }
+    }
+
+    // ---- 2.21: the projection ended without us (system "Stop sharing" chip, another app
+    // took the projection, a lock-screen policy). The VirtualDisplay then shows nothing new
+    // and Android 14+ refuses a second createVirtualDisplay on the same token, so the stream
+    // cannot be saved: stop the encoder, tell the sessions (hostStatus -> Rust ends them with
+    // a reason) and the person at the phone (notification + JS event). The next session asks
+    // for the permission again (startHost with no projection).
+
+    /** Bumped on every external projection stop; each Rust host session ends when it moves. */
+    @Volatile private var projectionStopGen = 0
+    /** Set by an external projection stop until the sessions are gone (stopHost). */
+    @Volatile private var projectionLost = false
+
+    private fun watchProjection(p: MediaProjection) {
+        p.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                activity.runOnUiThread {
+                    if (projection !== p) return@runOnUiThread // our own stopHost, or an old token
+                    Log.w(TAG, "MediaProjection stopped outside Pulsar - ending the host stream")
+                    unregisterRotationListener()
+                    hostEncoder?.stop(); hostEncoder = null
+                    projection = null
+                    hideCursor()
+                    projectionLost = true
+                    projectionStopGen++
+                    activity.stopService(Intent(activity, HostService::class.java))
+                    notifyProjectionStopped()
+                    webView?.evaluateJavascript(
+                        "window.dispatchEvent(new Event('pulsar-projection-stopped'))", null
+                    )
+                }
+            }
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
+    }
+
+    private fun notifyProjectionStopped() {
+        try {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) return
+            val nm = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val chan = "pulsar_host"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(NotificationChannel(chan, NotifI18n.t(activity, "chanHost"), NotificationManager.IMPORTANCE_DEFAULT))
+            }
+            val launch = activity.packageManager.getLaunchIntentForPackage(activity.packageName)
+            val pi = launch?.let {
+                PendingIntent.getActivity(activity, 8, it, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            }
+            val n = NotificationCompat.Builder(activity, chan)
+                .setSmallIcon(activity.applicationInfo.icon)
+                .setContentTitle(NotifI18n.t(activity, "projStoppedTitle"))
+                .setContentText(NotifI18n.t(activity, "projStoppedText"))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(NotifI18n.t(activity, "projStoppedText")))
+                .setAutoCancel(true)
+                .apply { if (pi != null) setContentIntent(pi) }
+                .build()
+            nm.notify(PROJ_STOPPED_NOTIF_ID, n)
+        } catch (e: Exception) { Log.w(TAG, "projection-stopped notification failed: ${e.message}") }
+    }
+
+    /** Native-only (Rust host sessions poll it): `stopGen` = projectionStopGen; `message` =
+     *  the end reason for the viewer, in the app language. */
+    @Command
+    fun hostStatus(invoke: Invoke) {
+        val r = JSObject()
+        r.put("ok", true)
+        r.put("stopGen", projectionStopGen)
+        r.put("message", NotifI18n.t(activity, "projStoppedPeer"))
+        invoke.resolve(r)
     }
 
     /** Client keyframe request (MediaNack([0])): force an immediate IDR on the running encoder. */
@@ -1093,20 +1217,152 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** The display's current refresh rate in Hz (the Settings "frame rate = Auto"
-     *  default — so the client never pulls more frames than the panel can show).
+    /** The display's HIGHEST refresh rate at its current resolution, in Hz — the Settings
+     *  "frame rate = Auto" target. Not the current rate: a 90/120 Hz or LTPO panel idles at
+     *  60 Hz (or lower) in the app UI, and the stream raises it (setStreamFps) once it runs.
      *  Returned in AttachResponse.detail as a decimal string. */
     @Command
     fun screenRefreshRate(invoke: Invoke) {
-        val hz = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                activity.display?.refreshRate ?: 60f
-            } else {
-                @Suppress("DEPRECATION")
-                activity.windowManager.defaultDisplay.refreshRate
+        val r = JSObject(); r.put("ok", true); r.put("detail", panelMaxHz().toString()); invoke.resolve(r)
+    }
+
+    private fun currentDisplay(): android.view.Display? = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) activity.display
+        else @Suppress("DEPRECATION") activity.windowManager.defaultDisplay
+    } catch (_: Exception) { null }
+
+    /** Display modes at the current physical resolution (switching resolution for a refresh
+     *  rate is never worth it here). Empty before API 23 (no Display.Mode). */
+    private fun sameSizeModes(d: android.view.Display): List<android.view.Display.Mode> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return emptyList()
+        val cur = d.mode
+        return d.supportedModes.filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }
+    }
+
+    private fun panelMaxHz(): Float = try {
+        val d = currentDisplay()
+        when {
+            d == null -> 60f
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+                sameSizeModes(d).maxOfOrNull { it.refreshRate } ?: d.refreshRate
+            else -> @Suppress("DEPRECATION") (d.supportedRefreshRates.maxOrNull() ?: d.refreshRate)
+        }
+    } catch (_: Exception) { 60f }
+
+    /**
+     * Native-only (Rust, not a JS command): what this device decodes, for the connect-time
+     * codec choice and the fps cap. `hw` = codecs with a hardware decoder, `sw` = every
+     * decodable codec (hardware or not), `maxFps` = the highest rate the decoder the pane
+     * would open declares for width x height (0 = unknown), `panelHz` = panelMaxHz().
+     */
+    @Command
+    fun decoderCaps(invoke: Invoke) {
+        val a = try { invoke.parseArgs(DecoderCapsArgs::class.java) } catch (_: Exception) { DecoderCapsArgs() }
+        val hw = JSArray(); val sw = JSArray(); val maxFps = JSObject()
+        try {
+            for ((name, mime) in DecoderProbe.CODECS) {
+                val all = DecoderProbe.decodersFor(mime)
+                if (all.isEmpty()) continue
+                sw.put(name)
+                val hwInfo = all.firstOrNull { DecoderProbe.isHardware(it) }
+                if (hwInfo != null) hw.put(name)
+                val use = hwInfo ?: DecoderProbe.pickDecoder(mime) ?: all.first()
+                val f = DecoderProbe.maxFps(use, mime, a.width, a.height)
+                maxFps.put(name, f)
+                Log.i(TAG, "decoderCaps $name: hw=${hwInfo?.name} use=${use.name} maxFps=$f @${a.width}x${a.height}")
             }
-        } catch (e: Exception) { 60f }
-        val r = JSObject(); r.put("ok", true); r.put("detail", hz.toString()); invoke.resolve(r)
+        } catch (e: Exception) { Log.w(TAG, "decoderCaps error", e) }
+        val r = JSObject()
+        r.put("ok", true); r.put("hw", hw); r.put("sw", sw); r.put("maxFps", maxFps)
+        r.put("panelHz", Math.round(panelMaxHz()))
+        invoke.resolve(r)
+    }
+
+    // ---------------- physical gamepads (3.1) ----------------
+
+    /** Captures pads only while a stream is on screen (see PadInput). */
+    private val padInput by lazy { PadInput(activity) { panes.any { it.active } } }
+
+    /** Native-only: the Rust loopback port that receives pad state (pad_feed.rs). */
+    @Command
+    fun padFeedStart(invoke: Invoke) {
+        val a = invoke.parseArgs(PadFeedArgs::class.java)
+        if (a.port in 1..65535) padInput.start(a.port)
+        val r = JSObject(); r.put("ok", a.port in 1..65535); invoke.resolve(r)
+    }
+
+    /** Native-only: host rumble (DataMsg::Rumble) for pad `pad`. */
+    @Command
+    fun padRumble(invoke: Invoke) {
+        val a = invoke.parseArgs(PadRumbleArgs::class.java)
+        activity.runOnUiThread { padInput.rumble(a.pad, a.large, a.small) }
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    // ---------------- display refresh vote (1.3) ----------------
+
+    /** Stream fps per slot (0 = none); the display vote follows the highest active one. */
+    private val streamFps = IntArray(MAX_PANES)
+    private val voteHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val clearVote = Runnable { applyFrameRateVote() }
+    private var appliedModeId = 0
+
+    /**
+     * Native-only: the stream on `slot` runs at `fps` — vote for a matching display refresh.
+     * Surface.setFrameRate(FIXED_SOURCE) on the pane's SurfaceView (API 30+; on API 31+ with
+     * CHANGE_FRAME_RATE_ALWAYS, which also lifts an LTPO panel off its idle rate), and
+     * preferredDisplayModeId before API 31 or for a TextureView pane (no own layer to vote
+     * with). Mode choice follows Moonlight (Game.prepareDisplayForRendering): the highest
+     * same-resolution mode whose rate the fps divides evenly (120 Hz for 60 fps, never a
+     * 3:2-judder 90 Hz), else the highest mode. fps 0 drops the vote.
+     */
+    @Command
+    fun setStreamFps(invoke: Invoke) {
+        val a = invoke.parseArgs(StreamFpsArgs::class.java)
+        streamFps[a.slot.coerceIn(0, MAX_PANES - 1)] = a.fps.coerceAtLeast(0)
+        activity.runOnUiThread {
+            voteHandler.removeCallbacks(clearVote)
+            applyFrameRateVote()
+            val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+        }
+    }
+
+    /** UI thread. */
+    private fun applyFrameRateVote() {
+        val fps = (0 until MAX_PANES).filter { panes[it].active }.maxOfOrNull { streamFps[it] } ?: 0
+        val win = activity.window ?: return
+        try {
+            val lp = win.attributes
+            if (fps <= 0) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && appliedModeId != 0 && lp.preferredDisplayModeId == appliedModeId) {
+                    lp.preferredDisplayModeId = 0
+                    win.attributes = lp
+                    Log.i(TAG, "refresh vote cleared")
+                }
+                appliedModeId = 0
+                return
+            }
+            val d = currentDisplay() ?: return
+            var desired = fps.toFloat()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val modes = sameSizeModes(d)
+                val good = modes.filter { Math.round(it.refreshRate) >= fps && Math.round(it.refreshRate) % fps <= 3 }
+                val best = good.maxByOrNull { it.refreshRate } ?: modes.maxByOrNull { it.refreshRate } ?: d.mode
+                // Report the mode's rate (not the stream fps) so the OS keeps the panel at it:
+                // the lowest-latency choice, Moonlight's default (no refresh reduction).
+                if (Math.round(best.refreshRate) >= fps) desired = best.refreshRate
+                val texture = panes.any { it.active && it.surfaceView is TextureView }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || texture) {
+                    if (lp.preferredDisplayModeId != best.modeId) {
+                        lp.preferredDisplayModeId = best.modeId
+                        win.attributes = lp
+                    }
+                    appliedModeId = best.modeId
+                }
+                Log.i(TAG, "refresh vote: stream $fps fps -> mode ${best.physicalWidth}x${best.physicalHeight}@${best.refreshRate} (frameRate=$desired, texture=$texture)")
+            }
+            panes.forEach { if (it.active) it.applyFrameRate(desired) }
+        } catch (e: Exception) { Log.w(TAG, "refresh vote failed: ${e.message}") }
     }
 
     /** Connected gamepad/joystick controllers + battery level (0–100, or -1 if
@@ -2065,6 +2321,28 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         // read loop polls it (decoderStatus command) and requests a host IDR so the fresh
         // decoder gets a reference frame immediately instead of at the 10 s safety GOP.
         @Volatile var decoderFailed = false
+        // Display refresh vote for this pane's surface (1.3); 0 = none.
+        private var voteRate = 0f
+
+        /** Surface.setFrameRate on a SurfaceView surface (API 30+). A TextureView's surface
+         *  is not a compositor layer — its vote goes through preferredDisplayModeId instead. */
+        fun applyFrameRate(rate: Float) {
+            voteRate = rate
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || surfaceView !is SurfaceView) return
+            val s = surface ?: return // applied from surfaceCreated once the surface exists
+            try {
+                if (!s.isValid) return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    s.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE, Surface.CHANGE_FRAME_RATE_ALWAYS)
+                } else {
+                    s.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                }
+            } catch (e: Exception) { Log.w(TAG, "slot $slot setFrameRate($rate) failed: ${e.message}") }
+        }
+
+        // The low-latency options level the current codec configured at (2.20 try memory).
+        private var lastTryKey: String? = null
+        private var lastTry = 0
 
         // ── Decoupled decode feed (Moonlight-style) ─────────────────────────────
         // feedAu() enqueues + returns IMMEDIATELY; this dedicated thread drains the
@@ -2389,6 +2667,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 sv.holder.addCallback(object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {
                         surface = holder.surface
+                        if (voteRate > 0f) applyFrameRate(voteRate)
                         if (pendingCanned) { pendingCanned = false; startCanned(holder.surface) }
                         synchronized(lock) { if (mime != null && !configured && canConfigure()) configure() }
                     }
@@ -2419,6 +2698,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         fun feed(au: ByteArray): Boolean = synchronized(lock) {
+            val wasConfigured = configured
             try {
                 if (!configured) { collectParams(au); if (canConfigure()) configure() }
                 if (configured) feedAndDrain(au)
@@ -2429,6 +2709,17 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 // The reliable recovery channel: the Rust read loop polls this flag
                 // (decoderStatus) and requests a host IDR (trigger() events don't arrive).
                 decoderFailed = true
+                // A decoder that configured fine and then died while decoding: drop one level
+                // of low-latency options for its next configure (Moonlight lowers them after a
+                // crash too). Capped at 4 so the picked hardware decoder stays in use (try 5 is
+                // the createDecoderByType fallback).
+                if (wasConfigured) lastTryKey?.let { k ->
+                    val next = (lastTry + 1).coerceAtMost(4)
+                    if ((decoderStartTry[k] ?: 0) < next) {
+                        decoderStartTry[k] = next
+                        Log.w(TAG, "slot $slot decoder $k failed at try $lastTry: next configure starts at try $next")
+                    }
+                }
                 // Release the broken codec so the next AU triggers a fresh configure()
                 releaseCodec()
             }
@@ -2521,7 +2812,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             // Qualcomm vendor.qti-ext-dec-low-latency) are what actually make HW decoders
             // emit frames immediately — KEY_LOW_LATENCY alone is widely IGNORED, so the
             // decoder otherwise buffers a deep queue = the visible lag.
-            for (tryNumber in 0..5) {
+            // 2.20: start at the options level that last WORKED for this decoder (not 0 every
+            // time): a runtime failure moved it one step less aggressive (feed()), and a
+            // reconfigure must not walk back into the option set that just broke it.
+            val tryKey = pickedName ?: m
+            val firstTry = (decoderStartTry[tryKey] ?: 0).coerceIn(0, 5)
+            for (tryNumber in firstTry..5) {
                 var c: MediaCodec? = null
                 try {
                     // A10: instantiate the explicitly-picked HW decoder BY NAME (so the vendor
@@ -2537,6 +2833,8 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                     c.start()
                     codec = c
                     configured = true
+                    decoderStartTry[tryKey] = tryNumber
+                    lastTryKey = tryKey; lastTry = tryNumber
                     Log.i(TAG, "slot $slot decoder=${c.name} configured (try=$tryNumber, m=$m)")
                     return
                 } catch (e: Exception) {
@@ -2556,23 +2854,10 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
          * Picked by NAME (not createDecoderByType) so the vendor low-latency keying — which
          * switches on the decoder name — still targets the HW decoder.
          */
-        private fun pickDecoderName(m: String): String? {
-            return try {
-                var fallback: String? = null
-                for (info in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
-                    if (info.isEncoder) continue
-                    if (!info.supportedTypes.any { it.equals(m, ignoreCase = true) }) continue
-                    val lower = info.name.lowercase()
-                    if (lower.startsWith("c2.android.") || lower.startsWith("omx.google.")) continue // software
-                    // isHardwareAccelerated is API 29+; on older APIs accept any non-software codec.
-                    val hw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) info.isHardwareAccelerated else true
-                    if (hw) return info.name
-                    if (fallback == null) fallback = info.name
-                }
-                fallback
-            } catch (e: Exception) {
-                Log.w(TAG, "slot $slot pickDecoderName error", e); null
-            }
+        private fun pickDecoderName(m: String): String? = try {
+            DecoderProbe.pickDecoder(m)?.name
+        } catch (e: Exception) {
+            Log.w(TAG, "slot $slot pickDecoderName error", e); null
         }
 
         /** Base MediaFormat (csd + HDR color) — rebuilt fresh for each configure attempt.
@@ -2640,9 +2925,15 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 fmt.setInteger("vdec-lowlatency", 1) // MediaTek / Amlogic legacy AOSP key
             }
             if (tryNumber < 3 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // Decode ASAP — don't pace output to the (faked 30fps) input PTS.
-                fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
-                fmt.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                // Moonlight's per-vendor gate (MediaCodecHelper.decoderSupportsMaxOperatingRate):
+                // OPERATING_RATE=MAX (decode ASAP, don't pace output to the input PTS) only on
+                // Qualcomm minus Adreno 620 SoCs; realtime PRIORITY=0 everywhere else. Never both:
+                // a decoder asked for realtime priority at a rate it can't meet crashes.
+                if (DecoderProbe.supportsMaxOperatingRate(decName)) {
+                    fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+                } else {
+                    fmt.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 when {
@@ -2884,6 +3175,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             }
             surfaceView?.let { (it.parent as? ViewGroup)?.removeView(it) }
             surfaceView = null; surface = null; lastFormat = null
+            voteRate = 0f
         }
 
         // canned clip (M3), slot 0 only

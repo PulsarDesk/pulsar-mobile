@@ -48,6 +48,20 @@ object NotifI18n {
                 "tr" -> "Paylaşımı durdur"; "ru" -> "Остановить"
                 "kk" -> "Тоқтату"; else -> "Stop sharing"
             }
+            "projStoppedTitle" -> when (l) {
+                "tr" -> "Ekran paylaşımı durdu"; "ru" -> "Трансляция экрана остановлена"
+                "kk" -> "Экран бөлісу тоқтады"; else -> "Screen sharing stopped"
+            }
+            "projStoppedText" -> when (l) {
+                "tr" -> "Paylaşım telefonda durduruldu ve bağlantı kapandı. Biri yeniden bağlandığında izin tekrar istenecek."
+                "ru" -> "Трансляция остановлена на телефоне, подключение закрыто. При новом подключении разрешение будет запрошено снова."
+                "kk" -> "Бөлісу телефонда тоқтатылды, қосылым жабылды. Қайта қосылғанда рұқсат қайтадан сұралады."
+                else -> "Sharing was stopped on the phone and the connection closed. Permission is asked again on the next connection."
+            }
+            "projStoppedPeer" -> when (l) {
+                "tr" -> "Telefonda ekran paylaşımı durduruldu"; "ru" -> "На телефоне остановлена трансляция экрана"
+                "kk" -> "Телефонда экран бөлісу тоқтатылды"; else -> "Screen sharing was stopped on the phone"
+            }
             else -> key
         }
     }

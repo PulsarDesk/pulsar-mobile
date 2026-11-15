@@ -393,9 +393,30 @@ pub async fn set_play_codec<R: Runtime>(
     codec: String,
 ) -> Result<(), String> {
     let mut req = build_patch(&app, slot)?;
-    req.codec = codec.clone();
-    req.decode_codecs = vec![codec];
+    // "auto" re-resolves to the connect-time auto choice: `decode_codecs` is kept in that
+    // order (decode_caps::pick_codec). Sending "auto" itself made the host pick its default
+    // while the phone armed an H.264 decoder. The list stays the full decodable set (not
+    // just this codec) so the host's codec fallback keeps to what the phone can show.
+    let codec = if codec.is_empty() || codec == "auto" {
+        req.decode_codecs.first().cloned().unwrap_or_else(|| "h264".into())
+    } else {
+        codec
+    };
+    if !req.decode_codecs.contains(&codec) {
+        req.decode_codecs.push(codec.clone());
+    }
+    req.codec = codec;
+    let requested = req.fps;
+    fit_fps(&app, &mut req, requested);
     push_restream(&app, slot, req).await
+}
+
+/// Cap `req.fps` to what this phone's decoder declares for `req.codec` at the request's
+/// size (audit 1.3) — the same rule the connect uses, so a mid-session change can't exceed
+/// it either. `requested` 0 = "unlimited" = the panel's highest refresh.
+fn fit_fps<R: Runtime>(app: &AppHandle<R>, req: &mut StreamReq, requested: u32) {
+    let caps = crate::decode_caps::query(app, req.width, req.height);
+    req.fps = crate::decode_caps::effective_fps(requested, &req.codec, &caps);
 }
 
 /// Change the encode bitrate (kbps) for the active stream on `slot`.
@@ -422,7 +443,7 @@ pub async fn set_play_fps<R: Runtime>(
     fps: u32,
 ) -> Result<(), String> {
     let mut req = build_patch(&app, slot)?;
-    req.fps = fps;
+    fit_fps(&app, &mut req, fps);
     push_restream(&app, slot, req).await
 }
 
@@ -439,6 +460,9 @@ pub async fn set_play_resolution<R: Runtime>(
     let mut req = build_patch(&app, slot)?;
     req.width = width;
     req.height = height;
+    // A bigger size can lower the decoder's rate limit.
+    let requested = req.fps;
+    fit_fps(&app, &mut req, requested);
     push_restream(&app, slot, req).await
 }
 
