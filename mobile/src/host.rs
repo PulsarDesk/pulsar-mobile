@@ -813,9 +813,15 @@ pub async fn go_online<R: Runtime>(
                                                 continue;
                                             }
                                         }
-                                        InputEvent::PointerButton { down, .. } => {
+                                        // The Android pointer has one button (a tap / drag):
+                                        // left, right and middle press it as before; ids past
+                                        // that (3 = back, 4 = forward, sent only to hosts that
+                                        // advertise FEAT_MOUSE_X, which this one does not) and
+                                        // unknown ids are ignored, never a tap.
+                                        InputEvent::PointerButton { button, down } if button <= 2 => {
                                             let _ = app_in.pulsar_video().host_pointer_button(down);
                                         }
+                                        InputEvent::PointerButton { .. } => {}
                                         InputEvent::Scroll { dx, dy } => {
                                             let _ = app_in.pulsar_video().host_scroll(dx, dy);
                                         }
