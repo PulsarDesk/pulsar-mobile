@@ -1882,6 +1882,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             )
             .setBufferSizeInBytes(maxOf(minBuf, targetBuf))
             .setTransferMode(AudioTrack.MODE_STREAM)
+            // Ask for the low-latency (FAST mixer) output path where the device has one
+            // (hidden-gaps 1.11d); the buffer size above still bounds the queue. API 26+.
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                }
+            }
             .build()
             .also { it.setVolume(audioGain); it.play() }
         audioConfigured = true
