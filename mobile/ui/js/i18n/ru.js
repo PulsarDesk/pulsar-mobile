@@ -485,8 +485,10 @@ export default {
 	"m.input.title": "Касания и клавиши не доходят до другой стороны",
 	"m.input.uinput_denied": "на Linux нет доступа к /dev/uinput (нет правила udev)",
 	"m.input.mac_accessibility": "у Pulsar на Mac нет разрешения «Универсальный доступ»",
-	"m.input.win_elevated": "активное окно запущено от администратора, а Pulsar там — нет",
+	"m.input.win_elevated": "окно, которого вы касаетесь или в которое печатаете, запущено от имени администратора, а Pulsar там — нет",
+	"m.input.win_secure_desktop": "на той стороне открыт запрос UAC или экран блокировки; без вспомогательной службы Pulsar ввод туда не доходит",
 	"m.input.android_control_off": "на телефоне выключена служба управления Pulsar (Спец. возможности)",
+	"m.input.android_control_missing": "эту сборку Pulsar на телефоне нельзя контролировать удалённо; установите версию host-control",
 	"m.input.unavailable": "другая сторона не может передать ввод на устройство",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---

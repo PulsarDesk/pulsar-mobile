@@ -632,19 +632,12 @@ pub async fn go_online<R: Runtime>(
                         // their own clones): a kicked client is told with an explicit Bye.
                         let bye_sender = sender.clone();
                         // Remote control needs the control AccessibilityService. When it is
-                        // off (or this build has none) the client's taps and keys vanish:
-                        // tell it at once, and again on a press when it was switched off
-                        // mid-session (control_notice; at most once a minute).
+                        // off (or this build has none) the client's taps and keys vanish: tell
+                        // it on a press (ControlNotice; at most once a minute). Not at accept
+                        // time: the client is then still in its caps / probe exchange, which
+                        // drops every other message, and a metadata-only connection (the game
+                        // library fetch) never sends input at all.
                         let notice_sender = sender.clone();
-                        {
-                            let app_c = app3.clone();
-                            let tell = sender.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if !control_on(&app_c) {
-                                    tell_control_off(&tell).await;
-                                }
-                            });
-                        }
                         // NACK retransmit: the client re-requests lost RTP seqs. Without this a
                         // single dropped packet corrupted the frame's trailing slices (bottom
                         // rows) until the next keyframe. Keep a small seq→datagram ring and resend
@@ -808,10 +801,11 @@ pub async fn go_online<R: Runtime>(
                                     ev,
                                     InputEvent::PointerButton { down: true, .. } | InputEvent::Key { down: true, .. }
                                 ) && control.due(std::time::Instant::now())
-                                    && !control_on(&app_in)
                                 {
-                                    control.told(std::time::Instant::now());
-                                    tell_control_off(&notice_sender).await;
+                                    if let Some(f) = control_failure(&app_in) {
+                                        control.told(std::time::Instant::now());
+                                        tell_control_off(&notice_sender, f).await;
+                                    }
                                 }
                                 loop {
                                     match ev {
@@ -1074,17 +1068,26 @@ pub async fn disconnect_session<R: Runtime>(app: AppHandle<R>, sid: u32) -> Resu
 
 // ── Control-service notice (DataMsg::InputUnavailable) ──────────────────────
 
-/// Whether remote control can reach this phone: the control AccessibilityService is in this
-/// build and enabled.
-fn control_on<R: Runtime>(app: &AppHandle<R>) -> bool {
+/// Why remote control cannot reach this phone, if it cannot: this build has no control
+/// AccessibilityService (the default release APK; only the host-control build has it, so
+/// "switch it on" would not help), or it is there but off. `None` = control works.
+fn control_failure<R: Runtime>(app: &AppHandle<R>) -> Option<pulsar_core::input::InputFailure> {
+    use pulsar_core::input::InputFailure;
     let v = app.pulsar_video();
-    v.a11y_available().map(|r| r.ok).unwrap_or(false) && v.a11y_enabled().map(|r| r.ok).unwrap_or(false)
+    if !v.a11y_available().map(|r| r.ok).unwrap_or(false) {
+        Some(InputFailure::AndroidControlMissing)
+    } else if !v.a11y_enabled().map(|r| r.ok).unwrap_or(false) {
+        Some(InputFailure::AndroidControlOff)
+    } else {
+        None
+    }
 }
 
-/// Tell the client its input does not reach this phone (it shows a localized notice).
-async fn tell_control_off(sender: &pulsar_core::SessionSender) {
-    log::warn!("pulsar host: control service off → client notice");
-    let reason = pulsar_core::input::InputFailure::AndroidControlOff.as_wire().to_string();
+/// Tell the client its input does not reach this phone, and why (it shows a localized notice;
+/// an old client shows its generic text for a token it does not know).
+async fn tell_control_off(sender: &pulsar_core::SessionSender, f: pulsar_core::input::InputFailure) {
+    log::warn!("pulsar host: remote control unavailable ({}) → client notice", f.as_wire());
+    let reason = f.as_wire().to_string();
     let _ = pulsar_core::service::send_data_via(sender, &pulsar_core::service::DataMsg::InputUnavailable { reason }).await;
 }
 

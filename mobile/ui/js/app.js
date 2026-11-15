@@ -574,7 +574,7 @@ function wireTouchForwarding() {
 	// of leaving a picture that ignores every tap. The host rate-limits these.
 	(() => {
 		if (!hasTauri) return;
-		const REASONS = ['uinput_denied', 'mac_accessibility', 'win_elevated', 'android_control_off'];
+		const REASONS = ['uinput_denied', 'mac_accessibility', 'win_elevated', 'win_secure_desktop', 'android_control_off', 'android_control_missing'];
 		const { listen } = window.__TAURI__.event;
 		listen('input-unavailable', (e) => {
 			const p = e.payload || {};

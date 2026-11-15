@@ -489,8 +489,10 @@ export default {
 	"m.input.title": "Dokunma ve klavye karşı tarafa ulaşmıyor",
 	"m.input.uinput_denied": "Linux'ta /dev/uinput erişimi yok (udev kuralı eksik)",
 	"m.input.mac_accessibility": "Mac'te Pulsar'a Erişilebilirlik izni verilmemiş",
-	"m.input.win_elevated": "öndeki pencere yönetici olarak çalışıyor, Pulsar orada yönetici değil",
+	"m.input.win_elevated": "dokunduğun ya da yazdığın pencere yönetici olarak çalışıyor, Pulsar orada yönetici değil",
+	"m.input.win_secure_desktop": "karşı tarafta UAC onayı ya da kilit ekranı açık; Pulsar yardımcı hizmeti olmadan oraya giriş gitmiyor",
 	"m.input.android_control_off": "telefonda Pulsar kontrol hizmeti (Erişilebilirlik) kapalı",
+	"m.input.android_control_missing": "telefondaki Pulsar sürümü uzaktan kontrol edilemiyor; telefona host-control sürümünü kur",
 	"m.input.unavailable": "karşı taraf girişi cihaza iletemiyor",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---

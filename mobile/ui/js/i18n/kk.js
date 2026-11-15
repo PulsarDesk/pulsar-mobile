@@ -485,8 +485,10 @@ export default {
 	"m.input.title": "Түрту мен пернелер қарсы жаққа жетпейді",
 	"m.input.uinput_denied": "Linux-та /dev/uinput қолжетімсіз (udev ережесі жоқ)",
 	"m.input.mac_accessibility": "Mac-та Pulsar-ға Арнайы мүмкіндіктер рұқсаты берілмеген",
-	"m.input.win_elevated": "алдыңғы терезе әкімші ретінде іске қосылған, ал Pulsar онда әкімші емес",
+	"m.input.win_elevated": "сіз түртетін не жазатын терезе әкімші ретінде іске қосылған, ал Pulsar онда әкімші емес",
+	"m.input.win_secure_desktop": "арғы жақта UAC сұрауы немесе құлып экраны ашық; Pulsar көмекші қызметінсіз енгізу оған жетпейді",
 	"m.input.android_control_off": "телефонда Pulsar басқару қызметі (Арнайы мүмкіндіктер) өшірулі",
+	"m.input.android_control_missing": "телефондағы бұл Pulsar нұсқасын қашықтан басқару мүмкін емес; host-control нұсқасын орнатыңыз",
 	"m.input.unavailable": "қарсы жақ енгізуді құрылғыға жеткізе алмайды",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
