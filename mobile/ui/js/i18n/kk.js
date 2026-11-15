@@ -482,6 +482,12 @@ export default {
 	"m.settings.hostCursor": "Қарсы жақтың курсорын көрсету",
 	"m.settings.hostCursorHint": "Қашықтағы жұмыс үстелінде хосттағы адам өз тінтуірін қолданғанда оның курсоры «Host» белгісімен көрінеді.",
 	"m.hostptr.notice": "Қарсы жақ тінтуірді қолданып жатыр",
+	"m.input.title": "Түрту мен пернелер қарсы жаққа жетпейді",
+	"m.input.uinput_denied": "Linux-та /dev/uinput қолжетімсіз (udev ережесі жоқ)",
+	"m.input.mac_accessibility": "Mac-та Pulsar-ға Арнайы мүмкіндіктер рұқсаты берілмеген",
+	"m.input.win_elevated": "алдыңғы терезе әкімші ретінде іске қосылған, ал Pulsar онда әкімші емес",
+	"m.input.android_control_off": "телефонда Pulsar басқару қызметі (Арнайы мүмкіндіктер) өшірулі",
+	"m.input.unavailable": "қарсы жақ енгізуді құрылғыға жеткізе алмайды",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Дыбыс",

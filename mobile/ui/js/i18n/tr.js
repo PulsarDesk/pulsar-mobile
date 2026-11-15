@@ -486,6 +486,12 @@ export default {
 	"m.settings.hostCursor": "Karşı tarafın imlecini göster",
 	"m.settings.hostCursorHint": "Uzak masaüstünde karşıdaki kişi kendi faresini kullanırken onun imleci «Host» etiketiyle işaretlenir.",
 	"m.hostptr.notice": "Karşı taraf fareyi kullanıyor",
+	"m.input.title": "Dokunma ve klavye karşı tarafa ulaşmıyor",
+	"m.input.uinput_denied": "Linux'ta /dev/uinput erişimi yok (udev kuralı eksik)",
+	"m.input.mac_accessibility": "Mac'te Pulsar'a Erişilebilirlik izni verilmemiş",
+	"m.input.win_elevated": "öndeki pencere yönetici olarak çalışıyor, Pulsar orada yönetici değil",
+	"m.input.android_control_off": "telefonda Pulsar kontrol hizmeti (Erişilebilirlik) kapalı",
+	"m.input.unavailable": "karşı taraf girişi cihaza iletemiyor",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Ses",

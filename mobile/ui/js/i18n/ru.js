@@ -482,6 +482,12 @@ export default {
 	"m.settings.hostCursor": "Показывать курсор другой стороны",
 	"m.settings.hostCursorHint": "В удалённом рабочем столе, пока человек у хоста пользуется своей мышью, его курсор помечен «Host».",
 	"m.hostptr.notice": "Другая сторона пользуется мышью",
+	"m.input.title": "Касания и клавиши не доходят до другой стороны",
+	"m.input.uinput_denied": "на Linux нет доступа к /dev/uinput (нет правила udev)",
+	"m.input.mac_accessibility": "у Pulsar на Mac нет разрешения «Универсальный доступ»",
+	"m.input.win_elevated": "активное окно запущено от администратора, а Pulsar там — нет",
+	"m.input.android_control_off": "на телефоне выключена служба управления Pulsar (Спец. возможности)",
+	"m.input.unavailable": "другая сторона не может передать ввод на устройство",
 
 	// --- overlay cards (audio / display / quality) — added for i18n coverage ---
 	"audio.cardLabel": "Звук",
