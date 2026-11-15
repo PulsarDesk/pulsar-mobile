@@ -766,6 +766,9 @@ pub async fn go_online<R: Runtime>(
                             let aport = if req.transmit_audio { audio_port } else { 0 };
                             // Loss-recovery mode for the encoder (applied when the encoder is
                             // (re)created; a running MediaCodec keeps its GOP — see the plugin).
+                            // Read NOW, not in the spawned task: a teardown that stops the host
+                            // after this request makes this start stale (see host_epoch).
+                            let epoch = tauri_plugin_pulsar_video::host_epoch();
                             let recovery = match req.loss_recovery {
                                 pulsar_core::service::LossRecovery::Normal => "normal",
                                 pulsar_core::service::LossRecovery::ShortGop => "short_gop",
@@ -774,7 +777,7 @@ pub async fn go_online<R: Runtime>(
                             tauri::async_runtime::spawn(async move {
                                 let _ = app5
                                     .pulsar_video()
-                                    .start_host(video_port, aport, &codec, w, h, fps, kbps, recovery);
+                                    .start_host(video_port, aport, &codec, w, h, fps, kbps, recovery, epoch);
                             });
                         };
 

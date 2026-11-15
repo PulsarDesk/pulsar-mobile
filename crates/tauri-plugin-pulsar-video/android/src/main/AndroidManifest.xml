@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep-awake: the client's Wi-Fi low-latency lock during a stream and the host's screen
+         wake lock while this phone shares its screen. Normal-level, no prompt. Without it every
+         WakeLock / WifiLock acquire throws SecurityException (so the Wi-Fi lock never worked
+         before this was declared). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- LAN discovery: pulsar-core's Discovery listens on UDP multicast 239.255.71.21.
          Android drops INBOUND multicast unless the app holds a WifiManager.MulticastLock,
          which requires CHANGE_WIFI_MULTICAST_STATE (+ ACCESS_WIFI_STATE to get the

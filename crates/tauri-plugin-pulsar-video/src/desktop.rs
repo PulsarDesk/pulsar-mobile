@@ -46,7 +46,7 @@ impl<R: Runtime> PulsarVideo<R> {
     Ok(false)
   }
   #[allow(clippy::too_many_arguments)]
-  pub fn start_host(&self, _port: u16, _audio_port: u16, _codec: &str, _w: u32, _h: u32, _fps: u32, _kbps: u32, _loss_recovery: &str) -> crate::Result<AttachResponse> {
+  pub fn start_host(&self, _port: u16, _audio_port: u16, _codec: &str, _w: u32, _h: u32, _fps: u32, _kbps: u32, _loss_recovery: &str, _epoch: u64) -> crate::Result<AttachResponse> {
     Self::noop("no screen capture host on desktop")
   }
   pub fn stop_host(&self) -> crate::Result<AttachResponse> {

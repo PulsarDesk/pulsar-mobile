@@ -12,3 +12,28 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
 - `crates/tauri-plugin-pulsar-video/` — the native surface plugin.
   `PulsarVideoPlugin.kt` (~2.8k lines) is the center of gravity.
 - Deps: `pulsar-core` + `pulsar-relay` as **git deps**.
+
+## Keep-awake (Android, `PulsarVideoPlugin.kt`)
+
+Untested on a device. `WAKE_LOCK` is declared in the plugin manifest; before that, every
+WakeLock / WifiLock acquire threw, so these locks are new on every device:
+
+- **Client** (`acquirePerfLocks`, from attach to detach): `FLAG_KEEP_SCREEN_ON` (screen never
+  times out during a stream), sustained-performance mode, and a Wi-Fi lock
+  (`WIFI_MODE_FULL_LOW_LATENCY` on Android 10+, `FULL_HIGH_PERF` before) — the Wi-Fi lock is
+  newly active. No PARTIAL wake lock: with the screen turned off by the power button it would
+  keep the stream running with no limit.
+- **Host** (`startHost` .. `stopHost`): a `SCREEN_DIM_WAKE_LOCK`, so the shared screen does not
+  time out and lock mid-session (the app is in the background, the window flag does not
+  apply). The power button still turns it off. Start/stop are ordered by a host epoch
+  (`tauri_plugin_pulsar_video::host_epoch`): a start older than the last stop — a late
+  re-stream request, or a permission dialog answered after the client left — is skipped, so
+  the lock cannot outlive its session.
+- **Gap vs the desktop client** (`pulsar-desktop/src-tauri/src/keep_awake.rs`,
+  `power_watch.rs`): the Android client has no input-idle expiry (the desktop drops its
+  display hold 30 min after the last input) and does not end a stream when its screen turns
+  off or the phone locks (FGS + audio playback keep it running). A phone left connected on a
+  stand therefore keeps itself and the HOST awake (the host holds its display + system awake
+  while any stream runs) until the session ends some other way. Follow-up: a mobile
+  power-watch (end on `ACTION_SCREEN_OFF`, reconnect on unlock) plus the desktop's idle expiry
+  for `FLAG_KEEP_SCREEN_ON`.

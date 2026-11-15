@@ -106,16 +106,19 @@ impl<R: Runtime> PulsarVideo<R> {
   /// (MediaCodec), packetize to RTP, and send it to `port` on loopback.
   /// `loss_recovery`: `normal` / `short_gop` / `intra_refresh` — applied when the encoder
   /// is created (a running MediaCodec keeps its GOP; recovery there is the on-demand IDR).
+  /// `epoch` = [`crate::host_epoch`] read when the stream request arrived: the plugin skips
+  /// the start if a `stop_host` came after it.
   #[allow(clippy::too_many_arguments)]
-  pub fn start_host(&self, port: u16, audio_port: u16, codec: &str, width: u32, height: u32, fps: u32, bitrate_kbps: u32, loss_recovery: &str) -> crate::Result<AttachResponse> {
+  pub fn start_host(&self, port: u16, audio_port: u16, codec: &str, width: u32, height: u32, fps: u32, bitrate_kbps: u32, loss_recovery: &str, epoch: u64) -> crate::Result<AttachResponse> {
     self
       .0
-      .run_mobile_plugin("startHost", HostArgs { port, audio_port, codec, width, height, fps, bitrate_kbps, loss_recovery })
+      .run_mobile_plugin("startHost", HostArgs { port, audio_port, codec, width, height, fps, bitrate_kbps, loss_recovery, epoch })
       .map_err(Into::into)
   }
 
   pub fn stop_host(&self) -> crate::Result<AttachResponse> {
-    self.0.run_mobile_plugin("stopHost", ()).map_err(Into::into)
+    let epoch = crate::next_host_epoch();
+    self.0.run_mobile_plugin("stopHost", StopHostArgs { epoch }).map_err(Into::into)
   }
 
   /// Inject a tap/swipe into this device (normalized 0..1 coords) via the
@@ -512,6 +515,12 @@ struct HostArgs<'a> {
   fps: u32,
   bitrate_kbps: u32,
   loss_recovery: &'a str,
+  epoch: u64,
+}
+
+#[derive(Serialize)]
+struct StopHostArgs {
+  epoch: u64,
 }
 
 #[derive(Serialize)]
