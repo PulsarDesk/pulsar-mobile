@@ -167,6 +167,43 @@ fn normalise_codec_name(raw: &str) -> String {
     }
 }
 
+/// Wire scroll (browser px, 100 per notch) → whole notches for the plugin's `hostScroll`,
+/// which turns EVERY call into one ~0.6-screen accessibility swipe (and a new swipe cancels
+/// the one still running). A hi-res wheel (Linux evdev `REL_WHEEL_HI_RES`, Windows
+/// precision touchpad, Interception) sends ~8 × 12.5 px per notch: without this that was 8
+/// overlapping swipes per notch instead of one. The sub-notch remainder carries (trunc keeps
+/// the direction); a reversal drops the other direction's remainder. Horizontal notches are
+/// passed on too, but the Kotlin `hostScroll` still ignores `dx` (no horizontal swipe yet).
+#[derive(Default, Debug)]
+struct ScrollNotches {
+    x: f64,
+    y: f64,
+}
+
+impl ScrollNotches {
+    const NOTCH_PX: f64 = 100.0;
+
+    /// Feed one (coalesced) wire delta; returns the whole notches to send, in wire px
+    /// (multiples of 100, 0.0 = nothing yet).
+    fn push(&mut self, dx: f64, dy: f64) -> (f64, f64) {
+        fn axis(acc: &mut f64, d: f64) -> f64 {
+            if !d.is_finite() || d == 0.0 {
+                return 0.0;
+            }
+            if *acc != 0.0 && acc.signum() != d.signum() {
+                *acc = 0.0;
+            }
+            *acc += d;
+            // The 1e-9 nudge keeps float drift (8 × 12.5 summing to 99.999…) from holding
+            // a notch back.
+            let n = ((*acc + 1e-9_f64.copysign(*acc)) / ScrollNotches::NOTCH_PX).trunc();
+            *acc -= n * ScrollNotches::NOTCH_PX;
+            n * ScrollNotches::NOTCH_PX
+        }
+        (axis(&mut self.x, dx), axis(&mut self.y, dy))
+    }
+}
+
 /// Probe the Android `MediaCodecList` for supported hardware video encoders and
 /// return an ordered codec list (best first: AV1 > H.265 > H.264).
 ///
@@ -787,6 +824,7 @@ pub async fn go_online<R: Runtime>(
                         let (in_tx, mut in_rx) =
                             tokio::sync::mpsc::unbounded_channel::<InputEvent>();
                         tauri::async_runtime::spawn(async move {
+                            let mut scroll_notches = ScrollNotches::default();
                             while let Some(first) = in_rx.recv().await {
                                 let mut ev = first;
                                 loop {
@@ -817,7 +855,28 @@ pub async fn go_online<R: Runtime>(
                                             let _ = app_in.pulsar_video().host_pointer_button(down);
                                         }
                                         InputEvent::Scroll { dx, dy } => {
-                                            let _ = app_in.pulsar_video().host_scroll(dx, dy);
+                                            // Coalesce a run of scroll deltas, then send whole
+                                            // notches only (see `ScrollNotches`): one swipe per
+                                            // notch, whatever the client's wheel resolution.
+                                            let (mut sx, mut sy) = (dx, dy);
+                                            let mut next = None;
+                                            while let Ok(p) = in_rx.try_recv() {
+                                                if let InputEvent::Scroll { dx, dy } = p {
+                                                    sx += dx;
+                                                    sy += dy;
+                                                } else {
+                                                    next = Some(p);
+                                                    break;
+                                                }
+                                            }
+                                            let (nx, ny) = scroll_notches.push(sx, sy);
+                                            if nx != 0.0 || ny != 0.0 {
+                                                let _ = app_in.pulsar_video().host_scroll(nx, ny);
+                                            }
+                                            if let Some(n) = next {
+                                                ev = n;
+                                                continue;
+                                            }
                                         }
                                         // Keyboard: special keys map to Android navigation
                                         // (Win→Home, Alt+Tab→Recents, Esc→Back) and editing keys
@@ -1109,4 +1168,27 @@ pub async fn set_notif_lang<R: Runtime>(app: AppHandle<R>, lang: String) -> Resu
 #[tauri::command]
 pub async fn notif_permission<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     Ok(app.pulsar_video().notif_permission().map(|r| r.ok).unwrap_or(false))
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::ScrollNotches;
+
+    #[test]
+    fn a_hi_res_notch_is_one_swipe() {
+        let mut s = ScrollNotches::default();
+        let sent: Vec<_> = (0..8).map(|_| s.push(0.0, 12.5)).collect();
+        assert_eq!(sent.iter().filter(|(_, y)| *y != 0.0).count(), 1);
+        assert_eq!(sent[7], (0.0, 100.0));
+        assert_eq!(s.push(0.0, 300.0), (0.0, 300.0)); // plain notches pass straight through
+    }
+
+    #[test]
+    fn a_reversal_drops_the_old_remainder() {
+        let mut s = ScrollNotches::default();
+        assert_eq!(s.push(0.0, 60.0), (0.0, 0.0));
+        assert_eq!(s.push(0.0, -60.0), (0.0, 0.0)); // not +60 - 60 = nothing forever
+        assert_eq!(s.push(0.0, -40.0), (0.0, -100.0));
+        assert_eq!(s.push(-100.0, f64::NAN), (-100.0, 0.0));
+    }
 }
