@@ -1375,7 +1375,10 @@ pub async fn connect_host<R: Runtime>(
         bitrate_kbps: ctl.encoder_kbps(),
         quality: quality_pref,
         hdr,
+        // Real HDR10 / 4:4:4 need a mobile renderer probe first: SDR 4:2:0 for now.
+        hdr10: false,
         yuv444: false,
+        decode_yuv444: Vec::new(),
         decode_codecs: vec![resolved_codec.clone()],
         media_over_session: mos,
         cursor_external: false,
