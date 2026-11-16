@@ -63,7 +63,7 @@ pub fn run() {
         // no incoming-request popup. See `net.rs`.
         .manage(net::SharedNode::default())
         .manage(net::SharedDiscovery::default())
-        // Local relay server task (Settings → Ağ → "Yerel relay").
+        // Local relay server task (Settings → Network → "Local relay").
         .manage(relay_cmds::LocalRelay::default())
         // Physical gamepads: Settings' per-controller host emulation (pad_feed.rs).
         .manage(pad_feed::PadTargets::default())

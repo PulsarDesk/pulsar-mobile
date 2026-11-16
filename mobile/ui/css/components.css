@@ -191,7 +191,7 @@ h2.title {
 body[data-mode="game"] .game-eyebrow { display: block; }
 
 /* ==== Game personality (body[data-mode="game"]) — controller-first, cyan,
- *      pure client: no hosting, so the "Cihazım" tab is dropped. ==== */
+ *      pure client: no hosting, so the "My Device" tab is dropped. ==== */
 /* Drop the host tab; the remaining 3 (connect / settings / devices) space out.
  * The phone nav is a 4-col grid, so re-flow to 3 cols in game mode (the wide
  * sidebar layout is flex, so it needs no column override). */

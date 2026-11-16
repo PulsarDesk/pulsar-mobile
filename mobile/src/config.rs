@@ -47,7 +47,7 @@ pub struct MobileConfig {
     pub device_name: String,
     /// UI language code: `"tr"` | `"en"` | `"ru"` | `"kk"`.
     pub language: String,
-    /// Allow unattended (gözetimsiz) access to this host.
+    /// Allow unattended access to this host.
     pub unattended_access: bool,
     /// Optional standing connect password (empty = OTP-only).
     pub connect_password: String,

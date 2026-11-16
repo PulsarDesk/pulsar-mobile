@@ -112,36 +112,15 @@ function _getSections(mode) {
 	return mode === 'game' ? SECTIONS_GAME : SECTIONS_REMOTE;
 }
 
-// ---- Translation fallbacks (overlay-specific keys not in i18n catalog) ----------
-
-const _LABEL_FALLBACKS = {
-	'm.overlay.sec.stream':      { tr: 'Akış',       en: 'Stream'      },
-	'm.overlay.sec.display':     { tr: 'Görüntü',    en: 'Display'     },
-	'm.overlay.sec.audio':       { tr: 'Ses',        en: 'Audio'       },
-	'm.overlay.sec.tools':       { tr: 'Araçlar',    en: 'Tools'       },
-	'm.overlay.sec.gauges':      { tr: 'Göstergeler',en: 'Gauges'      },
-	'm.overlay.sec.controllers': { tr: 'Kontrolcüler',en: 'Controllers' },
-	'm.overlay.title.remote':    { tr: 'Oturum Kontrolleri', en: 'Session Controls' },
-	'm.overlay.title.game':      { tr: 'Oyun Menüsü',        en: 'Game Menu'        },
-	'm.overlay.close':           { tr: 'Kapat',      en: 'Close'       },
-};
+// ---- Translation -----------------------------------------------------------------
 
 /**
- * Translate with overlay-specific fallbacks.
+ * Translate an overlay key. Every key lives in the i18n catalogs (missing → English).
  * @param {string} key
  * @returns {string}
  */
 function _t(key) {
-	try {
-		const v = t(key);
-		// t() returns the key itself when not found — fall through to our table
-		if (v !== key) return v;
-	} catch (_) {}
-	const fb = _LABEL_FALLBACKS[key];
-	if (!fb) return key;
-	// Detect current lang from the html element or default to 'tr'
-	const htmlLang = (document.documentElement.lang || 'tr').toLowerCase().slice(0, 2);
-	return fb[htmlLang] || fb.tr || key;
+	try { return t(key); } catch (_) { return key; }
 }
 
 // ---- State ----------------------------------------------------------------------

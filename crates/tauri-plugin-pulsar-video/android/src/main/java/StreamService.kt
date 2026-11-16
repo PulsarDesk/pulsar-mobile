@@ -31,7 +31,7 @@ class StreamService : Service() {
         }
         val notif = builder
             .setContentTitle("Pulsar")
-            .setContentText("Uzak oturum aktif")
+            .setContentText(NotifI18n.t(this, "streamActive"))
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()

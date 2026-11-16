@@ -11,7 +11,7 @@
 //! - 8 concurrent in-flight transfers per slot (W4 cap).
 //! - Idle entries (no activity for 60 s) are swept on the next `FileBegin`.
 //! - Total received bytes capped at `MAX_XFER_BYTES` (2 GiB) to prevent OOM.
-//! - Completed file is saved to "Pulsar Alınanlar" inside the app data dir.
+//! - Completed file is saved to "Pulsar Received" inside the app data dir.
 //!
 //! ## Send commands
 //!
@@ -199,7 +199,7 @@ pub struct SendFileResult {
 
 // ── Received-files directory helper ──────────────────────────────────────────
 
-/// Return the directory where received files are saved ("Pulsar Alınanlar").
+/// Return the directory where received files are saved ("Pulsar Received").
 ///
 /// On Android we use `app_data_dir()` (internal private storage, no extra
 /// permissions needed). If the path can't be resolved we fall back to a temp dir.
@@ -209,7 +209,7 @@ fn received_dir<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let dir = base.join("Pulsar Alınanlar");
+    let dir = base.join("Pulsar Received");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -245,7 +245,7 @@ fn sanitize_filename(name: &str) -> String {
     // Must parse as exactly one Normal path component.
     let mut comps = Path::new(&cleaned).components();
     let ok = matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none();
-    if ok && !cleaned.is_empty() { cleaned } else { "dosya".into() }
+    if ok && !cleaned.is_empty() { cleaned } else { "file".into() }
 }
 
 /// Save reassembled file chunks to the received-files dir, dedup-suffixed.

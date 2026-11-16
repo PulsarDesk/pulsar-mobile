@@ -133,7 +133,7 @@ export function refreshNavLabels() {
  *   - syncs the top-bar game toggle (#mode-toggle) pressed state,
  *   - swaps the connect-tab copy (remote vs. game),
  *   - bounces off the host tab when entering game mode (game = pure client, no
- *     hosting — the "Cihazım" tab is hidden by CSS in game mode).
+ *     hosting — the "My Device" tab is hidden by CSS in game mode).
  * @param {'remote'|'game'} m
  */
 export function setMode(m) {

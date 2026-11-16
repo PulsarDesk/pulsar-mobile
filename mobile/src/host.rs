@@ -72,7 +72,7 @@ static ACTIVE_STREAMS: AtomicUsize = AtomicUsize::new(0);
 /// plugin bridge; see `host_codecs`).
 ///
 /// The cache is populated by an explicit JS call to `host_codecs` (typically on
-/// the Cihazım screen before going online), and then consumed by every
+/// the My Device screen before going online), and then consumed by every
 /// `go_online` accept loop when building `StreamCaps`.  A `None` cache means
 /// the probe has never been run: `go_online` falls back to `["h264"]` so
 /// existing unprobed devices keep working.
@@ -241,7 +241,7 @@ impl ScrollNotches {
 /// wired in.
 ///
 /// The result is cached in the managed [`HostCaps`] state and also returned to
-/// the caller so the JS can update the Cihazım screen immediately.
+/// the caller so the JS can update the My Device screen immediately.
 ///
 /// JS: `invoke('host_codecs', {})` → `{codecs: string[]}`
 #[tauri::command]
@@ -310,7 +310,7 @@ pub(crate) struct PeerHandle {
 pub struct HostState {
     /// Cancel the current accept loop (notifying it exits the accept `select!`).
     pub cancel: Arc<Notify>,
-    /// The rotating one-time password shown on the Cihazım screen.
+    /// The rotating one-time password shown on the My Device screen.
     pub otp: Arc<Mutex<String>>,
     /// Active peer sessions: sid → kick handle.
     pub(crate) peers: Mutex<HashMap<u32, PeerHandle>>,
@@ -539,7 +539,7 @@ pub async fn go_online<R: Runtime>(
     let relay_addr: SocketAddr = crate::net::parse_relay(&relay_str).await?;
 
     let dev_name = if name.is_empty() {
-        if cfg.device_name.is_empty() { "Pulsar Telefon".to_string() } else { cfg.device_name.clone() }
+        if cfg.device_name.is_empty() { "Pulsar Phone".to_string() } else { cfg.device_name.clone() }
     } else {
         name
     };
@@ -1243,7 +1243,7 @@ mod control_notice_tests {
 
 // ── open_a11y_settings / a11y_enabled ────────────────────────────────────────
 
-/// Open Android's Accessibility settings (Cihazım → "Kontrolü etkinleştir").
+/// Open Android's Accessibility settings (My Device → "Enable remote control").
 #[tauri::command]
 pub async fn open_a11y_settings<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     Ok(app.pulsar_video().open_a11y_settings().map(|r| r.ok).unwrap_or(false))

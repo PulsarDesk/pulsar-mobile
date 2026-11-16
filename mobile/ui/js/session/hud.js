@@ -3,12 +3,12 @@
  *
  * DT-perf-hud: Compact translucent mono strip showing fps / Mbps / RTT / decode
  * latency, readable at arm's length, safe-area-aware; cyan in game, thin in
- * remote. Plus a first-frame "ilk kare bekleniyor" pulse loader and a mid-session
- * "Yayın durdu" stall overlay over the transparent surface. Collapsible.
+ * remote. Plus a first-frame "waiting for the first frame" pulse loader and a mid-session
+ * "Stream stalled" overlay over the transparent surface. Collapsible.
  *
  * W5-quality-adv addition:
  *   Listens to the `decoder-error` Tauri event (emitted by the plugin's
- *   decoderState path, §2.8) and shows the "yeniden eşitleniyor" resync overlay.
+ *   decoderState path, §2.8) and shows the "resyncing" overlay.
  *   The overlay auto-dismisses after RESYNC_DISMISS_MS (5 s) — long enough for
  *   the W5-rust-session keyframe nudge + MediaCodec reconfigure to complete.
  *   The overlay is also dismissible on the next `play-firstframe` event.
@@ -34,10 +34,10 @@
  *     lightweight (single fixed div).
  *   - The overlay card (registered via registerCard) provides the collapsible
  *     expanded view with all metrics.
- *   - Stall overlay: a full-screen translucent frost layer + "Yayın durdu" text
+ *   - Stall overlay: a full-screen translucent frost layer + "Stream stalled" text
  *     + pulsing ring, matching the connecting screen aesthetic.
  *   - Resync overlay: mirrors the stall overlay with a rotate-arrow icon and
- *     "Yeniden eşitleniyor…" text. Auto-dismiss after RESYNC_DISMISS_MS.
+ *     "Resyncing…" text. Auto-dismiss after RESYNC_DISMISS_MS.
  *   - First-frame loader: covers the native video surface until the first AU
  *     arrives. Fades out on play-firstframe.
  *   - Both remote (indigo) and game (cyan) personalities handled via var(--brand).
@@ -961,7 +961,7 @@ if (document.readyState === 'loading') {
 // ---------------------------------------------------------------------------
 
 /**
- * Show the "yeniden eşitleniyor" resync overlay.
+ * Show the "resyncing" overlay.
  * Triggered by the `decoder-error` event or programmatically (e.g. HDR change).
  * Auto-dismisses after RESYNC_DISMISS_MS unless hideResyncOverlay() is called
  * sooner (e.g. on play-firstframe, which means recovery succeeded).

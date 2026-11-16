@@ -1,17 +1,17 @@
 /**
- * screens/devices.js — Cihazlar / Geçmiş screen  (W4-devices)
+ * screens/devices.js — Devices / History screen  (W4-devices)
  *
  * Touch-first saved-devices + connection-history screen built over store/peers.js.
  *
  * Features (per DT-devices, §5 W4-devices brief):
  *  - Two-section list: "Kaydedilenler" (address book, sorted fav-first) and
- *    "Son Bağlantılar" (remote/game history tabs).
+ *    "Recent connections" (remote/game history tabs).
  *  - Each device row: category icon + name + grouped ID + online dot + last-seen.
  *  - Tap row → doConnect(id, 0) — remote mode by default.
- *  - Long-press row → action bottom-sheet (Bağlan / Oyun olarak bağlan / Düzenle /
- *    Favori / Kaydet / Geçmişten kaldır / Unut).
- *  - "+ Cihaz ekle" FAB / button → add-device bottom-sheet
- *    (name + ID/IP field + 4 icon chips + Ekle / Vazgeç).
+ *  - Long-press row → action bottom-sheet (Connect / Connect as game / Edit /
+ *    Favorite / Save / Remove from history / Forget).
+ *  - "+ Add device" FAB / button → add-device bottom-sheet
+ *    (name + ID/IP field + 4 icon chips + Add / Cancel).
  *  - Edit sheet (for saved devices): change name, id, icon.
  *  - Clear history action (for history sections).
  *  - Remote vs. game timeline split in history: chip filter.
@@ -946,7 +946,7 @@ function buildSavedSection() {
 }
 
 /**
- * Build the "Son Bağlantılar" (history) section with a remote/game mode filter.
+ * Build the "Recent connections" (history) section with a remote/game mode filter.
  * @returns {string}
  */
 function buildHistorySection() {

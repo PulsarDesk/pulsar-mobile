@@ -1,7 +1,7 @@
 /**
  * tauri.js — single chokepoint over window.__TAURI__
  *
- * The "Tauri yok" guard lives here and nowhere else. All other modules
+ * The "no Tauri" guard lives here and nowhere else. All other modules
  * import { invoke, listen, hasTauri } from './tauri.js'.
  *
  * Tauri config: withGlobalTauri:true — so window.__TAURI__ is available
@@ -24,7 +24,7 @@ const _event = hasTauri ? window.__TAURI__.event : null;
 export async function invoke(cmd, args) {
 	if (!_core) {
 		// In a plain browser (dev/test without Tauri) — log and return a mock null.
-		console.warn('[tauri] window.__TAURI__ yok — invoke("' + cmd + '") atlandı');
+		console.warn('[tauri] window.__TAURI__ missing — skipped invoke("' + cmd + '")');
 		return null;
 	}
 	return _core.invoke(cmd, args);
@@ -38,7 +38,7 @@ export async function invoke(cmd, args) {
  */
 export async function listen(name, cb) {
 	if (!_event) {
-		console.warn('[tauri] window.__TAURI__ yok — listen("' + name + '") atlandı');
+		console.warn('[tauri] window.__TAURI__ missing — skipped listen("' + name + '")');
 		return () => {};
 	}
 	return _event.listen(name, (e) => cb(e.payload));
@@ -56,7 +56,7 @@ export async function clipboard(text) {
 			return;
 		}
 	} catch (_) { /* fall through */ }
-	console.warn('[tauri] clipboard yazma desteklenmiyor');
+	console.warn('[tauri] clipboard write is not supported');
 }
 
 /**

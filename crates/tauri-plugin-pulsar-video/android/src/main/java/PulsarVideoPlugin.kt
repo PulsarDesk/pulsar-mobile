@@ -600,7 +600,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     fun onProjResult(invoke: Invoke, result: ActivityResult) {
         Log.i(TAG, "onProjResult rc=${result.resultCode} data=${result.data != null}")
         if (result.resultCode != Activity.RESULT_OK || result.data == null) {
-            invoke.reject("ekran paylaşım izni reddedildi")
+            invoke.reject("screen capture permission denied")
             return
         }
         // The session ended while the dialog was open: do not start sharing now.
@@ -732,13 +732,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /** Native-only (Rust host sessions poll it): `stopGen` = projectionStopGen; `message` =
-     *  the end reason for the viewer, in the app language. */
+     *  the end reason sent to the viewer. It crosses the wire, so it is always English. */
     @Command
     fun hostStatus(invoke: Invoke) {
         val r = JSObject()
         r.put("ok", true)
         r.put("stopGen", projectionStopGen)
-        r.put("message", NotifI18n.t(activity, "projStoppedPeer"))
+        r.put("message", "Screen sharing was stopped on the phone")
         invoke.resolve(r)
     }
 

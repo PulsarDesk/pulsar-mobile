@@ -190,7 +190,7 @@ async function boot() {
 	// 3b. Pre-mount the host screen so its incoming-connection listener
 	// (session-request → approval modal) + the approval sheet are live from
 	// boot, regardless of which tab is active. Without this the modal only
-	// works after the user has opened Cihazım at least once.
+	// works after the user has opened My Device at least once.
 	premount('host');
 
 	// 3c. Pre-mount the connect screen too. initRouter() only marks the boot
@@ -441,7 +441,7 @@ function wireTouchForwarding() {
 	let lastClickSent = null; // {t,fx,fy} — cooldown so the HOST OS can never see two rapid clicks (= its own double-click)
 
 	const inSession = () => hasTauri && document.body.classList.contains('in-session');
-	// Input is gated until the FIRST video frame: while "görüntü bekleniyor" the user
+	// Input is gated until the FIRST video frame: while "waiting for video" the user
 	// shouldn't be able to click/drag the host blindly. Reset on session end.
 	let videoReady = false;
 	try {

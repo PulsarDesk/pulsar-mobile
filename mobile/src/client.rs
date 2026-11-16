@@ -713,7 +713,7 @@ fn mime_for(codec: &str) -> &'static str {
     }
 }
 
-/// Map the UI's network-mode string (Ayarlar) to a `NetworkMode`.
+/// Map the UI's network-mode string (Settings) to a `NetworkMode`.
 pub(crate) fn parse_mode(s: &str) -> NetworkMode {
     match s {
         "p2p-only" => NetworkMode::P2pOnly,

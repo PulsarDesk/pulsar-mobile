@@ -8,6 +8,9 @@ import android.content.Context
  * the system one, and notifications must match the rest of the UI. The JS layer
  * pushes its active language via the `set_notif_lang` command whenever it changes;
  * it's persisted in SharedPreferences so services (HostService) read it too.
+ * Before the JS layer has pushed a language, the device locale is used when a
+ * translation exists for it; English is the default and the fallback.
+ * Strings sent to a peer never come from here — they are always English.
  */
 object NotifI18n {
     private const val PREFS = "pulsar-notif"
@@ -62,9 +65,9 @@ object NotifI18n {
                 "kk" -> "Бөлісу телефонда тоқтатылды, қосылым жабылды. Қайта қосылғанда рұқсат қайтадан сұралады."
                 else -> "Sharing was stopped on the phone and the connection closed. Permission is asked again on the next connection."
             }
-            "projStoppedPeer" -> when (l) {
-                "tr" -> "Telefonda ekran paylaşımı durduruldu"; "ru" -> "На телефоне остановлена трансляция экрана"
-                "kk" -> "Телефонда экран бөлісу тоқтатылды"; else -> "Screen sharing was stopped on the phone"
+            "streamActive" -> when (l) {
+                "tr" -> "Uzak oturum aktif"; "ru" -> "Удалённый сеанс активен"
+                "kk" -> "Қашықтағы сеанс белсенді"; else -> "Remote session active"
             }
             else -> key
         }

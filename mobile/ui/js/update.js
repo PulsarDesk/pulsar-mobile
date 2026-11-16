@@ -64,7 +64,7 @@ let errMsg = '';
 /** '' | 'perm' | 'sig' | 'fail' — a note under the install button after update_install. */
 let hint = '';
 let hintMsg = '';
-/** "İndir ve kur" pressed → launch the installer once the download finishes (sheet open). */
+/** "Download and install" pressed → launch the installer once the download finishes (sheet open). */
 let autoInstall = false;
 let pollTimer = 0;
 let checking = false;
@@ -192,7 +192,7 @@ function schedulePoll() {
 
 // ---- Actions -----------------------------------------------------------------
 
-/** @param {boolean} [thenInstall] "İndir ve kur" → open the installer when done. */
+/** @param {boolean} [thenInstall] "Download and install" → open the installer when done. */
 async function download(thenInstall = true) {
 	if (!rel) return;
 	hint = ''; errMsg = '';

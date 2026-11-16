@@ -1,5 +1,5 @@
 /**
- * screens/settings.js — Ayarlar (Settings) screen
+ * screens/settings.js — Settings screen
  *
  * W5-settings-lang — full implementation per §5 brief + DT-language design spec.
  *
@@ -122,7 +122,7 @@ function buildSettingsDom(section) {
     <!-- Save toast -->
     <div id="settings-toast" class="settings-toast" aria-live="polite"></div>
 
-    <!-- ── Ağ / Network ── -->
+    <!-- ── Network ── -->
     <div class="sect-label" data-i18n="settings.relay" style="margin-bottom:8px;">${t('settings.relay')}</div>
     <div class="card">
       <div class="field">
@@ -223,7 +223,7 @@ function buildSettingsDom(section) {
       </div>
     </div>
 
-    <!-- ── Cihaz / Device ── -->
+    <!-- ── Device ── -->
     <div class="sect-label" style="margin:16px 2px 8px;" data-i18n="settings.displayName">${t('settings.displayName')}</div>
     <div class="card">
       <div class="field">
@@ -417,7 +417,7 @@ function buildSettingsDom(section) {
       </div>
     </div>
 
-    <!-- ── Dil / Language ── -->
+    <!-- ── Language ── -->
     <div class="sect-label" style="margin:16px 2px 8px;" data-i18n="m.settings.lang">${t('m.settings.lang')}</div>
     <div class="card">
       <div class="setting">
@@ -434,7 +434,7 @@ function buildSettingsDom(section) {
       </div>
     </div>
 
-    <!-- ── Hakkında / About ── -->
+    <!-- ── About ── -->
     <div class="sect-label" style="margin:16px 2px 8px;" data-i18n="settings.version">${t('settings.version')}</div>
     <div class="card">
       <div class="setting" id="s-about-card" role="button" tabindex="0" style="cursor:pointer">
@@ -802,7 +802,7 @@ function wireFields(section) {
   if (hostPwEl) hostPwEl.addEventListener('blur', () => { setPref('hostRelayPw', hostPwEl.value); restartLocalRelayIfRunning(); });
   const hostTotpEl = document.getElementById('s-relay-host-totp');
   if (hostTotpEl) hostTotpEl.addEventListener('blur', () => { setPref('hostRelayTotp', hostTotpEl.value.trim()); restartLocalRelayIfRunning(); });
-  // "2FA oluştur": mint (or re-show) an enrollment — QR to scan + code to type.
+  // "Create 2FA": mint (or re-show) an enrollment — QR to scan + code to type.
   const totpGenEl = document.getElementById('s-relay-totp-gen');
   if (totpGenEl) totpGenEl.addEventListener('click', () => { openTotpEnrollment(); });
   const hostE2eEl = document.getElementById('s-relay-host-e2e');
@@ -1060,7 +1060,7 @@ function wireFields(section) {
     });
   }
 
-  // ── Language select (Türkçe / English / Русский / Қазақша / …) ──
+  // ── Language select (native names: English / Turkish / Russian / Kazakh / …) ──
   // setLang() updates the `lang` export, persists to localStorage, syncs Rust
   // config, sets <html lang>, and fires 'langchange' → onLangChange() re-renders.
   const langSel = document.getElementById('s-lang');

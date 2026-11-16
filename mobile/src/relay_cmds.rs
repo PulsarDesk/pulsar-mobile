@@ -96,7 +96,7 @@ pub async fn start_local_relay<R: Runtime>(
         Some(s) => Some(
             pulsar_relay::base32_decode(s)
                 .filter(|b| !b.is_empty())
-                .ok_or_else(|| "2FA secret geçersiz (base32 olmalı)".to_string())?,
+                .ok_or_else(|| "invalid 2FA secret (must be base32)".to_string())?,
         ),
         None => None,
     };
@@ -178,7 +178,7 @@ pub async fn generate_relay_totp(
         Some(s) => {
             pulsar_relay::base32_decode(s)
                 .filter(|b| !b.is_empty())
-                .ok_or_else(|| "2FA secret geçersiz (base32 olmalı)".to_string())?;
+                .ok_or_else(|| "invalid 2FA secret (must be base32)".to_string())?;
             pulsar_relay::enrollment_from_secret(s, &label, "Pulsar")
         }
         None => pulsar_relay::generate_totp(&label, "Pulsar"),

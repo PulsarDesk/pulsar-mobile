@@ -432,7 +432,7 @@ function _onChatMsg({ slot, text }) {
 // ── Clipboard toast ────────────────────────────────────────────────────────
 
 /**
- * Show a prominent "Pano alındı" toast with a copy action.
+ * Show a prominent "Clipboard received" toast with a copy action.
  * @param {string} text — clipboard content from the remote
  */
 function _showClipboardToast(text) {
@@ -629,39 +629,9 @@ function _register() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Translate with sidechannel-specific fallbacks.
- * Uses i18n.js t() first; falls back to inline table for mobile-only keys.
- */
-const SC_TR = {
-	'm.sc.cardLabel':         { tr: 'Araçlar',              en: 'Tools'                },
-	'm.sc.clipHint':          { tr: 'Panonuzu uzak cihaza gönderin veya alın.', en: 'Send or receive your clipboard content.' },
-	'm.sc.clipReceived':      { tr: 'Uzak pano alındı',     en: 'Remote clipboard received' },
-	'm.sc.clipCopy':          { tr: 'Panoya kopyala',        en: 'Copy to clipboard'   },
-	'm.sc.clipboardSent':     { tr: 'Pano gönderildi',       en: 'Clipboard sent'      },
-	'm.sc.clipboardEmpty':    { tr: 'Pano boş',              en: 'Clipboard is empty'  },
-	'm.sc.clipboardError':    { tr: 'Pano okunamadı',        en: 'Could not read clipboard' },
-	'm.sc.clipboardCopied':   { tr: 'Kopyalandı',            en: 'Copied'              },
-	'm.sc.openChat':          { tr: 'Sohbeti aç',            en: 'Open chat'           },
-	'm.sc.unreadAriaLabel':   { tr: '{n} okunmamış mesaj',   en: '{n} unread messages' },
-};
-
+/** Translate via the i18n catalogs (missing key → English, then the key). */
 function _t(key, vars) {
-	// Try i18n.js first
-	try {
-		const v = t(key, vars);
-		if (v !== key) return v;
-	} catch (_) {}
-
-	// Fall through to inline table
-	const htmlLang = (document.documentElement.lang || 'tr').toLowerCase().slice(0, 2);
-	const entry    = SC_TR[key];
-	if (!entry) return key;
-	let str = (entry[htmlLang] || entry.tr || key);
-	if (vars) {
-		str = str.replace(/\{(\w+)\}/g, (_, k) => (vars[k] != null ? String(vars[k]) : ''));
-	}
-	return str;
+	try { return t(key, vars); } catch (_) { return key; }
 }
 
 function _escHtml(str) {

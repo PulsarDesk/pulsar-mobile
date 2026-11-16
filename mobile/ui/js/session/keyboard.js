@@ -33,39 +33,9 @@
 import { invoke }        from '../tauri.js';
 import { t }             from '../i18n.js';
 
-// ── i18n additions (keyboard-specific keys added inline; parent catalog may
-//    not have them yet in W3) ──────────────────────────────────────────────────
-const _KBD_STRINGS = {
-  tr: {
-    'kbd.toggle':  'Klavye',
-    'kbd.cad':     'Ctrl+Alt+Del',
-    'kbd.type':    'Metin yaz…',
-    'kbd.close':   'Klavyeyi kapat',
-    'kbd.mods':    'Değiştirici tuşlar',
-  },
-  en: {
-    'kbd.toggle':  'Keyboard',
-    'kbd.cad':     'Ctrl+Alt+Del',
-    'kbd.type':    'Type here…',
-    'kbd.close':   'Close keyboard',
-    'kbd.mods':    'Modifier keys',
-  },
-};
-
-/** Local translate — app-wide t() first, inline table only as fallback. */
+/** Translate via the i18n catalogs (missing key → English, then the key). */
 function tk(key) {
-  try {
-    // Prefer the shared catalog (covers all shipped languages)
-    const v = t(key);
-    if (v !== key) return v;
-    // Fallback: inline table keyed by the active document language
-    const l = (document.documentElement.lang || 'tr').toLowerCase().slice(0, 2);
-    return (_KBD_STRINGS[l] && _KBD_STRINGS[l][key])
-      || (_KBD_STRINGS.tr[key])
-      || key;
-  } catch (_) {
-    return (_KBD_STRINGS.tr[key]) || key;
-  }
+  try { return t(key); } catch (_) { return key; }
 }
 
 // ── Evdev keycode table (linux/input-event-codes.h) ──────────────────────────

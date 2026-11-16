@@ -1,5 +1,5 @@
 /**
- * screens/connect.js — Bağlan (connect) screen
+ * screens/connect.js — Connect screen
  *
  * W2-connect implementation:
  *  - Ports connectTarget.ts (isAddr / fmtTarget / ipRe / canConnectTarget)
@@ -568,7 +568,7 @@ export function refreshHz() { return _refreshHz; }
  *                                    parity) and this streams only after a pick.
  */
 export async function doConnect(target, slot, modeOverride, gameId) {
-	if (!hasTauri) { say('window.__TAURI__ yok', true); return; }
+	if (!hasTauri) { say('window.__TAURI__ missing', true); return; }
 
 	// Normalise target
 	const normTarget = isAddr(String(target).trim())
@@ -665,7 +665,7 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 			// existing reactor (router, overlay, bar) still fires. Emitting the bus
 			// event directly skipped the registry.push, leaving `registry` empty —
 			// and play-firstframe/-stall/-ended all early-return on a missing entry
-			// (`if (!entry) return`). The net symptom: the "Host görüntüyü hazırlıyor"
+			// (`if (!entry) return`). The net symptom: the "host is preparing the picture"
 			// waiting overlay never cleared even though video was decoding (its hide is
 			// inside the play-firstframe handler, past that guard). Dynamic import
 			// mirrors the config.js pattern below and dodges the session.js↔connect.js
@@ -737,7 +737,7 @@ function mount() {
 		// soft keyboards; the fmtTarget formatter keeps the canonical form.
 		idEl.setAttribute('inputmode', 'url');
 		idEl.setAttribute('aria-label', t('home.targetAria'));
-		// Keep the short "000 000 000" placeholder; the longer "ID veya IP …"
+		// Keep the short "000 000 000" placeholder; the longer "ID or IP …"
 		// guidance lives in the small hint line below the field (desktop parity).
 		const hintEl = $('id-hint');
 		if (hintEl) hintEl.textContent = t('home.idOrIp');

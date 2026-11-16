@@ -13,7 +13,7 @@
  *   - Touch session switcher: horizontal pill row over the session bar when
  *     multiple sessions are active; swipe-down expands to a full session sheet.
  *   - setActivePane(slot): routes input + audio to the foregrounded slot.
- *   - Per-session rename: long-press a pill OR tap "Yeniden Adlandır" in the
+ *   - Per-session rename: long-press a pill OR tap "Rename" in the
  *     session sheet to open an inline rename sheet.
  *   - Active-pane indication: the focused pill is branded (indigo/cyan), others
  *     are dimmed; the focused slot drives body[data-mode].
@@ -239,7 +239,7 @@ function _wireSwipeDown(el, cb) {
 /**
  * Open the session management sheet.
  * Shows each active session as a card with: label, slot badge, codec/transport,
- * "Odaklan" (focus/switch), "Yeniden Adlandır", "Bitir".
+ * "Focus" (switch), "Rename", "End".
  */
 function openSessionSheet() {
 	// Prevent duplicate sheets
@@ -512,7 +512,7 @@ function openRenameSheet(slot) {
 
 /**
  * Render the disconnect card into #mount-session.
- * Provides a "Tekrar Bağlan" button that calls doConnect with the last
+ * Provides a "Reconnect" button that calls doConnect with the last
  * known id + slot.
  *
  * @param {{ slot:number, id:string, mode:'remote'|'game', reason:string }} opts
@@ -627,7 +627,7 @@ function clearDisconnectCard() {
 
 /**
  * Show the OTP / password bottom sheet.
- * DT-client-authprompt: big mono input, Gönder/İptal, inline error on retry.
+ * DT-client-authprompt: big mono input, Send/Cancel, inline error on retry.
  *
  * @param {{ slot:number, peer:string }} opts
  */
@@ -797,7 +797,7 @@ function updateBarMeta({ codec, transport }) {
 
 /**
  * Update the active session label in the in-session bar.
- * Shows "Ekran N · label" when multi-session.
+ * Shows "Screen N · label" when multi-session.
  */
 function updateBarActiveLabel() {
 	const barLabel = $('bar-session-label');

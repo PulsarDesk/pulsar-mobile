@@ -1,5 +1,5 @@
 /**
- * screens/connecting.js — Bağlanıyor (connecting) full-screen overlay
+ * screens/connecting.js — Connecting full-screen overlay
  *
  * W2-connecting lane — Wave 2 implementation.
  *
@@ -11,11 +11,11 @@
  *   - Full-screen overlay mounted into #mount-connecting (added by W2-shell-glue)
  *   - Listens to the Tauri 'conn-phase' event emitted by client.rs
  *   - Phase progression:
- *       reaching   → step 1 active (Relay'e bağlanılıyor)
- *       transport  → step 2 done (P2P/Relay bağlantı kuruldu)
+ *       reaching   → step 1 active (Connecting to relay)
+ *       transport  → step 2 done (P2P/relay link established)
  *       auth       → step 3 active (Yetkilendirme)
- *       awaiting   → step 3 sub-label (Host onayı bekleniyor)
- *       preparing  → step 4 active (Akış hazırlanıyor)
+ *       awaiting   → step 3 sub-label (Waiting for host approval)
+ *       preparing  → step 4 active (Preparing stream)
  *   - After 12 s of no phase advancement from 'reaching', shows a slow-host hint
  *   - Cancel button → invoke('end_session', { slot }) + hide overlay
  *   - Indigo (remote) / cyan (game) themed via --brand token (body[data-mode])

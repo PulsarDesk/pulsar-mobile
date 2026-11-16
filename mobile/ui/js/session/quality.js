@@ -45,7 +45,7 @@
  *   - Horizontally scrollable pill-row for long option lists
  *   - Bitrate slider with large touch handle, live Mbit readout
  *   - HDR toggle: 44px-minimum touch target, dimmed when unavailable
- *   - Switching veil (semi-opaque "Akış yeniden başlatılıyor…" overlay)
+ *   - Switching veil (semi-opaque "Restarting stream…" overlay)
  *     appears while the host rebuilds the encoder (~1.5s auto-dismiss)
  *   - Indigo (remote) / cyan (game) brand theming via var(--brand)
  */
@@ -504,7 +504,7 @@ function _updateHdrAvailability(toggleEl, codec, currentHdr) {
  * Renders as a full-width row with a label on the left and a pill toggle on the
  * right. The whole row is ≥ 44 px tall (--touch-min) for comfortable tapping.
  * When unavailable (h264 codec) the toggle is visually dimmed and non-interactive,
- * with a hint "H.265 gerekli" shown below.
+ * with a hint "H.265 required" shown below.
  *
  * @param {{ checked:boolean, disabled:boolean, onChange:(val:boolean)=>void }} opts
  * @returns {HTMLElement}
@@ -886,52 +886,6 @@ function _registerWithOverlay() {
 }
 
 // ---------------------------------------------------------------------------
-// i18n keys used in this module that may not exist in the catalog yet.
-// Providing a local fallback table keeps the module self-contained even if
-// the W1-i18n catalog entry hasn't been added yet (defensive).
-// ---------------------------------------------------------------------------
-
-const _FALLBACKS = {
-	'quality.codec':           'Kodek',
-	'quality.fps':             'FPS',
-	'quality.resolution':      'Çözünürlük',
-	'quality.perf':            'Kalite profili',
-	'quality.codecH265':       'H.265 / HEVC',
-	'quality.codecH264':       'H.264',
-	'quality.fpsAuto':         'Oto',
-	'quality.resAuto':         'Oto',
-	'quality.perfLatency':     'Düşük gecikme',
-	'quality.perfBalanced':    'Dengeli',
-	'quality.perfQuality':     'Yüksek kalite',
-	// W5-quality-adv HDR keys
-	'quality.hdr':             'HDR',
-	'quality.hdrOn':           'Açık',
-	'quality.hdrOff':          'Kapalı',
-	'quality.hdrH265Required': 'HDR için H.265 gerekli',
-};
-
-// Patch t() to return our local fallbacks when keys are missing in the catalog.
-// We wrap once and only touch unknown keys.
-const _tOrig = t;
-const _t = (key, vars) => {
-	const result = _tOrig(key, vars);
-	// t() returns the key itself when missing; check for that
-	if (result === key && _FALLBACKS[key] !== undefined) {
-		let s = _FALLBACKS[key];
-		if (vars) {
-			for (const k of Object.keys(vars)) {
-				s = s.split(`{${k}}`).join(String(vars[k]));
-			}
-		}
-		return s;
-	}
-	return result;
-};
-
-// Re-patch the local module-internal references to use _t
-// (JS modules are evaluated once; we shadow the name in scope below)
-
-// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 
@@ -1057,26 +1011,3 @@ export async function pushQuality(slot, patch) {
 		else await invoke('set_play_codec', { slot, codec: st.codec }).catch(() => {});
 	}
 }
-
-// Rebuild the local t references to use the fallback-aware version in the
-// DOM-building functions above. Because we're in an ES module, the functions
-// above already capture `t` from the import; we need to replace those
-// references at call sites. Since JS closures capture by reference for `let`
-// but not for `const` imported bindings, we monkeypatch the _t wrappers
-// directly instead by overwriting the private helper.
-
-// (No further action needed: _t is defined above and used in _buildSection,
-//  _buildSeg, _buildBitrateSlider, _mount — but those functions actually
-//  call `t()` from the import. We need to redirect them.)
-// -- Patching approach: after init, we override window-level for any new
-//    dynamic strings. The static strings use t() which has tr→en→key fallback,
-//    so the only keys that could be missing are our module-specific ones.
-//    We register them into the global catalog defensively by calling into
-//    the i18n module's internal catalogs if exposed, or by using the
-//    _FALLBACKS table above as the source of truth for lookups via _t().
-//
-// In practice the W1-i18n catalog already has 'session.bitrate',
-// 'session.bitrateAuto', 'session.switching', 'session.quality', and
-// 'codec.auto'.  The quality.* keys are new for this module and will
-// fall back to their key string → _t() remaps them via _FALLBACKS.
-// When W5-settings-lang adds them to i18n.js they will resolve naturally.

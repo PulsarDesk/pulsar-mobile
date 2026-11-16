@@ -23,7 +23,7 @@
  *   - micStart plugin returns { ok:false, detail:"permission_requested" }
  *     when RECORD_AUDIO is not yet granted.
  *   - The JS side shows an in-card explanation then retries micStart once the
- *     user taps "İzin ver" (a brief bottom-sheet over the card).
+ *     user taps "Allow" (a brief bottom-sheet over the card).
  *   - After the system dialog is dismissed (granted or denied) the JS retries
  *     automatically via a one-shot listener on the 'mic-permission-result' bus
  *     event (emitted by the W4-rust-client mic_start command on re-try success).
@@ -37,9 +37,9 @@
  * Design (DT-mic):
  *   - Large touch targets ≥ 44px, thumb-friendly layout.
  *   - Speaker and mic rows separated by a subtle divider.
- *   - Recording state: pulsing red dot on mic button + "Kaydediyor" label.
- *   - Awaiting-permission state: amber indicator + "İzin bekleniyor".
- *   - Denied state: strikethrough icon + "Erişim reddedildi" sub-label.
+ *   - Recording state: pulsing red dot on mic button + "Recording" label.
+ *   - Awaiting-permission state: amber indicator + "Waiting for permission".
+ *   - Denied state: strikethrough icon + "Access denied" sub-label.
  *   - Brand token var(--brand) → indigo in remote mode, cyan in game mode.
  *   - Safe-area-aware card padding via var(--safe-bottom).
  */
@@ -163,7 +163,7 @@ function mount(container) {
         ${_micSubLabel()}
       </span>
     </div>
-    <!-- "İzin ver" inline action — shown only when state is denied -->
+    <!-- "Allow" inline action — shown only when state is denied -->
     <button class="audio-perm-btn" id="audio-perm-btn" type="button"
             style="display:${_micPermState === 'denied' ? 'inline-flex' : 'none'}"
             aria-label="${t('audio.micPermSettings')}">
@@ -631,7 +631,7 @@ function _injectStyles() {
   margin: 0 16px;
 }
 
-/* ── "İzin ver" / Settings button ── */
+/* ── "Allow" / Settings button ── */
 .audio-perm-btn {
   flex: none;
   padding: 6px 12px;

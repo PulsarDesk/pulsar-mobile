@@ -59,7 +59,7 @@ pub(crate) async fn parse_relay(s: &str) -> Result<SocketAddr, String> {
         .copied()
         .find(SocketAddr::is_ipv4)
         .or_else(|| resolved.first().copied())
-        .ok_or_else(|| format!("bad relay: {with_port} çözülemedi"))
+        .ok_or_else(|| format!("bad relay: could not resolve {with_port}"))
 }
 
 /// Resolve a direct-connect target — an `IP`, `IP:port`, `host`, or `host:port`
@@ -106,7 +106,7 @@ pub struct SharedNodeInner {
     pub node: Arc<Node>,
     pub my_id: DeviceId,
     /// The relay + network mode this node was bound to. A later caller requesting a
-    /// DIFFERENT relay/mode (user edited Settings → Ağ) rebinds the node so the new
+    /// DIFFERENT relay/mode (user edited Settings → Network) rebinds the node so the new
     /// setting takes effect this connect instead of only after an app restart. The
     /// core `Node`'s relay address is immutable once bound, so a change means a rebuild.
     pub relay_addr: SocketAddr,
@@ -365,7 +365,7 @@ pub async fn relay_e2e_status<R: Runtime>(app: AppHandle<R>) -> Result<bool, Str
 }
 
 /// Does this device hold an access key for the CONFIGURED relay — i.e. has it already
-/// authenticated there? Drives the Settings status line ("Bu cihaz yetkili"). Reports only
+/// authenticated there? Drives the Settings status line ("This device is authorized"). Reports only
 /// the boolean: the key itself never leaves the backend.
 /// JS: `invoke('relay_authorized')` → bool.
 #[tauri::command]

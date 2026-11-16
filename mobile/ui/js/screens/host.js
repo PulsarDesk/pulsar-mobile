@@ -1,5 +1,5 @@
 /**
- * screens/host.js — Cihazım (My Device / host) screen
+ * screens/host.js — My Device (host) screen
  *
  * Full W3-host implementation per §2.7 + DT-host design spec.
  *
@@ -272,7 +272,7 @@ function openApprovalSheet(req) {
 
 	if (pwEl) pwEl.textContent = req.hasPassword ? t('approve.pwOk') : t('approve.pwNone');
 
-	// The auto-deny countdown lives ON the Deny button now, e.g. "Reddet (20s)".
+	// The auto-deny countdown lives ON the Deny button now, e.g. "Deny (20s)".
 	const setDeny = () => { if (denyCnt) denyCnt.textContent = '(' + countdownRemaining + 's)'; };
 	setDeny();
 

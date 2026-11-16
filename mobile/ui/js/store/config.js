@@ -13,7 +13,7 @@
  *   deviceName()     → String               — friendly device name
  *   codec()          → String               — "auto" | "h265" | "h264"
  *   quality()        → String               — "latency" | "balanced" | "quality"
- *   language()       → String               — "tr" | "en"
+ *   language()       → String               — "en" | "tr" | "ru" | "kk"
  *
  * Config object shape (mirrors Rust MobileConfig — §2.2):
  *   { relay, networkMode, deviceName, language, unattendedAccess,
@@ -36,8 +36,8 @@ const LS_KEY = 'pulsar.config.v1';
 const DEFAULTS = {
   relay: 'relay.pulsardesk.com',
   networkMode: 'auto',
-  deviceName: 'Pulsar Cihazı',
-  language: 'tr',
+  deviceName: 'Pulsar Device',
+  language: 'en',
   unattendedAccess: false,
   connectPassword: '',
   codecPref: 'auto',
