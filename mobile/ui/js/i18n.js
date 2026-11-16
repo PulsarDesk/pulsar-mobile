@@ -13,7 +13,8 @@
  *   lang                 → current language code ('tr' | 'en' | 'ru' | 'kk')
  *
  * Fallback chain: catalogs[lang][key] → en[key] → key.
- * Language detection: localStorage 'pulsar.lang.v1' → default 'tr' (Turkish-first).
+ * Language detection: saved choice (localStorage 'pulsar.lang.v1') → device
+ * language if a catalog ships for it → English.
  */
 
 import tr from './i18n/tr.js';
@@ -24,28 +25,29 @@ import kk from './i18n/kk.js';
 const LANG_KEY = 'pulsar.lang.v1';
 
 /**
- * Default language when the user has stored no explicit preference.
- * Pulsar is a Turkish-first product and the desktop core hard-defaults to
- * Turkish (`Config.language = Language::Tr`), regardless of system locale — so
- * the mobile app follows the DEVICE language by default (mapped to a shipped
- * catalog), and the user can override it in Settings (persisted to localStorage).
- * Turkish is the fallback for any unsupported locale. The static shell is
- * annotated with data-i18n and translated by applyI18n() at boot + on langchange,
- * so following the system language no longer produces a mixed-language UI.
+ * Default language when the user has stored no explicit preference: the device
+ * language (navigator.languages / navigator.language, mapped to a shipped
+ * catalog), else English. English is the project's base language; the user can
+ * override the choice in Settings (persisted to localStorage).
  */
 function detect() {
-  // Map the browser/system locale (e.g. "ru-RU", "en-GB") to a shipped catalog;
-  // fall back to Turkish (Pulsar's first language) for anything unsupported.
   try {
-    const sys = (navigator.language || navigator.userLanguage || '').toLowerCase();
-    const code = sys.split('-')[0];
-    if (LANGS.includes(code)) return code;
+    const list = [];
+    if (typeof navigator !== 'undefined') {
+      if (Array.isArray(navigator.languages)) list.push(...navigator.languages);
+      list.push(navigator.language, navigator.userLanguage);
+    }
+    for (const sys of list) {
+      if (!sys) continue;
+      const code = String(sys).toLowerCase().split(/[-_]/)[0];
+      if (LANGS.includes(code)) return code;
+    }
   } catch (_) {}
-  return 'tr';
+  return 'en';
 }
 
 /** Languages the app ships translations for. */
-export const LANGS = ['tr', 'en', 'ru', 'kk'];
+export const LANGS = ['en', 'tr', 'ru', 'kk'];
 
 /**
  * Load the persisted language preference, falling back to detection.
@@ -66,10 +68,8 @@ function loadLang() {
 /** Current active language. Read-only from outside; changed only via setLang(). */
 export let lang = loadLang();
 
-// Reflect the loaded language on <html lang> at boot. index.html hardcodes
-// lang="tr", and only setLang() updates it — so on a fresh load with a non-TR
-// stored language, the local _t() fallback tables in overlay/sidechannels/split
-// (which read document.documentElement.lang) rendered Turkish even in English.
+// Reflect the loaded language on <html lang> at boot (index.html ships lang="en";
+// only setLang() updates it afterwards).
 if (typeof document !== 'undefined') document.documentElement.lang = lang;
 
 const catalogs = { tr, en, ru, kk };
@@ -139,15 +139,16 @@ export function setLang(l) {
  *
  * Fallback chain: catalogs[lang][key] → catalogs.en[key] → key
  *
- * Variable syntax: {varName} — e.g. t('devices.minAgo', { n: 5 }) → "5 dk önce"
+ * Variable syntax: {varName} — e.g. t('devices.minAgo', { n: 5 }) → "5 min ago"
  *
  * @param {string} key
  * @param {Record<string, string|number>=} vars
  * @returns {string}
  */
 export function t(key, vars) {
-  let s = (catalogs[lang] && catalogs[lang][key] != null)
-    ? catalogs[lang][key]
+  const cur = catalogs[lang];
+  let s = (cur && cur[key] != null && cur[key] !== '')
+    ? cur[key]
     : (catalogs.en[key] != null ? catalogs.en[key] : key);
 
   if (vars) {
