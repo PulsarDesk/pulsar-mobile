@@ -1054,6 +1054,7 @@ function _dropSlot(slot, fromRust, reason) {
 async function init() {
 	// play-ended: the Rust read-loop exited (Ok(None) / error / cancel)
 	await listen('play-ended', ({ slot, reason }) => {
+		_earlyFirstFrame.delete(slot);
 		// If we still have this slot, detach the surface then drop it.
 		const entry = registry.find((e) => e.slot === slot);
 		if (!entry) return; // already dropped by user action
@@ -1077,6 +1078,12 @@ async function init() {
 	await listen('host-stream-error', ({ slot, message }) => {
 		const entry = registry.find((e) => e.slot === slot);
 		if (entry && typeof message === 'string') entry.hostError = message;
+		// Before the first frame the host's error IS the answer to "why no picture":
+		// show it on the waiting overlay now (the session stays up, so play-ended — where
+		// the card would show it — may never come).
+		if (entry && !entry.firstFrame && typeof message === 'string') {
+			_setWaitingText(hostErrorText(`!${message}`), true);
+		}
 	});
 
 	// play-stall: video stall state change
@@ -1095,7 +1102,13 @@ async function init() {
 	// play-firstframe: first decoded video frame
 	await listen('play-firstframe', ({ slot }) => {
 		const entry = registry.find((e) => e.slot === slot);
-		if (!entry) return;
+		if (!entry) {
+			// The first frame can beat startSession (the connect invoke resolves after the
+			// Rust play loop already fed an AU). Remember it, so session-started does not
+			// raise a waiting overlay that nothing would clear.
+			_earlyFirstFrame.add(slot);
+			return;
+		}
 		entry.firstFrame = true;
 		entry.stalled    = false;
 		_hideWaitingOverlay();
@@ -1141,6 +1154,11 @@ async function init() {
 			// Idempotent — startSession already added to registry directly.
 			// Show the "waiting for host to share their screen" overlay until the
 			// first decoded frame arrives (play-firstframe hides it).
+			const entry = registry.find((e) => e.slot === slot);
+			if (_earlyFirstFrame.delete(slot) || (entry && entry.firstFrame)) {
+				if (entry) entry.firstFrame = true;
+				return;
+			}
 			_showWaitingOverlay();
 		});
 	}
@@ -1201,8 +1219,27 @@ function _wireEndButton() {
 // Wayland XDG portal dialog), so the client shows guidance instead of a blank /
 // (on some emulators) green native surface. hud.js's first-frame loader is not
 // imported in this build, so the wait UI lives here in the always-loaded session module.
+/** Slots whose play-firstframe arrived before startSession registered them. */
+const _earlyFirstFrame = new Set();
+/** No picture this long after the overlay opens → say so (the host may be stuck). */
+const WAIT_SLOW_MS = 15000;
+let _waitSlowTimer = null;
+
+/** Replace the waiting text. `html` is already escaped; `isError` marks a host error,
+ *  which the slow-start hint must not overwrite. */
+function _setWaitingText(html, isError = false) {
+	const el = document.getElementById('ps-wait');
+	if (!el || !html) return;
+	if (!isError && el.classList.contains('ps-wait-error')) return;
+	const p = el.querySelector('.ps-wait-text');
+	if (p) p.innerHTML = html;
+	if (isError) el.classList.add('ps-wait-error');
+}
+
 function _showWaitingOverlay() {
 	if (document.getElementById('ps-wait')) return;
+	clearTimeout(_waitSlowTimer);
+	_waitSlowTimer = setTimeout(() => _setWaitingText(escHtml(t('session.waitingSlow'))), WAIT_SLOW_MS);
 	const el = document.createElement('div');
 	el.id = 'ps-wait';
 	el.className = 'ps-wait';
@@ -1222,6 +1259,8 @@ function _showWaitingOverlay() {
 }
 
 function _hideWaitingOverlay() {
+	clearTimeout(_waitSlowTimer);
+	_waitSlowTimer = null;
 	document.body.classList.remove('ps-waiting');
 	const el = document.getElementById('ps-wait');
 	if (!el) return;
@@ -1267,6 +1306,8 @@ function _injectStyles() {
 	max-width: 320px;
 	line-height: 1.45;
 }
+/* A host error (or the slow-start hint) replaces the waiting text; errors read warm. */
+.ps-wait-error .ps-wait-text { color: oklch(0.86 0.12 60); }
 /* The overlay FAB (z 16) showed through the translucent wait screen — the session isn't
    controllable before the first frame, so hide it outright while waiting. */
 body.ps-waiting .overlay-fab { display: none !important; }
