@@ -16,6 +16,7 @@ Default permissions for the pulsar-video plugin (attach/detach surface + decode 
 - `allow-screen-refresh-rate`
 - `allow-gamepad-battery`
 - `allow-get-video-size`
+- `allow-set-pointer-capture`
 - `allow-get-wallpaper-avatar`
 - `allow-mic-start`
 - `allow-mic-stop`
@@ -367,6 +368,32 @@ Enables the set_orientation command without any pre-configured scope.
 <td>
 
 Denies the set_orientation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-set-pointer-capture`
+
+</td>
+<td>
+
+Enables the set_pointer_capture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-set-pointer-capture`
+
+</td>
+<td>
+
+Denies the set_pointer_capture command without any pre-configured scope.
 
 </td>
 </tr>

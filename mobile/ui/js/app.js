@@ -407,6 +407,18 @@ function wireTouchForwarding() {
 	let cur = null;             // virtual cursor {x,y} CSS px (mouse mode), kept in rect
 	let cursorEl = null;
 
+	// ── Host pointer lock (a game grabbed the host's mouse) ─────────────────────
+	// The host sends `pointer-lock` {slot, on} when its cursor hides (on) or shows again.
+	// While on, absolute positions would spin a raw-input game's camera without end, so
+	// one-finger motion goes out as RELATIVE deltas (in both pointer modes), clicks carry
+	// no position, the local cursor dot hides and a physical mouse is captured natively
+	// (raw deltas via `window.__pulsarCapMouse`). Mirrors the desktop client
+	// (`kbdhook::set_pointer_lock`). The host reports only on change, so the state is kept
+	// per slot until the session ends (a report can arrive before `session-started`).
+	const ptrLocked = [false, false, false, false];
+	const lockedAt = (slot) => !!ptrLocked[slot];
+	const anyLocked = () => ptrLocked.some(Boolean);
+
 	// Gesture bookkeeping
 	const TAP_SLOP = 10, LONG_MS = 480, DBL_MS = 280, TAP_MAX_MS = 600, DRAG_DBL_MS = 250;
 	// A double-tap-drag ("tap-and-a-half") or armed long-press grabs the left button
@@ -491,14 +503,32 @@ function wireTouchForwarding() {
 	// high-frequency move + video-transform sends to ONE of each per frame, keeping
 	// only the most recent payload.
 	let _pendingMove = null; // latest { slot, x, y } for send_pointer
+	let _pendingRel = null;  // summed { slot, dx, dy } for send_pointer_rel (pointer lock)
+	// The host injects whole counts: carry the fraction so slow finger moves still add up.
+	let relCarry = { x: 0, y: 0 };
+	const sendRel = (r) => {
+		const x = r.dx + relCarry.x, y = r.dy + relCarry.y;
+		const ox = Math.trunc(x), oy = Math.trunc(y);
+		relCarry = { x: x - ox, y: y - oy };
+		if (ox || oy) invoke('send_pointer_rel', { slot: r.slot, dx: ox, dy: oy }).catch(() => {});
+	};
+	// Send queued relative motion NOW — before a button, so the click lands where aimed.
+	const flushRel = () => { if (_pendingRel) { const r = _pendingRel; _pendingRel = null; sendRel(r); } };
 	let _pendingRect = null; // latest { slot, x, y, w, h } for set_video_transform
 	let _flushRaf = null;
 	const _flushSends = () => {
 		_flushRaf = null;
 		if (_pendingMove) { const m = _pendingMove; _pendingMove = null; invoke('send_pointer', m).catch(() => {}); }
+		flushRel();
 		if (_pendingRect) { const r = _pendingRect; _pendingRect = null; invoke('set_video_transform', r).catch(() => {}); }
 	};
 	const _scheduleFlush = () => { if (_flushRaf === null) _flushRaf = requestAnimationFrame(_flushSends); };
+	const queueRel = (slot, dx, dy) => {
+		if (_pendingRel && _pendingRel.slot !== slot) flushRel();
+		if (!_pendingRel) _pendingRel = { slot, dx: 0, dy: 0 };
+		_pendingRel.dx += dx; _pendingRel.dy += dy;
+		_scheduleFlush();
+	};
 	const sendRect = () => {
 		if (!rect) return;
 		const Wd = W(), Hd = H();
@@ -595,15 +625,79 @@ function wireTouchForwarding() {
 				.catch(() => {});
 		}).catch(() => {});
 	})();
+	// Host pointer lock → relative mode + physical-mouse capture (see `ptrLocked` above).
+	(() => {
+		if (!hasTauri) return;
+		let capOn = false;
+		const capHeld = new Set(); // buttons the captured mouse holds down: {slot, button}
+		const capSlot = () => { const i = ptrLocked.findIndex(Boolean); return i < 0 ? 0 : i; };
+		const releaseHeld = (slot) => {
+			for (const k of [...capHeld]) {
+				const [s, b] = k.split(':').map(Number);
+				if (slot !== undefined && s !== slot) continue;
+				capHeld.delete(k);
+				invoke('send_button', { slot: s, button: b, down: false }).catch(() => {});
+			}
+		};
+		const syncCapture = () => {
+			const want = anyLocked();
+			if (want === capOn) return;
+			capOn = want;
+			invoke('plugin:pulsar-video|set_pointer_capture', { on: want }).catch(() => {});
+		};
+		// Called by the native PointerCapture (Kotlin) for a captured physical mouse:
+		// 'm' dx dy = raw counts, 'b' button down(1/0), 'w' dx dy = wheel (100 = 1 notch).
+		window.__pulsarCapMouse = (kind, a, b) => {
+			if (!anyLocked()) return;
+			const slot = capSlot();
+			if (kind === 'b') {
+				const key = slot + ':' + a, down = !!b;
+				if (down) {
+					if (document.body.classList.contains('overlay-open')) return;
+					capHeld.add(key);
+				} else if (!capHeld.delete(key)) return;
+				flushRel();
+				invoke('send_button', { slot, button: a, down }).catch(() => {});
+				return;
+			}
+			if (document.body.classList.contains('overlay-open')) return;
+			if (kind === 'm') queueRel(slot, a, b);
+			else if (kind === 'w') invoke('send_scroll', { slot, dx: a, dy: b }).catch(() => {});
+		};
+		const { listen } = window.__TAURI__.event;
+		listen('pointer-lock', (e) => {
+			const p = e.payload || {};
+			const s = Number(p.slot);
+			if (!(s >= 0 && s < ptrLocked.length)) return;
+			ptrLocked[s] = !!p.on;
+			if (!p.on) releaseHeld(s);
+			_pendingRel = null; relCarry = { x: 0, y: 0 };
+			syncCapture();
+			applyMode();
+		}).catch(() => {});
+		if (bus && bus.on) bus.on('session-ended', () => {
+			releaseHeld();
+			ptrLocked.fill(false);
+			_pendingRel = null; relCarry = { x: 0, y: 0 };
+			syncCapture();
+			applyMode();
+		});
+	})();
 
 	// B2: queue the move; flushed once per frame by _flushSends (coalesces a burst).
-	const sendMoveAt  = (px, py) => { const p = norm(px, py); _pendingMove = { slot: p.slot, x: p.x, y: p.y }; _scheduleFlush(); };
+	// Pointer-locked slot: no absolute positions at all (they would spin a game's camera).
+	const sendMoveAt  = (px, py) => {
+		const p = norm(px, py);
+		if (lockedAt(p.slot)) return;
+		_pendingMove = { slot: p.slot, x: p.x, y: p.y }; _scheduleFlush();
+	};
 	const sendClickAt = (px, py, button) => {
 		const p = norm(px, py);
 		// B2: this sends an explicit pointer position immediately; drop any queued
 		// coalesced move so a stale move can't flush after the click's button-up.
 		_pendingMove = null;
-		invoke('send_pointer', { slot: p.slot, x: p.x, y: p.y }).catch(() => {});
+		flushRel();
+		if (!lockedAt(p.slot)) invoke('send_pointer', { slot: p.slot, x: p.x, y: p.y }).catch(() => {});
 		invoke('send_button', { slot: p.slot, button, down: true }).catch(() => {});
 		invoke('send_button', { slot: p.slot, button, down: false }).catch(() => {});
 	};
@@ -615,7 +709,8 @@ function wireTouchForwarding() {
 		// B2: explicit pointer position — drop any queued coalesced move so it can't
 		// flush out of order around this button press/release (e.g. drag start/end).
 		_pendingMove = null;
-		invoke('send_pointer', { slot: p.slot, x: p.x, y: p.y }).catch(() => {});
+		flushRel();
+		if (!lockedAt(p.slot)) invoke('send_pointer', { slot: p.slot, x: p.x, y: p.y }).catch(() => {});
 		invoke('send_button', { slot: p.slot, button, down }).catch(() => {});
 	};
 
@@ -669,7 +764,8 @@ function wireTouchForwarding() {
 	// overlay is open or out of session). Place it at the rect centre when activating.
 	const applyMode = () => {
 		// Cursor only once the video is up — no floating pointer over the waiting screen.
-		document.body.classList.toggle('cursor-mouse', mode === 'mouse' && videoReady);
+		// Hidden while the host pointer is locked: the game hid its cursor, deltas aim instead.
+		document.body.classList.toggle('cursor-mouse', mode === 'mouse' && videoReady && !lockedAt(0));
 		if (mode === 'mouse') { ensureCursor(); if (!cur) cur = rectCenter(); moveCursor(cur); }
 	};
 
@@ -746,7 +842,8 @@ function wireTouchForwarding() {
 		const t = e.touches[0];
 		// Touch (absolute) mode: ignore touches outside the shared screen rect.
 		if (mode === 'touch' && !inRect(t)) { g1 = null; return; }
-		g1 = { sx: t.clientX, sy: t.clientY, x: t.clientX, y: t.clientY, t: Date.now(), moved: false, dragging: false };
+		g1 = { sx: t.clientX, sy: t.clientY, x: t.clientX, y: t.clientY, t: Date.now(), moved: false, dragging: false,
+			slot: norm(t.clientX, t.clientY).slot };
 		// Tap-and-a-half: a press that closely follows a tap becomes a left-button
 		// DRAG as soon as it moves (the standard trackpad gesture; matches the
 		// user's "double-click then hold to drag"). No long still-hold needed.
@@ -855,7 +952,12 @@ function wireTouchForwarding() {
 			g1.x = t.clientX; g1.y = t.clientY;
 			return;
 		}
-		if (mode === 'mouse') {
+		if (lockedAt(g1.slot)) {
+			// Host pointer locked (a game reads raw motion): the finger delta goes out as a
+			// relative move in either pointer mode — no cursor, no absolute position.
+			queueRel(g1.slot, (t.clientX - g1.x) * REL_SENS, (t.clientY - g1.y) * REL_SENS);
+			g1.x = t.clientX; g1.y = t.clientY;
+		} else if (mode === 'mouse') {
 			// Relative: move the cursor by finger delta (kept inside the rect), drive
 			// the host pointer to follow the visible cursor.
 			const base = cur || rectCenter();
@@ -981,7 +1083,7 @@ function wireTouchForwarding() {
 		zfac = 1; rect = null; vid = { vw: 0, vh: 0 }; cur = null;
 		// B2: drop any queued move/transform from the previous session + cancel the
 		// pending rAF so a stale send can't land in the new session.
-		_pendingMove = null; _pendingRect = null;
+		_pendingMove = null; _pendingRect = null; _pendingRel = null; relCarry = { x: 0, y: 0 };
 		if (_flushRaf !== null) { cancelAnimationFrame(_flushRaf); _flushRaf = null; }
 		startVidPoll(); applyMode();
 	});

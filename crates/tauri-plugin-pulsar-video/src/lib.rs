@@ -70,6 +70,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       commands::screen_refresh_rate,
       commands::gamepad_battery,
       commands::get_video_size,
+      commands::set_pointer_capture,
       commands::get_wallpaper_avatar,
       commands::mic_start,
       commands::mic_stop,

@@ -326,6 +326,14 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
+  /// Capture (`on: true`) or release a physical mouse (Android pointer capture).
+  pub fn set_pointer_capture(&self, on: bool) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("setPointerCapture", PointerCaptureArgs { on })
+      .map_err(Into::into)
+  }
+
   pub fn gamepad_battery(&self) -> crate::Result<AttachResponse> {
     self
       .0
@@ -439,6 +447,11 @@ impl<R: Runtime> PulsarVideo<R> {
         .unwrap_or_default(),
     )
   }
+}
+
+#[derive(Serialize)]
+struct PointerCaptureArgs {
+  on: bool,
 }
 
 #[derive(Serialize)]

@@ -164,6 +164,15 @@ struct HostPointerPayload {
     y: f32,
 }
 
+/// The host's cursor was hidden (a game grabbed the mouse, `on: true`) or shown again
+/// (`DataMsg::PointerLock`). While it is on, the UI sends relative pointer deltas instead of
+/// absolute positions and captures a physical mouse.
+#[derive(Serialize, Clone)]
+struct PointerLockPayload {
+    slot: u8,
+    on: bool,
+}
+
 /// The host reported that our input does not reach its desktop (`DataMsg::InputUnavailable`).
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -600,6 +609,13 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             // marks the host pointer ("Host") and says why input is held back. x/y < 0 =
             // position unknown (notice only).
             let _ = app.emit("host-pointer", HostPointerPayload { slot, active, x, y });
+        }
+        DataMsg::PointerLock(on) => {
+            // The host hid its cursor (a game grabbed the mouse): send relative motion while
+            // it lasts, absolute again once it shows (desktop `play/hold.rs` does the same).
+            // Sent only on change, so the UI keeps the last state per slot.
+            log::info!("host pointer lock (slot={slot}): {on}");
+            let _ = app.emit("pointer-lock", PointerLockPayload { slot, on });
         }
         DataMsg::InputUnavailable { reason } => {
             // The host cannot pass our touches / keys to its desktop (no /dev/uinput access,

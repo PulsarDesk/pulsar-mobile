@@ -11,6 +11,7 @@ const COMMANDS: &[&str] = &[
   "screen_refresh_rate",
   "gamepad_battery",
   "get_video_size",
+  "set_pointer_capture",
   "get_wallpaper_avatar",
   "mic_start",
   "mic_stop",
