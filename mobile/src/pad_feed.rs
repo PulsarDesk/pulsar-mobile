@@ -96,13 +96,28 @@ pub struct PadUi {
     prev_overlay: bool,
     prev_quit: bool,
     prev_nav: [bool; 6],
+    /// The menu state this pad last saw (see [`PadUi::observe`]).
+    was_open: bool,
     /// Combo buttons kept off the forwarded state until released.
     latch: u32,
 }
 
 impl PadUi {
+    /// Track menu open / close. On close every button still held is latched off the host
+    /// until released: the B (or A) press that closed the menu must not reach the game.
+    /// Returns true when the menu just opened.
+    pub fn observe(&mut self, raw: &GamepadState, overlay_open: bool) -> bool {
+        let opened = overlay_open && !self.was_open;
+        if self.was_open && !overlay_open {
+            self.latch |= raw.buttons;
+        }
+        self.was_open = overlay_open;
+        opened
+    }
+
     /// Feed the pad's raw state; pushes the UI actions it triggers (rising edges only).
     pub fn step(&mut self, raw: &GamepadState, overlay_open: bool, out: &mut Vec<PadAction>) {
+        let opened = self.observe(raw, overlay_open);
         let held = |m: u32| raw.buttons & m == m;
         let ov = held(OVERLAY_COMBO);
         let quit = held(QUIT_COMBO);
@@ -128,6 +143,10 @@ impl PadUi {
                 p(bt::A),
                 p(bt::B),
             ];
+            // Held while the menu opened (touch / 3-finger open): not a menu press.
+            if opened {
+                self.prev_nav = nav;
+            }
             for i in 0..6 {
                 if nav[i] && !self.prev_nav[i] {
                     out.push(PadAction::Nav(NAV_KEYS[i]));
@@ -406,7 +425,10 @@ async fn run<R: Runtime>(app: AppHandle<R>, sock: tokio::net::UdpSocket, token: 
                 // Past the window only when the forwarded state changed with no datagram
                 // (the menu opened / closed while the pad sat still): the host must not keep
                 // a held stick while the pad drives the menu.
+                let open = OVERLAY_OPEN.load(Ordering::Relaxed);
                 for (idx, p) in pads.iter_mut().filter(|(_, p)| p.live) {
+                    // The menu may have closed with a button still held and no datagram since.
+                    p.ui.observe(&p.state, open);
                     if p.last_rx.elapsed() >= RESEND_WINDOW && p.sent == Some(p.forwarded()) {
                         continue;
                     }
@@ -547,6 +569,7 @@ mod tests {
         let mut ui = PadUi::default();
         let mut out = Vec::new();
         let s = GamepadState { buttons: bt::DPAD_DOWN, left_x: 20000, right_trigger: 200, ..Default::default() };
+        ui.step(&st(0), true, &mut out);
         ui.step(&s, true, &mut out);
         assert_eq!(out, vec![PadAction::Nav("down"), PadAction::Nav("right")]);
         assert_eq!(ui.forward(&s, true), GamepadState::default());
@@ -557,11 +580,40 @@ mod tests {
         ui.step(&st(bt::A), true, &mut out);
         ui.step(&st(bt::B), true, &mut out);
         assert_eq!(out, vec![PadAction::Nav("go"), PadAction::Nav("escape")]);
-        // Closed: no nav, the raw state is forwarded again.
+        // Closed (all released): no nav, the raw state is forwarded again.
         out.clear();
+        ui.step(&st(0), false, &mut out);
         ui.step(&s, false, &mut out);
         assert!(out.is_empty());
         assert_eq!(ui.forward(&s, false), s);
+    }
+
+    #[test]
+    fn button_that_closed_menu_stays_off_host() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        ui.step(&st(0), true, &mut out);
+        ui.step(&st(bt::B), true, &mut out);
+        assert_eq!(out, vec![PadAction::Nav("escape")]);
+        // The UI closed the menu while B is still down (tick path, no datagram).
+        ui.observe(&st(bt::B), false);
+        assert_eq!(ui.forward(&st(bt::B), false).buttons, 0);
+        // B released, then pressed again: forwarded.
+        ui.step(&st(0), false, &mut out);
+        ui.step(&st(bt::B), false, &mut out);
+        assert_eq!(ui.forward(&st(bt::B), false).buttons, bt::B);
+    }
+
+    #[test]
+    fn held_button_when_menu_opens_is_not_a_press() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        ui.step(&st(bt::A), false, &mut out);
+        ui.step(&st(bt::A), true, &mut out);
+        assert!(out.is_empty());
+        ui.step(&st(0), true, &mut out);
+        ui.step(&st(bt::A), true, &mut out);
+        assert_eq!(out, vec![PadAction::Nav("go")]);
     }
 
     #[test]

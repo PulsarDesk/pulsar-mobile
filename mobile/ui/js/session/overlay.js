@@ -204,10 +204,19 @@ function _reportPadOverlay(open) {
 
 const _inSession = () => document.body.classList.contains('in-session');
 
-/** End the active session — the same path as the dock's End button. */
+/**
+ * End the session the pad plays in. One pane: the dock's End button path. In a split
+ * that button opens a touch-only picker sheet, so end the ACTIVE pane (the one the
+ * pad drives — the desktop quit combo ends its own window's session) directly.
+ * session.js is imported lazily: it is already loaded in-session, and a static import
+ * would add a cycle through the feature panels.
+ */
 function _endFromPad() {
 	close();
-	document.getElementById('btn-end')?.click();
+	import('./session.js').then((s) => {
+		if (s.registry.length > 1) s.endSession(s.activeSlot());
+		else document.getElementById('btn-end')?.click();
+	}).catch(() => document.getElementById('btn-end')?.click());
 }
 
 // The feed only runs while a stream is on screen, so these fire in-session only; the

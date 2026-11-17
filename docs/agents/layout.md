@@ -16,7 +16,8 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   Desktop-parity pad controls live there too: Select+L1+R1+X → `pad-overlay-toggle`,
   Start+Select+L1+R1 → `pad-quit` (combo buttons latched off the host until released);
   while the overlay is open (`set_pad_overlay_open`) the host gets a neutral pad and the
-  pad drives the menu via `pad-nav` → `gamepad-nav.js` `padNav`. The on-screen touch
+  pad drives the menu via `pad-nav` → `gamepad-nav.js` `padNav` (buttons still held when it
+  closes stay off the host until released; the quit combo ends the ACTIVE pane in a split). The on-screen touch
   controller is `ui/js/session/vpad.js` (game mode, `send_gamepad` at host pad slot 3).
   Client streams run immersive (system bars hidden, swipe = transient) — plugin
   `setImmersive` in `startStreamService` / `stopStreamService`.

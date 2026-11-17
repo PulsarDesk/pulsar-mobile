@@ -352,4 +352,7 @@ if (!_register()) {
 	bus.on('session-started', () => setTimeout(_sync, 0));
 	bus.on('session-ended', () => setTimeout(_sync, 0));
 	bus.on('mode-changed', () => setTimeout(_sync, 0));
+	// Game pane → game pane keeps the layer up (no mode change): move the pad to the new
+	// host now (_send releases the old one) instead of at the next keepalive.
+	bus.on('active-pane-changed', () => setTimeout(() => { if (_shown) _send(); }, 0));
 })();
