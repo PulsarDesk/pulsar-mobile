@@ -571,6 +571,7 @@ struct Ds5UsbPollArgs {
 #[derive(Serialize)]
 struct Ds5UsbCloseArgs {
   id: u32,
+  failed: bool,
 }
 
 #[derive(Serialize)]
@@ -673,8 +674,10 @@ pub trait PulsarVideoW5Ext<R: Runtime> {
   fn ds5_usb_poll(&self, fresh: bool) -> crate::Result<Ds5UsbPoll>;
 
   /// Close a pad opened by [`Self::ds5_usb_poll`] (after Rust released its interface and
-  /// re-attached the kernel driver) and free its gamepad slot. Native-only.
-  fn ds5_usb_close(&self, id: u32) -> crate::Result<AttachResponse>;
+  /// re-attached the kernel driver) and free its gamepad slot. `failed` = the pad could
+  /// not be driven (init failed): it is not claimed again until the next passthrough
+  /// period, instead of every poll. Native-only.
+  fn ds5_usb_close(&self, id: u32, failed: bool) -> crate::Result<AttachResponse>;
 }
 
 impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
@@ -741,10 +744,10 @@ impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
       .map_err(Into::into)
   }
 
-  fn ds5_usb_close(&self, id: u32) -> crate::Result<AttachResponse> {
+  fn ds5_usb_close(&self, id: u32, failed: bool) -> crate::Result<AttachResponse> {
     self
       .0
-      .run_mobile_plugin("ds5UsbClose", Ds5UsbCloseArgs { id })
+      .run_mobile_plugin("ds5UsbClose", Ds5UsbCloseArgs { id, failed })
       .map_err(Into::into)
   }
 }

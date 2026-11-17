@@ -48,6 +48,9 @@ class Ds5Usb(private val activity: Activity, private val pads: PadInput) {
 
     private val claimed = HashMap<Int, Claimed>()
     private val asked = HashSet<String>()
+    // Pads Rust could not drive (init failed): left alone until the next `fresh` period,
+    // so a pad that refuses its feature reads is not claimed and dropped every poll.
+    private val skip = HashSet<String>()
     private var nextId = 1
     private val usb: UsbManager? by lazy { activity.getSystemService(Context.USB_SERVICE) as? UsbManager }
 
@@ -64,11 +67,11 @@ class Ds5Usb(private val activity: Activity, private val pads: PadInput) {
     fun poll(fresh: Boolean): JSArray {
         val out = JSArray()
         val m = usb ?: return out
-        if (fresh) asked.clear()
+        if (fresh) { asked.clear(); skip.clear() }
         val held = claimed.values.map { it.key }.toSet()
         for (dev in m.deviceList.values) {
             if (dev.vendorId != VID_SONY || dev.productId !in PIDS) continue
-            if (dev.deviceName in held) continue
+            if (dev.deviceName in held || dev.deviceName in skip) continue
             if (!m.hasPermission(dev)) {
                 if (asked.add(dev.deviceName)) requestPermission(m, dev)
                 continue
@@ -82,10 +85,12 @@ class Ds5Usb(private val activity: Activity, private val pads: PadInput) {
         return out
     }
 
-    /** Close pad [id] (Rust already released its interface) and free its slot. */
+    /** Close pad [id] (Rust already released its interface) and free its slot. [failed] =
+     *  Rust could not drive it: skip it until the next passthrough period. */
     @Synchronized
-    fun close(id: Int) {
+    fun close(id: Int, failed: Boolean = false) {
         val c = claimed.remove(id) ?: return
+        if (failed) skip.add(c.key)
         try { c.conn.close() } catch (e: Exception) { Log.w(TAG, "close failed: ${e.message}") }
         pads.releaseIdx(c.pad)
         Log.i(TAG, "pad ${c.pad} (${c.name}) handed back")

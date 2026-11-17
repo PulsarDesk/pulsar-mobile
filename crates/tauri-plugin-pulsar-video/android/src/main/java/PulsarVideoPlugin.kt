@@ -155,6 +155,7 @@ class Ds5UsbPollArgs {
 @InvokeArg
 class Ds5UsbCloseArgs {
     var id: Int = 0
+    var failed: Boolean = false
 }
 
 @InvokeArg
@@ -1406,7 +1407,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     fun ds5UsbClose(invoke: Invoke) {
         val a = invoke.parseArgs(Ds5UsbCloseArgs::class.java)
         activity.runOnUiThread {
-            ds5Usb.close(a.id)
+            ds5Usb.close(a.id, a.failed)
             val r = JSObject(); r.put("ok", true); invoke.resolve(r)
         }
     }

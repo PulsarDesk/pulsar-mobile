@@ -270,6 +270,11 @@ fn slot_event<R: Runtime>(app: &AppHandle<R>, idx: u8, p: &Pad) -> InputEvent {
 pub const DS5_INPUT_GAP: Duration = Duration::from_millis(4);
 /// Re-send a DualSense's latest state at least this often (desktop `INPUT_KEEPALIVE`).
 pub const DS5_KEEPALIVE: Duration = Duration::from_secs(1);
+/// Re-send `Ds5Caps` + `Ds5Feature` this often. The host applies them only to a virtual
+/// pad that is already plugged in, and it plugs one in ~3 s after the slot's first
+/// `Ds5Input` (desktop host `PLUG_DELAY`): caps sent before that are dropped, which would
+/// leave the host on its defaults (speaker on, default IMU calibration). Idempotent there.
+const DS5_CAPS_REFRESH: Duration = Duration::from_secs(2);
 
 struct Ds5Pad {
     name: String,
@@ -277,8 +282,8 @@ struct Ds5Pad {
     /// firmware, like the desktop).
     features: Vec<(u8, Vec<u8>)>,
     latest: Option<[u8; USB_INPUT_LEN]>,
-    /// The target (pane, generation) `Ds5Caps` went to.
-    caps_for: Option<(u8, u64)>,
+    /// The target (pane, generation) `Ds5Caps` went to, and when.
+    caps_for: Option<(u8, u64, Instant)>,
     /// What the current target got last (raw report or plain state) and when.
     sent: Option<(Ds5Sent, Instant)>,
     /// A newer report waits for the send gap.
@@ -333,14 +338,18 @@ async fn ds5_forward<R: Runtime>(app: &AppHandle<R>, cur: &Option<Target>, idx: 
         p.pending = p.sent.is_some_and(|(last, _)| last != what);
         return;
     }
-    if matches!(what, Ds5Sent::Raw(_)) && p.caps_for != Some((*pane, *gen)) {
+    let caps_due = match p.caps_for {
+        Some((cp, cg, at)) => (cp, cg) != (*pane, *gen) || at.elapsed() >= DS5_CAPS_REFRESH,
+        None => true,
+    };
+    if matches!(what, Ds5Sent::Raw(_)) && caps_due {
         let caps = DataMsg::Ds5Caps { slot: idx, transport: Ds5Transport::Usb, features: crate::ds5::USB_FEATURES };
         let _ = pulsar_core::service::send_data_via(sender, &caps).await;
         for (id, data) in p.features.iter().filter(|(id, _)| *id == 0x05 || *id == 0x20) {
             let msg = DataMsg::Ds5Feature { slot: idx, id: *id, data: data.clone() };
             let _ = pulsar_core::service::send_data_via(sender, &msg).await;
         }
-        p.caps_for = Some((*pane, *gen));
+        p.caps_for = Some((*pane, *gen, Instant::now()));
     }
     p.pending = false;
     if pulsar_core::service::send_input_via(sender, &ev).await.is_ok() {

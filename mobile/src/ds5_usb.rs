@@ -186,7 +186,8 @@ impl HidIo for UsbHid {
 struct Driver {
     id: u32,
     stop: Arc<AtomicBool>,
-    join: JoinHandle<()>,
+    /// `true` when the pad could not be driven at all (init failed).
+    join: JoinHandle<bool>,
 }
 
 /// Start the manager task (once per process). Called at each connect.
@@ -222,8 +223,8 @@ async fn manage<R: Runtime>(app: AppHandle<R>) {
         for d in done {
             let app = app.clone();
             let _ = tauri::async_runtime::spawn_blocking(move || {
-                let _ = d.join.join();
-                let _ = app.pulsar_video().ds5_usb_close(d.id);
+                let failed = d.join.join().unwrap_or(true);
+                let _ = app.pulsar_video().ds5_usb_close(d.id, failed);
             })
             .await;
         }
@@ -240,7 +241,7 @@ async fn manage<R: Runtime>(app: AppHandle<R>) {
                             None => {
                                 let app = app.clone();
                                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                                    let _ = app.pulsar_video().ds5_usb_close(pad.id);
+                                    let _ = app.pulsar_video().ds5_usb_close(pad.id, true);
                                 })
                                 .await;
                             }
@@ -272,7 +273,9 @@ fn start_driver(p: Ds5UsbPad) -> Option<Driver> {
     Some(Driver { id, stop, join })
 }
 
-fn run(p: Ds5UsbPad, stop: Arc<AtomicBool>) {
+/// Drive one pad until `stop` or a dead device. Returns `true` when it could not be driven
+/// at all (init failed), so the plugin does not claim it again every poll.
+fn run(p: Ds5UsbPad, stop: Arc<AtomicBool>) -> bool {
     let slot = p.pad;
     let mut io = UsbHid { fd: p.fd, iface: p.iface, ep_out: p.ep_out };
     let opened = Pad::open(&mut io, Ds5Transport::Usb, ds5::USB_FEATURES);
@@ -283,7 +286,7 @@ fn run(p: Ds5UsbPad, stop: Arc<AtomicBool>) {
             if let Err(e) = usbfs::hand_back(p.fd, p.iface) {
                 log::warn!("pulsar: ds5 usb pad {slot}: hand back failed ({e})");
             }
-            return;
+            return true;
         }
     };
     // Network jitter is irrelevant here (no audio reports on USB), but keep the desktop's
@@ -384,4 +387,5 @@ fn run(p: Ds5UsbPad, stop: Arc<AtomicBool>) {
         }
     }
     log::info!("pulsar: ds5 usb pad {slot} released");
+    false
 }
