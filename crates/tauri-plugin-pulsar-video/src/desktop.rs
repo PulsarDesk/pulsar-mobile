@@ -36,7 +36,7 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn feed_au(&self, _au: &[u8], _slot: u8) -> crate::Result<AttachResponse> {
     Self::noop("no native decode on desktop")
   }
-  pub fn feed_audio(&self, _packet: &[u8]) -> crate::Result<AttachResponse> {
+  pub fn feed_audio(&self, _packet: &[u8], _pt: u8) -> crate::Result<AttachResponse> {
     Self::noop("no native audio on desktop")
   }
   pub fn stop_stream(&self, _slot: u8) -> crate::Result<AttachResponse> {

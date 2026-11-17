@@ -409,6 +409,51 @@ fn emit_auth_prompt<R: Runtime>(app: &AppHandle<R>, slot: u8, peer: &str, kind: 
 
 /// Decision cadence (the controller works on 2 s windows).
 const ABR_TICK: Duration = Duration::from_millis(2000);
+/// "Auto" audio quality (the desktop client's `auto_audio_quality`): Raw (~1.6 Mbit/s,
+/// uncompressed) only on a LAN the probe measured with plenty of room and a host that can send
+/// it; High Opus (320 kb/s) once the probe saw a few Mbit/s, or on a LAN without a probe;
+/// Standard (128 kb/s) otherwise.
+fn auto_audio_quality(
+    probe_kbps: Option<u32>,
+    path: pulsar_core::netpath::PathClass,
+    host_raw: bool,
+) -> pulsar_core::audio::AudioQuality {
+    use pulsar_core::audio::AudioQuality;
+    use pulsar_core::netpath::PathClass;
+    match probe_kbps {
+        Some(k) if host_raw && path == PathClass::Lan && k >= 15_000 => AudioQuality::Raw,
+        Some(k) if k >= 3_000 => AudioQuality::High,
+        None if path == PathClass::Lan => AudioQuality::High,
+        _ => AudioQuality::Standard,
+    }
+}
+
+/// A Settings pick: what to ask the host for (the desktop client's `audio_quality_for`).
+/// `raw` falls back to High on a host that can't send it; anything else (incl. `auto`) takes
+/// the [`auto_audio_quality`] pick.
+fn audio_quality_for(
+    pref: &str,
+    auto: pulsar_core::audio::AudioQuality,
+    host_raw: bool,
+) -> pulsar_core::audio::AudioQuality {
+    use pulsar_core::audio::AudioQuality;
+    match pref {
+        "standard" => AudioQuality::Standard,
+        "high" => AudioQuality::High,
+        "raw" if host_raw => AudioQuality::Raw,
+        "raw" => AudioQuality::High,
+        _ => auto,
+    }
+}
+
+/// Halve an L16 payload (16-bit big-endian samples) in place: the concealment of a lost packet.
+fn halve_l16(pcm: &mut [u8]) {
+    for b in pcm.chunks_exact_mut(2) {
+        let v = i16::from_be_bytes([b[0], b[1]]) / 2;
+        b.copy_from_slice(&v.to_be_bytes());
+    }
+}
+
 /// Auto-rate start when neither the bandwidth probe nor the path's memory has a rate. The
 /// ceiling is `adapt::caps::mobile_auto_cap_kbps` (what the phone's point needs, at most
 /// 50 Mbit; was a flat 12 Mbit that also cut the probe's plan short), under the relay's cap
@@ -992,6 +1037,8 @@ pub async fn connect_host<R: Runtime>(
     // omitting them still decodes.
     relay_password: Option<String>,
     relay_totp: Option<String>,
+    // Settings -> audio quality: "auto" | "standard" | "high" | "raw" (None = auto).
+    audio_quality: Option<String>,
 ) -> Result<ConnectResult, String> {
     let game_id = game_id.unwrap_or_default();
     // Tear down any still-running read loop on this slot BEFORE binding a new Node.
@@ -1322,6 +1369,8 @@ pub async fn connect_host<R: Runtime>(
     // Session-start bandwidth probe (pulsar-core `adapt::probe`, hosts advertising FEAT_PROBE):
     // ~1 s of packet trains measured before the stream starts, so an auto-rate session opens at
     // what this path carries now instead of a remembered or fixed guess.
+    // The raw probe estimate (the audio-quality pick reads it; `probed` is the start rate).
+    let mut probe_kbps: Option<u32> = None;
     let probed = if auto_rate && caps.features.iter().any(|f| f == service::media::FEAT_PROBE) {
         let rtt = match sess.path_latency().await {
             Some((d, r)) => match sess.transport() {
@@ -1335,6 +1384,7 @@ pub async fn connect_host<R: Runtime>(
         match service::run_probe(&mut sess, rates, adapt::probe::TRAIN_MS, rtt).await {
             Ok(Some(e)) => {
                 log::info!("pulsar: bandwidth probe {} kbps (at least: {})", e.kbps, e.at_least);
+                probe_kbps = Some(e.kbps);
                 Some((e.kbps as u64 * 4 / 5).clamp(adapt::FLOOR_KBPS as u64, cap_kbps as u64) as u32)
             }
             _ => None,
@@ -1354,6 +1404,15 @@ pub async fn connect_host<R: Runtime>(
         // The probe did the startup ramp's job.
         acfg.startup_windows = 0;
     }
+    // Audio quality: the Settings pick, "auto" resolved from the probe and the path class the
+    // same way as the desktop client (`auto_audio_quality`); Raw only to a host advertising it.
+    let host_audio_raw = caps.features.iter().any(|f| f == service::media::FEAT_AUDIO_RAW);
+    let audio_quality = audio_quality_for(
+        audio_quality.as_deref().unwrap_or("auto"),
+        auto_audio_quality(probe_kbps, path_class, host_audio_raw),
+        host_audio_raw,
+    );
+    log::info!("pulsar: audio quality {audio_quality:?} (host raw: {host_audio_raw})");
     acfg.ir_capable = false;
     // Size/fps are fixed for the session (settings / screen); only the bitrate adapts. The one
     // exception: a decoder that sheds frames steps the fps down one rung (`client_decoder_sheds`),
@@ -1394,8 +1453,8 @@ pub async fn connect_host<R: Runtime>(
         fec_rs: mos,
         // Reference-frame invalidation recovery: the desktop renderer only, for now.
         rfi: false,
-        // Opus at the standard rate; the higher qualities (and raw PCM) are desktop-only so far.
-        audio_quality: Default::default(),
+        // Standard / High Opus or raw L16, resolved from the Settings pick (desktop rules).
+        audio_quality,
         // Audio parity (rides the session); the feeder rebuilds lost packets from it.
         audio_fec: mos,
     };
@@ -1490,9 +1549,14 @@ pub async fn connect_host<R: Runtime>(
         {
             let app3 = app2.clone();
             std::thread::spawn(move || {
-                use pulsar_core::audio::{AudioRepair, Repaired};
+                use pulsar_core::audio::{AudioRepair, Repaired, L16_PAYLOAD_TYPE};
                 const AUDIO_HOLD: Duration = Duration::from_millis(20);
+                // Lost L16 packets in a row worth concealing (5 ms each); a longer gap is an
+                // outage and stays silent.
+                const MAX_L16_CONCEAL: u16 = 10;
                 let mut repair = AudioRepair::new();
+                // The last uncompressed (L16) payload, replayed (faded) for a lost one.
+                let mut last_l16: Vec<u8> = Vec::new();
                 loop {
                     let wait = repair
                         .deadline(AUDIO_HOLD)
@@ -1507,10 +1571,30 @@ pub async fn connect_host<R: Runtime>(
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                     while let Some(step) = repair.pop(Instant::now(), AUDIO_HOLD) {
-                        if let Repaired::Packet(pkt) = step {
-                            if let Some(op) = crate::rtp::rtp_payload(&pkt) {
-                                let _ = app3.pulsar_video().feed_audio(op);
+                        match step {
+                            Repaired::Packet(pkt) => {
+                                let pt = pkt.get(1).map_or(0, |b| b & 0x7f);
+                                if let Some(op) = crate::rtp::rtp_payload(&pkt) {
+                                    if pt == L16_PAYLOAD_TYPE {
+                                        last_l16.clear();
+                                        last_l16.extend_from_slice(op);
+                                    }
+                                    let _ = app3.pulsar_video().feed_audio(op, pt);
+                                }
                             }
+                            // Uncompressed audio has no codec PLC: replay the last packet,
+                            // halved each time, so a lost one is a dip rather than a hard gap
+                            // (the desktop player's L16 concealment). Opus losses stay gaps:
+                            // MediaCodec has no PLC entry point, and the playout queue absorbs
+                            // them.
+                            Repaired::Lost(n) if !last_l16.is_empty() && n <= MAX_L16_CONCEAL => {
+                                for _ in 0..n {
+                                    halve_l16(&mut last_l16);
+                                    let _ = app3.pulsar_video().feed_audio(&last_l16, L16_PAYLOAD_TYPE);
+                                }
+                            }
+                            Repaired::Lost(_) => {}
+                            Repaired::Restart => last_l16.clear(),
                         }
                     }
                 }
@@ -2336,4 +2420,43 @@ pub async fn connect_host<R: Runtime>(
         transport: transport_s.to_string(),
         detail,
     })
+}
+
+#[cfg(test)]
+mod audio_quality_tests {
+    use super::*;
+    use pulsar_core::audio::AudioQuality;
+    use pulsar_core::netpath::PathClass;
+
+    #[test]
+    fn auto_picks_match_the_desktop_rules() {
+        assert_eq!(auto_audio_quality(Some(20_000), PathClass::Lan, true), AudioQuality::Raw);
+        assert_eq!(auto_audio_quality(Some(20_000), PathClass::Lan, false), AudioQuality::High);
+        assert_eq!(auto_audio_quality(Some(20_000), PathClass::Wan, true), AudioQuality::High);
+        assert_eq!(auto_audio_quality(Some(2_000), PathClass::Lan, true), AudioQuality::Standard);
+        assert_eq!(auto_audio_quality(None, PathClass::Lan, true), AudioQuality::High);
+        assert_eq!(auto_audio_quality(None, PathClass::Relay, true), AudioQuality::Standard);
+    }
+
+    #[test]
+    fn picks_override_auto_and_raw_needs_the_host() {
+        let auto = AudioQuality::Standard;
+        assert_eq!(audio_quality_for("high", auto, false), AudioQuality::High);
+        assert_eq!(audio_quality_for("standard", AudioQuality::Raw, true), AudioQuality::Standard);
+        assert_eq!(audio_quality_for("raw", auto, true), AudioQuality::Raw);
+        assert_eq!(audio_quality_for("raw", auto, false), AudioQuality::High);
+        assert_eq!(audio_quality_for("auto", auto, true), auto);
+        assert_eq!(audio_quality_for("bogus", AudioQuality::High, true), AudioQuality::High);
+    }
+
+    #[test]
+    fn l16_concealment_halves_big_endian_samples() {
+        let mut p = Vec::new();
+        for v in [1000i16, -1000, i16::MIN, 1] {
+            p.extend_from_slice(&v.to_be_bytes());
+        }
+        halve_l16(&mut p);
+        let got: Vec<i16> = p.chunks_exact(2).map(|b| i16::from_be_bytes([b[0], b[1]])).collect();
+        assert_eq!(got, vec![500, -500, i16::MIN / 2, 0]);
+    }
 }

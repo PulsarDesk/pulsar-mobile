@@ -295,6 +295,16 @@ function buildSettingsDom(section) {
           <span class="thumb"></span>
         </label>
       </div>
+      <div class="field" style="margin-top:12px">
+        <label for="s-audio-quality" data-i18n="m.settings.audioQuality">${t('m.settings.audioQuality')}</label>
+        <select id="s-audio-quality" class="input framerate-select">
+          <option value="auto" data-i18n="m.settings.aq.auto">${t('m.settings.aq.auto')}</option>
+          <option value="standard" data-i18n="m.settings.aq.standard">${t('m.settings.aq.standard')}</option>
+          <option value="high" data-i18n="m.settings.aq.high">${t('m.settings.aq.high')}</option>
+          <option value="raw" data-i18n="m.settings.aq.raw">${t('m.settings.aq.raw')}</option>
+        </select>
+        <span class="settings-field-hint" data-i18n="m.settings.audioQualityHint">${t('m.settings.audioQualityHint')}</span>
+      </div>
       <div class="setting" style="margin-top:12px">
         <div>
           <div class="lbl" data-i18n="m.settings.perfHud">${t('m.settings.perfHud')}</div>
@@ -963,6 +973,11 @@ function wireFields(section) {
   if (hostAudioEl) {
     hostAudioEl.addEventListener('change', () => setPref('playHostAudio', hostAudioEl.checked));
   }
+  // Audio quality: applies on the next connect (the host encodes it from the stream request).
+  const audioQualityEl = document.getElementById('s-audio-quality');
+  if (audioQualityEl) {
+    audioQualityEl.addEventListener('change', () => setPref('audioQuality', audioQualityEl.value));
+  }
   const perfHudEl = document.getElementById('s-perf-hud');
   if (perfHudEl) {
     perfHudEl.addEventListener('change', () => {
@@ -1143,6 +1158,8 @@ async function syncFieldsFromConfig() {
   refreshRelayStatus();
   // Client-only prefs (not on the rust config) come from the prefs store.
   if (hostAudioEl)                   hostAudioEl.checked = getPref('playHostAudio') !== false;
+  const audioQualityInit = document.getElementById('s-audio-quality');
+  if (audioQualityInit)              audioQualityInit.value = getPref('audioQuality') || 'auto';
   if (perfHudEl)                     perfHudEl.checked = getPref('hudVisible') !== false;
   const overlayBtnEl = document.getElementById('s-overlay-btn');
   if (overlayBtnEl)                  overlayBtnEl.checked = getPref('overlayButton') !== false;

@@ -34,6 +34,15 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   not the decoder-forced one.
   Still off on mobile: RFI and intra refresh (`rfi: false`, `ir_capable = false`) — they need
   the depacketizer to resume on a recovery frame and per-decoder MediaCodec verification.
+- Client audio: the feeder thread (`client.rs`) repairs the RTP stream (`AudioRepair`) and
+  hands each payload with its payload type to `feed_audio` — Opus (97) through MediaCodec, raw
+  L16 (98) straight through (a lost L16 packet is replayed halved, like the desktop). Playout is
+  `AudioPlayout.kt`: the desktop's `native_audio.rs` steering — queue low point held at 15 ms
+  (10 ms more per dry queue, ≤ 120 ms, eases back after 20 s), ±2 % rate via an in-app linear
+  resampler (FAST tracks reject `setPlaybackRate`), flush + re-buffer past target + 150 ms,
+  `audio: player stats` logged every 5 s. Audio quality (Settings → Session, `audioQuality` pref,
+  next connect) resolves "auto" with the desktop's rules (`auto_audio_quality`). Untested on a
+  device.
 - `crates/tauri-plugin-pulsar-video/` — the native surface plugin.
   `PulsarVideoPlugin.kt` (~2.8k lines) is the center of gravity.
   `DecoderProbe.kt`: hardware-decoder detection + Moonlight's vendor gates;

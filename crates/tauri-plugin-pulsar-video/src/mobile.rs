@@ -35,6 +35,13 @@ struct DataArgs {
 }
 
 #[derive(Serialize)]
+struct AudioArgs {
+  data: String,
+  /// RTP payload type: 97 = Opus, 98 = uncompressed L16 (pulsar-core `audio::*_PAYLOAD_TYPE`).
+  pt: u8,
+}
+
+#[derive(Serialize)]
 struct SlotArgs {
   slot: u8,
 }
@@ -85,12 +92,14 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
-  /// Feed one Opus packet to the (shared) live audio decoder (M5).
-  pub fn feed_audio(&self, packet: &[u8]) -> crate::Result<AttachResponse> {
+  /// Feed one audio packet to the (shared) live audio player (M5): an Opus packet
+  /// (`pt` 97, decoded by MediaCodec) or an uncompressed L16 payload (`pt` 98, 16-bit
+  /// big-endian interleaved stereo, played as is).
+  pub fn feed_audio(&self, packet: &[u8], pt: u8) -> crate::Result<AttachResponse> {
     let data = base64::engine::general_purpose::STANDARD.encode(packet);
     self
       .0
-      .run_mobile_plugin("feedAudio", DataArgs { data, slot: 0 })
+      .run_mobile_plugin("feedAudio", AudioArgs { data, pt })
       .map_err(Into::into)
   }
 
