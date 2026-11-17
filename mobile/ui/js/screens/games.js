@@ -19,6 +19,7 @@ import { invoke } from '../tauri.js';
 import { t } from '../i18n.js';
 import { relay, netmode, deviceName } from '../store/config.js';
 import { withRelayAuth } from '../relay-auth.js';
+import { identityChangedId, confirmIdentityChange } from '../trust-guard.js';
 
 let _overlay = null; // live overlay root (null when closed)
 
@@ -107,7 +108,17 @@ export function openGamesFetch(target, slot = 0) {
   )
     .then((games) => renderGames(el, games || [], pick))
     // A dismissed relay-auth sheet is a cancel: leave the panel as-is, don't shout.
-    .catch((e) => { if (!(e && e.cancelled)) renderError(el, String(e && e.message ? e.message : e)); });
+    .catch(async (e) => {
+      if (e && e.cancelled) return;
+      // A changed host key blocks the fetch; only an explicit "trust the new key" retries.
+      const changedId = identityChangedId(e);
+      if (changedId) {
+        close();
+        if (await confirmIdentityChange(changedId, relay())) openGamesFetch(target, slot);
+        return;
+      }
+      renderError(el, String(e && e.message ? e.message : e));
+    });
 }
 
 /** Render the fetched library: pinned Desktop card + one card per game. */

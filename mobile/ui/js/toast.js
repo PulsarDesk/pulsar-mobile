@@ -24,3 +24,9 @@ export function toast(msg, durationMs = 2600) {
 	clearTimeout(_timer);
 	_timer = setTimeout(() => { if (_el) _el.classList.remove('show'); }, durationMs);
 }
+
+/** Take the global toast down now (e.g. a long "working…" toast whose job was cancelled). */
+export function hideToast() {
+	clearTimeout(_timer);
+	if (_el) _el.classList.remove('show');
+}

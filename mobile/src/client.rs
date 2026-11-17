@@ -859,6 +859,156 @@ async fn prompt_and_wait<R: Runtime>(
     }
 }
 
+// ── Connect a target (TOFU-pinned) ───────────────────────────────────────────
+
+/// Open a session to `target`. An IP / IP:port / host[:port] connects directly (no relay
+/// rendezvous; the address IS the identity, so no pin — desktop parity). A relay id
+/// rendezvous via the relay with the host key PINNED on the first connect to this
+/// `(relay, id)` (`trust.rs`, `known_peers.json`). A later answer with a different key fails
+/// with `IDENTITY_CHANGED:<id>` and is never trusted silently: only the user's explicit
+/// "trust the new key" (`forget_peer`) clears the pin.
+async fn connect_target<R: Runtime>(
+    app: &AppHandle<R>,
+    node: &std::sync::Arc<pulsar_core::Node>,
+    relay: &str,
+    target: &str,
+) -> Result<pulsar_core::Session, String> {
+    if let Some(addr) = crate::net::resolve_target(target).await {
+        return node
+            .connect_direct(addr, None)
+            .await
+            .map_err(|e| format!("connect-direct failed: {e:?}"));
+    }
+    let dev_id = DeviceId::parse(target)
+        .ok_or_else(|| format!("bad target (not a device id, IP, or host): {target}"))?;
+    let pinned = crate::trust::known_peer_key(app, relay, &dev_id);
+    let sess = node.connect_pinned(dev_id, pinned).await.map_err(|e| {
+        if matches!(e, pulsar_core::ConnError::IdentityChanged(_)) {
+            log::warn!("pulsar: host key for {} differs from the pinned one — refusing", dev_id.grouped());
+            crate::trust::identity_changed_err(&dev_id)
+        } else {
+            format!("connect failed: {e:?}")
+        }
+    })?;
+    if let Some(k) = sess.peer_pubkey().await {
+        crate::trust::pin_peer_key(app, relay, &dev_id, &k);
+    }
+    Ok(sess)
+}
+
+// ── Pairing (client side) ─────────────────────────────────────────────────────
+
+/// The answer to a pairing request (desktop `PairOutcome`). `reason`: `""` on success,
+/// `"denied"` (the host's user said no / the password was refused), `"timeout"`, or
+/// `"unsupported"` (a host without pairing).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairOutcome {
+    paired: bool,
+    reason: String,
+}
+
+/// Connect + authenticate a short control session on the reserved fetch slot (the same
+/// `auth-prompt` sheet as any connect). `Ok(None)` = the host refused us.
+async fn open_authed<R: Runtime>(
+    app: &AppHandle<R>,
+    relay: &str,
+    target: &str,
+    netmode: &str,
+    name: &str,
+    relay_password: Option<String>,
+    relay_totp: Option<String>,
+) -> Result<Option<pulsar_core::Session>, String> {
+    if let Some(old_cancel) = app.state::<SessionRegistry>().cancel_for(FETCH_SLOT) {
+        old_cancel.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let cfg = load_config(app);
+    let relay_addr: SocketAddr = crate::net::parse_relay(relay).await?;
+    let dev_name = if name.is_empty() {
+        if cfg.device_name.is_empty() { "Pulsar Mobile".to_string() } else { cfg.device_name.clone() }
+    } else {
+        name.to_string()
+    };
+    let net_mode = if netmode.is_empty() { cfg.network_mode } else { parse_mode(netmode) };
+    let creds = crate::net::relay_creds(&cfg, relay, relay_password, relay_totp);
+    let (node, _my_id) = crate::net::get_or_create_node(app, relay_addr, relay, net_mode, dev_name, creds).await?;
+    let mut sess = timeout(CONNECT_TIMEOUT, connect_target(app, &node, relay, target))
+        .await
+        .map_err(|_| "connect-timed-out".to_string())??;
+    match auth_race(app, FETCH_SLOT, &mut sess, "", target).await? {
+        AuthOutcome::Accepted => Ok(Some(sess)),
+        _ => Ok(None),
+    }
+}
+
+/// Pair with `target`: connect, authenticate (the host's password / Allow, as on any
+/// connect) and ask the host to trust this phone's key, so later connects skip the
+/// password and the host's approval. The host decides — it may ask its user first.
+///
+/// JS: `invoke('pair_device', { relay, target, netmode, name, relayPassword?, relayTotp? })`
+/// → `PairOutcome`.
+#[tauri::command]
+pub async fn pair_device<R: Runtime>(
+    app: AppHandle<R>,
+    relay: String,
+    target: String,
+    netmode: String,
+    name: String,
+    relay_password: Option<String>,
+    relay_totp: Option<String>,
+) -> Result<PairOutcome, String> {
+    let relay = crate::trust::relay_or_config(&app, &relay);
+    let Some(mut sess) = open_authed(&app, &relay, &target, &netmode, &name, relay_password, relay_totp).await? else {
+        return Ok(PairOutcome { paired: false, reason: "denied".into() });
+    };
+    let cfg = load_config(&app);
+    let announce = if name.trim().is_empty() { cfg.device_name.clone() } else { name };
+    let res = pulsar_core::service::pair_exchange(
+        &mut sess,
+        DataMsg::PairRequest { name: announce },
+        pulsar_core::service::PAIR_WAIT,
+    )
+    .await
+    .map_err(|e| format!("pair failed: {e:?}"))?;
+    let _ = send_bye(&mut sess).await;
+    let out = match res {
+        Some((paired, reason)) => PairOutcome { paired, reason },
+        None => PairOutcome { paired: false, reason: "unsupported".into() },
+    };
+    if out.paired {
+        crate::trust::set_paired_flag(&app, &relay, &target, true);
+    }
+    log::info!("pulsar: pair request to {target} finished: paired={} reason={}", out.paired, out.reason);
+    Ok(out)
+}
+
+/// Forget the pairing: always here, and on the host too when it can be reached now
+/// (`true` = the host confirmed). An unreachable host keeps trusting this key until its
+/// user revokes it there.
+///
+/// JS: `invoke('unpair_device', { relay, target, netmode, name })` → bool.
+#[tauri::command]
+pub async fn unpair_device<R: Runtime>(
+    app: AppHandle<R>,
+    relay: String,
+    target: String,
+    netmode: String,
+    name: String,
+) -> Result<bool, String> {
+    let relay = crate::trust::relay_or_config(&app, &relay);
+    crate::trust::set_paired_flag(&app, &relay, &target, false);
+    let remote = async {
+        let mut sess = open_authed(&app, &relay, &target, &netmode, &name, None, None).await.ok()??;
+        let r = pulsar_core::service::pair_exchange(&mut sess, DataMsg::Unpair, Duration::from_secs(6))
+            .await
+            .ok()?;
+        let _ = send_bye(&mut sess).await;
+        r.map(|(paired, _)| !paired)
+    };
+    Ok(timeout(Duration::from_secs(45), remote).await.ok().flatten().unwrap_or(false))
+}
+
 // ── list_remote_games command (game-mode fetch) ───────────────────────────────
 
 /// One game/app the host publishes, serialized to JS for the game-mode picker.
@@ -922,19 +1072,9 @@ pub async fn list_remote_games<R: Runtime>(
         crate::net::get_or_create_node(&app, relay_addr, &relay_str, net_mode, dev_name, creds).await?;
 
     // Connect (relay ID or IP:port), inside the overall connect budget.
-    let mut sess = timeout(CONNECT_TIMEOUT, async {
-        if let Some(addr) = crate::net::resolve_target(&target).await {
-            node.connect_direct(addr, None)
-                .await
-                .map_err(|e| format!("connect-direct failed: {e:?}"))
-        } else {
-            let dev_id = DeviceId::parse(&target)
-                .ok_or_else(|| format!("bad target (not a device id, IP, or host): {target}"))?;
-            node.connect(dev_id).await.map_err(|e| format!("connect failed: {e:?}"))
-        }
-    })
-    .await
-    .map_err(|_| "connect-timed-out".to_string())??;
+    let mut sess = timeout(CONNECT_TIMEOUT, connect_target(&app, &node, &relay_str, &target))
+        .await
+        .map_err(|_| "connect-timed-out".to_string())??;
 
     match auth_race(&app, FETCH_SLOT, &mut sess, &password, &target).await? {
         AuthOutcome::Accepted => {}
@@ -1053,24 +1193,10 @@ pub async fn connect_host<R: Runtime>(
         )
         .await?;
 
-    let connect_result = timeout(CONNECT_TIMEOUT, async {
-        // ── W2-ipconnect: branch on DeviceId vs SocketAddr ───────────────────
-        let sess = if let Some(addr) = crate::net::resolve_target(&target).await {
-            // IP / IP:port / host[:port] — connect directly without relay rendezvous.
-            node.connect_direct(addr, None)
-                .await
-                .map_err(|e| format!("connect-direct failed: {e:?}"))?
-        } else {
-            let dev_id = DeviceId::parse(&target)
-                .ok_or_else(|| format!("bad target (not a device id, IP, or host): {target}"))?;
-            node.connect(dev_id)
-                .await
-                .map_err(|e| format!("connect failed: {e:?}"))?
-        };
-        Ok::<_, String>(sess)
-    })
-    .await
-    .map_err(|_| "connect-timed-out".to_string())?;
+    // W2-ipconnect: a relay ID or an IP:port (LAN direct); the ID path is pinned (TOFU).
+    let connect_result = timeout(CONNECT_TIMEOUT, connect_target(&app, &node, &relay_str, &target))
+        .await
+        .map_err(|_| "connect-timed-out".to_string())?;
 
     let mut sess = connect_result?;
 

@@ -28,7 +28,7 @@ import { t, setLang, lang }         from '../i18n.js';
 import { theme, setTheme }          from '../theme.js';
 import { getConfig, setConfig } from '../store/config.js';
 import { getPref, setPref, gamepadTarget, setGamepadTarget } from '../store/prefs.js';
-import { invoke }                   from '../tauri.js';
+import { invoke, listen, hasTauri } from '../tauri.js';
 import { resolveFrameRate, refreshHz, resolveResolution } from './connect.js';
 import { connectedPads, pushGamepadTargets } from '../session/gamepad-monitor.js';
 
@@ -279,6 +279,13 @@ function buildSettingsDom(section) {
         <span class="settings-warn" id="s-cpw-warn" data-i18n="m.settings.unattendedWarn"
               style="display:none">${t('m.settings.unattendedWarn')}</span>
       </div>
+    </div>
+
+    <!-- ── Paired devices: clients this phone (as host) trusts by key ── -->
+    <div class="sect-label" style="margin:16px 2px 8px;" data-i18n="m.settings.paired">${t('m.settings.paired')}</div>
+    <div class="card">
+      <div class="settings-field-hint" data-i18n="m.settings.pairedDesc">${t('m.settings.pairedDesc')}</div>
+      <div id="s-paired-list" class="paired-list"></div>
     </div>
 
     <!-- ── Session (in-session playback/UI prefs, client-only) ── -->
@@ -757,6 +764,85 @@ function renderControllers() {
     });
   });
 }
+const escPaired = (v) => String(v).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+const fmtPairedDate = (ms) => {
+  try { return new Date(ms).toLocaleString(lang || undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
+  catch (_) { return new Date(ms).toLocaleString(); }
+};
+
+/**
+ * Settings → Paired devices: the clients this phone trusts when it hosts (a paired key
+ * skips the password and the approval sheet). Each row can be revoked after a confirm.
+ */
+async function renderPaired() {
+  const el = document.getElementById('s-paired-list');
+  if (!el) return;
+  let list = [];
+  if (hasTauri) {
+    try { list = (await invoke('list_paired_devices', {})) || []; } catch (_) { list = []; }
+  }
+  if (!list.length) {
+    el.innerHTML = `<div class="pad-empty">${escPaired(t('m.settings.pairedEmpty'))}</div>`;
+    return;
+  }
+  el.innerHTML = list.map((d) => {
+    const name = escPaired(d.name || d.id || d.fingerprint);
+    const sub = [d.id ? escPaired(d.id) : '', escPaired(d.fingerprint)].filter(Boolean).join(' · ');
+    const since = d.pairedAt ? escPaired(t('m.settings.pairedSince', { d: fmtPairedDate(d.pairedAt) })) : '';
+    const seen = d.lastSeen ? escPaired(t('m.settings.pairedLastSeen', { d: fmtPairedDate(d.lastSeen) })) : '';
+    return `<div class="paired-item">
+      <div class="paired-meta">
+        <div class="paired-name">${name}</div>
+        <div class="paired-sub mono">${sub}</div>
+        <div class="paired-sub">${[since, seen].filter(Boolean).join(' · ')}</div>
+      </div>
+      <button class="btn btn-ghost paired-revoke" data-key="${escPaired(d.key)}">${escPaired(t('m.settings.pairedRevoke'))}</button>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.paired-revoke').forEach((btn, i) => {
+    btn.addEventListener('click', async () => {
+      const d = list[i];
+      const ok = await confirmRevokePaired(d.name || d.id || d.fingerprint || '');
+      if (!ok) return;
+      try { await invoke('revoke_paired_device', { key: d.key }); } catch (_) {}
+      renderPaired();
+    });
+  });
+}
+
+/** Bottom-sheet confirm before removing a pairing. Resolves true only on explicit confirm. */
+function confirmRevokePaired(name) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'sheet-backdrop';
+    const sheet = document.createElement('div');
+    sheet.className = 'sheet';
+    sheet.setAttribute('role', 'dialog');
+    sheet.setAttribute('aria-modal', 'true');
+    sheet.innerHTML = `
+      <div class="sheet-handle"></div>
+      <div style="font-size:17px;font-weight:700;margin:4px 2px 8px;">${escPaired(t('m.settings.pairedRevokeTitle'))}</div>
+      <div style="font-size:14px;color:var(--text-muted);line-height:1.45;margin:0 2px 18px;">${escPaired(t('m.settings.pairedRevokeConfirm', { name }))}</div>
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-ghost" style="flex:1" id="pr-cancel">${escPaired(t('m.common.cancel'))}</button>
+        <button class="btn" style="flex:1;background:var(--danger);color:oklch(0.99 0 0)" id="pr-ok">${escPaired(t('m.settings.pairedRevoke'))}</button>
+      </div>`;
+    document.body.appendChild(backdrop);
+    document.body.appendChild(sheet);
+    requestAnimationFrame(() => { backdrop.classList.add('open'); sheet.classList.add('open'); });
+    let done = false;
+    const close = (val) => {
+      if (done) return; done = true;
+      backdrop.classList.remove('open'); sheet.classList.remove('open');
+      setTimeout(() => { backdrop.remove(); sheet.remove(); }, 280);
+      resolve(val);
+    };
+    sheet.querySelector('#pr-cancel').addEventListener('click', () => close(false));
+    sheet.querySelector('#pr-ok').addEventListener('click', () => close(true));
+    backdrop.addEventListener('click', () => close(false));
+  });
+}
+
 // Keep the Settings list live as controllers connect/disconnect.
 if (typeof window !== 'undefined') window.addEventListener('pulsar-pads-changed', renderControllers);
 
@@ -1038,6 +1124,10 @@ function wireFields(section) {
   // ── Controllers: render the live connected list ──
   renderControllers();
 
+  // ── Paired devices (host trust list): live on pair / revoke / last-seen ──
+  renderPaired();
+  if (hasTauri) listen('paired-devices-changed', () => renderPaired()).catch(() => {});
+
   // ── Codec seg ──
   const codecSeg = document.getElementById('s-codec');
   wireSegControl(codecSeg, 'auto', (v) => save({ codecPref: v }));
@@ -1195,6 +1285,8 @@ function onLangChange() {
     });
   }
 
+  renderPaired();
+
   // Sync the language select to the new active language
   const langSel = document.getElementById('s-lang');
   if (langSel) langSel.value = lang;
@@ -1233,6 +1325,7 @@ registerScreen({
   },
 
   onShow() {
+    renderPaired();
     // Refresh field values each time the tab is opened (config may have changed
     // via a host/connect flow that called set_config indirectly).
     syncFieldsFromConfig().catch(() => {});
@@ -1248,6 +1341,14 @@ registerScreen({
   const style = document.createElement('style');
   style.id = 'settings-screen-style';
   style.textContent = `
+    /* Paired devices (host trust list) */
+    .paired-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+    .paired-item { display: flex; align-items: center; gap: 12px; }
+    .paired-meta { flex: 1; min-width: 0; }
+    .paired-name { font-size: 15px; font-weight: 600; color: var(--text); word-break: break-word; }
+    .paired-sub { font-size: 12px; color: var(--text-muted); word-break: break-all; margin-top: 2px; }
+    .paired-revoke { flex: none; padding: 10px 14px; font-size: 13px; color: var(--danger); border-color: var(--danger); }
+
     /* Settings save toast */
     #settings-toast {
       position: fixed;

@@ -32,6 +32,7 @@ import { getPref }                                         from '../store/prefs.
 import { start as startConnecting, cancel as cancelConnecting } from './connecting.js';
 import { openGamesFetch }                                  from './games.js';
 import { toast }                                           from '../toast.js';
+import { identityChangedId, confirmIdentityChange }        from '../trust-guard.js';
 
 // Slot → connected device id (set in doConnect) so the host-identity events below
 // cache under the right id.
@@ -700,6 +701,17 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 		try { cancelConnecting(false); } catch (_) {}
 		// Dismissing the relay-auth sheet is a deliberate cancel, not a failure to report.
 		if (e && e.cancelled) return;
+		// The host answered with a different key than the one pinned on the first connect:
+		// blocked. Only the user's explicit "trust the new key" drops the pin and retries.
+		const changedId = identityChangedId(e);
+		if (changedId) {
+			say(t('m.trust.blocked'), true);
+			if (await confirmIdentityChange(changedId, relayAddr)) {
+				say('');
+				return doConnect(target, slot, modeOverride, gameId);
+			}
+			return;
+		}
 		const raw = e && e.message ? e.message : String(e);
 		const msg = friendlyConnectError(raw);
 		say(msg, true);

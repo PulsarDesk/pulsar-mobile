@@ -19,6 +19,7 @@ mod pad_feed;
 mod relay_cmds;
 mod rtp;
 mod session_cmds;
+mod trust;
 
 /// Tauri entry point. On mobile the `mobile_entry_point` macro exports the
 /// symbol the generated Android/iOS shell calls; on desktop `main.rs` calls it
@@ -71,6 +72,13 @@ pub fn run() {
             // ── Input / session (client.rs) ───────────────────────────────────
             client::connect_host,
             client::list_remote_games,
+            // ── Pairing + TOFU host-key pins (client.rs, trust.rs) ────────────
+            client::pair_device,
+            client::unpair_device,
+            trust::forget_peer,
+            trust::device_creds,
+            trust::list_paired_devices,
+            trust::revoke_paired_device,
             client::relay_health,
             client::local_ip,
             client::node_port,

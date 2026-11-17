@@ -10,6 +10,13 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   decode_caps.rs: connect-time codec + fps choice from the phone's decoders
   (hardware-only auto codec with AV1 last, `decode_codecs` pinned to the armed codec,
   decoder fps cap, refresh vote).
+  trust.rs: the desktop's trust files, same names + JSON shapes — `known_peers.json` (TOFU
+  pin of each relay id's host key; `connect_pinned` refuses a changed key with
+  `IDENTITY_CHANGED:<id>`, only the user's "trust the new key" → `forget_peer` clears it;
+  UI: `ui/js/trust-guard.js`), `paired_devices.json` (clients this phone trusts as host: no
+  OTP, no approval sheet; pairing asks on the approval sheet unless the session proved a
+  password; Settings → Paired devices lists / revokes) and `device_creds.json` (client: the
+  host accepted our `pair_device`; Devices → ⋮ → Pair / Unpair).
   pad_feed.rs: physical gamepads — Kotlin `PadInput` sends pad state over a loopback
   UDP socket (token-prefixed datagrams), forwarded to the active pane's host as
   `GamepadSlot`; neutral state on focus loss / pane change / session end; rumble back.
