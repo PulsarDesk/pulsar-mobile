@@ -38,7 +38,12 @@ internal class PointerCapture(private val activity: Activity, private val webVie
     /** The view the listeners are installed on (the webview), null when none. */
     private var installed: WebView? = null
 
+    /** MotionEvent button bits the captured mouse holds down (as last forwarded). */
+    private var held = 0
+
     private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+        // Focus lost = capture lost: no release would ever arrive for a held button.
+        if (!hasFocus) releaseAll()
         if (hasFocus && wanted) request()
     }
 
@@ -60,6 +65,7 @@ internal class PointerCapture(private val activity: Activity, private val webVie
                 }
                 if (wv.hasWindowFocus()) request()
             } else {
+                releaseAll()
                 try { if (wv.hasPointerCapture()) wv.releasePointerCapture() } catch (_: Exception) {}
                 uninstall()
             }
@@ -89,6 +95,9 @@ internal class PointerCapture(private val activity: Activity, private val webVie
         // A captured TOUCHPAD reports absolute finger positions on the pad, not deltas: only a
         // relative mouse is forwarded (a touchpad still works for clicks below).
         val relative = ev.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)
+        // Buttons from the button-state diff on EVERY captured event: captured streams carry
+        // DOWN/UP and BUTTON_PRESS/RELEASE inconsistently across devices, the state is exact.
+        syncButtons(ev.buttonState)
         when (ev.actionMasked) {
             MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
                 if (!relative) return true
@@ -100,17 +109,6 @@ internal class PointerCapture(private val activity: Activity, private val webVie
                 }
                 if (dx != 0f || dy != 0f) emit("m", dx, dy)
             }
-            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
-                val id = when (ev.actionButton) {
-                    MotionEvent.BUTTON_PRIMARY -> 0
-                    MotionEvent.BUTTON_SECONDARY -> 1
-                    MotionEvent.BUTTON_TERTIARY -> 2
-                    MotionEvent.BUTTON_BACK -> 3
-                    MotionEvent.BUTTON_FORWARD -> 4
-                    else -> return true
-                }
-                emit("b", id.toFloat(), if (ev.actionMasked == MotionEvent.ACTION_BUTTON_PRESS) 1f else 0f)
-            }
             MotionEvent.ACTION_SCROLL -> {
                 // AXIS_VSCROLL is +1 per notch UP; the wire wants +dy = down, 100 per notch.
                 val v = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
@@ -119,6 +117,30 @@ internal class PointerCapture(private val activity: Activity, private val webVie
             }
         }
         return true
+    }
+
+    private fun syncButtons(state: Int) {
+        val changed = state xor held
+        if (changed == 0) return
+        for ((bit, id) in BUTTONS) {
+            if ((changed and bit) == 0) continue
+            emit("b", id.toFloat(), if ((state and bit) != 0) 1f else 0f)
+        }
+        held = state
+    }
+
+    /** Release every button still held (capture ends or the window loses focus). */
+    private fun releaseAll() = syncButtons(0)
+
+    private companion object {
+        /** MotionEvent button bit → wire button id (0 left, 1 right, 2 middle, 3 back, 4 fwd). */
+        val BUTTONS = arrayOf(
+            MotionEvent.BUTTON_PRIMARY to 0,
+            MotionEvent.BUTTON_SECONDARY to 1,
+            MotionEvent.BUTTON_TERTIARY to 2,
+            MotionEvent.BUTTON_BACK to 3,
+            MotionEvent.BUTTON_FORWARD to 4,
+        )
     }
 
     private fun emit(kind: String, a: Float, b: Float) {

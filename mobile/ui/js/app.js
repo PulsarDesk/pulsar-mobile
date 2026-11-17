@@ -639,8 +639,10 @@ function wireTouchForwarding() {
 				invoke('send_button', { slot: s, button: b, down: false }).catch(() => {});
 			}
 		};
+		// Only while a session is live: a lock report can land after the session ended
+		// (late data message) and must not grab the mouse on the home screen.
 		const syncCapture = () => {
-			const want = anyLocked();
+			const want = anyLocked() && inSession();
 			if (want === capOn) return;
 			capOn = want;
 			invoke('plugin:pulsar-video|set_pointer_capture', { on: want }).catch(() => {});
@@ -648,16 +650,23 @@ function wireTouchForwarding() {
 		// Called by the native PointerCapture (Kotlin) for a captured physical mouse:
 		// 'm' dx dy = raw counts, 'b' button down(1/0), 'w' dx dy = wheel (100 = 1 notch).
 		window.__pulsarCapMouse = (kind, a, b) => {
-			if (!anyLocked()) return;
-			const slot = capSlot();
-			if (kind === 'b') {
-				const key = slot + ':' + a, down = !!b;
-				if (down) {
-					if (document.body.classList.contains('overlay-open')) return;
-					capHeld.add(key);
-				} else if (!capHeld.delete(key)) return;
+			if (kind === 'b' && !b) {
+				// A release for a button we pressed always goes out, to the slot that got
+				// the press, even after the lock / session state moved on (no stuck button).
+				const k = [...capHeld].find((x) => x.endsWith(':' + a));
+				if (!k) return;
+				capHeld.delete(k);
 				flushRel();
-				invoke('send_button', { slot, button: a, down }).catch(() => {});
+				invoke('send_button', { slot: Number(k.split(':')[0]), button: a, down: false }).catch(() => {});
+				return;
+			}
+			const slot = capSlot();
+			if (!anyLocked() || !inSession()) return;
+			if (kind === 'b') {
+				if (document.body.classList.contains('overlay-open')) return;
+				capHeld.add(slot + ':' + a);
+				flushRel();
+				invoke('send_button', { slot, button: a, down: true }).catch(() => {});
 				return;
 			}
 			if (document.body.classList.contains('overlay-open')) return;
@@ -675,6 +684,18 @@ function wireTouchForwarding() {
 			syncCapture();
 			applyMode();
 		}).catch(() => {});
+		if (bus && bus.on) bus.on('session-started', () => setTimeout(syncCapture, 0)); // after body.in-session is set
+		// One split pane ended while another lives on: forget that slot's lock (a new
+		// stream re-reports its own first state) and release what the mouse held there.
+		if (bus && bus.on) bus.on('session-slot-ended', (d) => {
+			const s = Number(d && d.slot);
+			if (!(s >= 0 && s < ptrLocked.length)) return;
+			releaseHeld(s);
+			ptrLocked[s] = false;
+			_pendingRel = null; relCarry = { x: 0, y: 0 };
+			syncCapture();
+			applyMode();
+		});
 		if (bus && bus.on) bus.on('session-ended', () => {
 			releaseHeld();
 			ptrLocked.fill(false);
