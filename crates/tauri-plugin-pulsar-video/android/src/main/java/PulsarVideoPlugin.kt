@@ -265,6 +265,11 @@ class CharArgs {
 }
 
 @InvokeArg
+class PointerCaptureArgs {
+    var on: Boolean = false
+}
+
+@InvokeArg
 class SetAudioMutedArgs {
     var muted: Boolean = false
 }
@@ -1215,6 +1220,22 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val slot = invoke.parseArgs(VideoSizeArgs::class.java).slot.coerceIn(0, MAX_PANES - 1)
         val pane = panes[slot]
         val r = JSObject(); r.put("ok", true); r.put("detail", "${pane.videoW}x${pane.videoH}")
+        invoke.resolve(r)
+    }
+
+    /** Physical-mouse capture while the host pointer is locked ([PointerCapture]). */
+    private val pointerCapture by lazy { PointerCapture(activity) { webView } }
+
+    /**
+     * Capture (`on: true`) or release a physical mouse. The JS input layer calls this when the
+     * host reports a pointer lock (a game grabbed the mouse) and again on unlock / session end.
+     * Below Android 8 there is no pointer capture: `ok` is false and nothing changes.
+     */
+    @Command
+    fun setPointerCapture(invoke: Invoke) {
+        val on = invoke.parseArgs(PointerCaptureArgs::class.java).on
+        pointerCapture.set(on)
+        val r = JSObject(); r.put("ok", Build.VERSION.SDK_INT >= Build.VERSION_CODES.O); r.put("on", on)
         invoke.resolve(r)
     }
 

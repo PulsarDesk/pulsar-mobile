@@ -143,6 +143,9 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn get_video_size(&self, _slot: u8) -> crate::Result<AttachResponse> {
     Self::noop("no native surface on desktop")
   }
+  pub fn set_pointer_capture(&self, _on: bool) -> crate::Result<AttachResponse> {
+    Self::noop("no pointer capture on desktop")
+  }
   pub fn get_wallpaper_avatar(&self) -> crate::Result<AttachResponse> {
     Self::noop("no wallpaper avatar on desktop")
   }

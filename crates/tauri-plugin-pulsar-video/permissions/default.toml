@@ -13,6 +13,7 @@ permissions = [
   "allow-screen-refresh-rate",
   "allow-gamepad-battery",
   "allow-get-video-size",
+  "allow-set-pointer-capture",
   "allow-get-wallpaper-avatar",
   "allow-mic-start",
   "allow-mic-stop",

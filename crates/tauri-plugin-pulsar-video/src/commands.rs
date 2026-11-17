@@ -116,6 +116,15 @@ pub(crate) async fn get_video_size<R: Runtime>(app: AppHandle<R>, slot: u8) -> R
     app.pulsar_video().get_video_size(slot)
 }
 
+/// Capture (`on: true`) or release a physical mouse: while the host's pointer is locked by a
+/// game, Android pointer capture hides the local pointer and delivers raw relative motion,
+/// buttons and the wheel to the webview (`window.__pulsarCapMouse`).
+/// JS-invokable as `plugin:pulsar-video|set_pointer_capture`.
+#[command]
+pub(crate) async fn set_pointer_capture<R: Runtime>(app: AppHandle<R>, on: bool) -> Result<AttachResponse> {
+    app.pulsar_video().set_pointer_capture(on)
+}
+
 /// The device's home-screen wallpaper as a small (96×96, ≤14 KB) JPEG, base64'd
 /// in `AttachResponse.detail` (`ok:false` when the wallpaper can't be read, e.g.
 /// permission denied or a live wallpaper). Used as this phone's identity image
