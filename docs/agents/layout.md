@@ -13,6 +13,13 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   pad_feed.rs: physical gamepads — Kotlin `PadInput` sends pad state over a loopback
   UDP socket (token-prefixed datagrams), forwarded to the active pane's host as
   `GamepadSlot`; neutral state on focus loss / pane change / session end; rumble back.
+  Desktop-parity pad controls live there too: Select+L1+R1+X → `pad-overlay-toggle`,
+  Start+Select+L1+R1 → `pad-quit` (combo buttons latched off the host until released);
+  while the overlay is open (`set_pad_overlay_open`) the host gets a neutral pad and the
+  pad drives the menu via `pad-nav` → `gamepad-nav.js` `padNav`. The on-screen touch
+  controller is `ui/js/session/vpad.js` (game mode, `send_gamepad` at host pad slot 3).
+  Client streams run immersive (system bars hidden, swipe = transient) — plugin
+  `setImmersive` in `startStreamService` / `stopStreamService`.
 - `mobile/ui/` — **static** webview UI, plain ES modules, no bundler
   (`frontendDist: "ui"`). i18n: `ui/js/i18n/{en,tr,ru,kk}.js`.
 - Client streaming loop (`client.rs` read loop): loss repair and ABR plumbing are the

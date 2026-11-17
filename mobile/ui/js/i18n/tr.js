@@ -485,6 +485,8 @@ export default {
 	"m.gamepad.disconnected": "ayrıldı",
 	"m.gamepad.generic": "Kontrolcü",
 	"m.gamepad.none": "Bağlı kontrolcü yok",
+	"m.gamepad.onscreen": "Ekran kontrolcüsü",
+	"m.gamepad.combos": "Kontrolcü: Select+L1+R1+X bu menüyü açar, Start+Select+L1+R1 oturumu bitirir.",
 	"m.settings.controllers": "Kontrolcüler",
 	"m.gamepad.emuAuto": "Otomatik",
 	"m.settings.overlayBtn": "Overlay tuşu",

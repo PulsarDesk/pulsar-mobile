@@ -485,6 +485,8 @@ export default {
 	"m.gamepad.disconnected": "ажыратылды",
 	"m.gamepad.generic": "Контроллер",
 	"m.gamepad.none": "Қосылған контроллер жоқ",
+	"m.gamepad.onscreen": "Экрандағы геймпад",
+	"m.gamepad.combos": "Контроллер: Select+L1+R1+X осы мәзірді ашады, Start+Select+L1+R1 сеансты аяқтайды.",
 	"m.settings.controllers": "Контроллерлер",
 	"m.gamepad.emuAuto": "Авто",
 	"m.settings.overlayBtn": "Оверлей түймесі",

@@ -485,6 +485,8 @@ export default {
 	"m.gamepad.disconnected": "disconnected",
 	"m.gamepad.generic": "Controller",
 	"m.gamepad.none": "No controllers connected",
+	"m.gamepad.onscreen": "On-screen controller",
+	"m.gamepad.combos": "Controller: Select+L1+R1+X opens this menu, Start+Select+L1+R1 ends the session.",
 	"m.settings.controllers": "Controllers",
 	"m.gamepad.emuAuto": "Auto",
 	"m.settings.overlayBtn": "Overlay button",

@@ -95,6 +95,8 @@ pub fn run() {
             // Physical pads are read natively (pad_feed.rs); the UI only pushes the
             // per-controller emulation choice.
             pad_feed::set_gamepad_targets,
+            // The session menu is open: pads drive it, the host gets a neutral pad.
+            pad_feed::set_pad_overlay_open,
             // ── Session lifecycle (W2-teardown, session_cmds.rs) ──────────────
             session_cmds::end_session,
             // ── Auth race (W3-client-authprompt, session_cmds.rs) ─────────────
