@@ -20,6 +20,14 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   haptics → classic rumble) and hands the pad back to `hid-playstation` (`USBDEVFS_CONNECT`)
   when no FEAT_DS5 session is left. Bluetooth stays a plain `GamepadSlot` (no raw HID for
   apps on stock Android); no pad speaker/mic. Untested on a device.
+  Desktop-parity pad controls live there too: Select+L1+R1+X → `pad-overlay-toggle`,
+  Start+Select+L1+R1 → `pad-quit` (combo buttons latched off the host until released);
+  while the overlay is open (`set_pad_overlay_open`) the host gets a neutral pad and the
+  pad drives the menu via `pad-nav` → `gamepad-nav.js` `padNav` (buttons still held when it
+  closes stay off the host until released; the quit combo ends the ACTIVE pane in a split). The on-screen touch
+  controller is `ui/js/session/vpad.js` (game mode, `send_gamepad` at host pad slot 3).
+  Client streams run immersive (system bars hidden, swipe = transient) — plugin
+  `setImmersive` in `startStreamService` / `stopStreamService`.
 - `mobile/ui/` — **static** webview UI, plain ES modules, no bundler
   (`frontendDist: "ui"`). i18n: `ui/js/i18n/{en,tr,ru,kk}.js`.
 - Client streaming loop (`client.rs` read loop): loss repair and ABR plumbing are the

@@ -26,17 +26,27 @@
 //! * `1` state:     `[1, pad, buttons u32, lx i16, ly i16, rx i16, ry i16, lt u8, rt u8]`
 //! * `2` connected: `[2, pad, vendor u16, product u16, name UTF-8…]`
 //! * `3` removed:   `[3, pad]`
+//!
+//! Pad-side Pulsar controls (desktop parity, `pulsar-desktop/src-tauri/src/play.rs`):
+//! Moonlight's Select+L1+R1+X toggles the session menu (`pad-overlay-toggle` event) and
+//! Start+Select+L1+R1 ends the session (`pad-quit`), each on the rising edge of the full
+//! combo. A combo's buttons are latched off the forwarded state until each is released,
+//! so the host does not see them held once the combo is complete. While the menu is open
+//! (`set_pad_overlay_open`) the host gets a neutral pad and the pad drives the menu
+//! instead: D-pad / left stick, A (activate) and B (back) rising edges become `pad-nav`
+//! events (`up` | `down` | `left` | `right` | `go` | `escape`).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use pulsar_core::SessionSender;
 use pulsar_core::input::ds5::report::USB_INPUT_LEN;
 use pulsar_core::input::ds5::wire::{Ds5Report, Ds5Transport};
-use pulsar_core::input::{EmulationTarget, GamepadKind, GamepadState};
+use pulsar_core::input::{EmulationTarget, GamepadKind, GamepadState, button as bt};
 use pulsar_core::service::{DataMsg, InputEvent};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Re-send period of every connected pad's last state.
 pub const RESEND: Duration = Duration::from_millis(500);
@@ -54,6 +64,110 @@ pub struct PadTargets(pub Mutex<HashMap<String, String>>);
 #[tauri::command]
 pub fn set_gamepad_targets<R: Runtime>(app: AppHandle<R>, targets: HashMap<String, String>) {
     *app.state::<PadTargets>().0.lock().unwrap() = targets;
+}
+
+/// The session menu (overlay dock) is open: pads drive it and the host gets neutral pads.
+static OVERLAY_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// JS: `invoke('set_pad_overlay_open', { open: true })` — on every overlay open / close.
+#[tauri::command]
+pub fn set_pad_overlay_open(open: bool) {
+    OVERLAY_OPEN.store(open, Ordering::Relaxed);
+}
+
+/// Select+L1+R1+X: toggle the session menu (desktop: the keyboard Ctrl+Shift+M).
+pub const OVERLAY_COMBO: u32 = bt::BACK | bt::LB | bt::RB | bt::X;
+/// Start+Select+L1+R1: end the session (desktop: the keyboard Ctrl+Shift+Q).
+pub const QUIT_COMBO: u32 = bt::START | bt::BACK | bt::LB | bt::RB;
+/// Left-stick deflection that counts as a menu direction (desktop `NAVT`).
+const NAVT: i16 = 16000;
+/// `pad-nav` payloads, in [`PadUi`] nav order (the desktop's relayed key names).
+const NAV_KEYS: [&str; 6] = ["up", "down", "left", "right", "go", "escape"];
+
+/// What a pad asked the UI to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadAction {
+    OverlayToggle,
+    Quit,
+    Nav(&'static str),
+}
+
+/// Per-pad combo / menu-navigation edge state.
+#[derive(Debug, Default)]
+pub struct PadUi {
+    prev_overlay: bool,
+    prev_quit: bool,
+    prev_nav: [bool; 6],
+    /// The menu state this pad last saw (see [`PadUi::observe`]).
+    was_open: bool,
+    /// Combo buttons kept off the forwarded state until released.
+    latch: u32,
+}
+
+impl PadUi {
+    /// Track menu open / close. On close every button still held is latched off the host
+    /// until released: the B (or A) press that closed the menu must not reach the game.
+    /// Returns true when the menu just opened.
+    pub fn observe(&mut self, raw: &GamepadState, overlay_open: bool) -> bool {
+        let opened = overlay_open && !self.was_open;
+        if self.was_open && !overlay_open {
+            self.latch |= raw.buttons;
+        }
+        self.was_open = overlay_open;
+        opened
+    }
+
+    /// Feed the pad's raw state; pushes the UI actions it triggers (rising edges only).
+    pub fn step(&mut self, raw: &GamepadState, overlay_open: bool, out: &mut Vec<PadAction>) {
+        let opened = self.observe(raw, overlay_open);
+        let held = |m: u32| raw.buttons & m == m;
+        let ov = held(OVERLAY_COMBO);
+        let quit = held(QUIT_COMBO);
+        if ov && !self.prev_overlay {
+            out.push(PadAction::OverlayToggle);
+            self.latch |= OVERLAY_COMBO;
+        }
+        if quit && !self.prev_quit {
+            out.push(PadAction::Quit);
+            self.latch |= QUIT_COMBO;
+        }
+        self.prev_overlay = ov;
+        self.prev_quit = quit;
+        // A latched button is forwarded again only after its own release.
+        self.latch &= raw.buttons;
+        if overlay_open {
+            let p = |b: u32| raw.buttons & b != 0;
+            let nav = [
+                p(bt::DPAD_UP) || raw.left_y > NAVT,
+                p(bt::DPAD_DOWN) || raw.left_y < -NAVT,
+                p(bt::DPAD_LEFT) || raw.left_x < -NAVT,
+                p(bt::DPAD_RIGHT) || raw.left_x > NAVT,
+                p(bt::A),
+                p(bt::B),
+            ];
+            // Held while the menu opened (touch / 3-finger open): not a menu press.
+            if opened {
+                self.prev_nav = nav;
+            }
+            for i in 0..6 {
+                if nav[i] && !self.prev_nav[i] {
+                    out.push(PadAction::Nav(NAV_KEYS[i]));
+                }
+            }
+            self.prev_nav = nav;
+        } else {
+            self.prev_nav = [false; 6];
+        }
+    }
+
+    /// The state the host gets: neutral while the menu is open, else the raw state minus
+    /// the latched combo buttons.
+    pub fn forward(&self, raw: &GamepadState, overlay_open: bool) -> GamepadState {
+        if overlay_open {
+            return GamepadState::default();
+        }
+        GamepadState { buttons: raw.buttons & !self.latch, ..*raw }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +235,11 @@ pub fn target_for(choice: Option<&str>) -> EmulationTarget {
 struct Pad {
     kind: GamepadKind,
     name: String,
+    /// The pad's raw state as last received; the host gets [`Pad::forwarded`].
     state: GamepadState,
+    ui: PadUi,
+    /// The last state sent to the host (`None` = nothing since the last retarget).
+    sent: Option<GamepadState>,
     /// Got a state datagram since the last retarget (only these are (re-)sent).
     live: bool,
     last_rx: Instant,
@@ -129,7 +247,19 @@ struct Pad {
 
 impl Pad {
     fn new(kind: GamepadKind) -> Self {
-        Pad { kind, name: String::new(), state: GamepadState::default(), live: false, last_rx: Instant::now() }
+        Pad {
+            kind,
+            name: String::new(),
+            state: GamepadState::default(),
+            ui: PadUi::default(),
+            sent: None,
+            live: false,
+            last_rx: Instant::now(),
+        }
+    }
+
+    fn forwarded(&self) -> GamepadState {
+        self.ui.forward(&self.state, OVERLAY_OPEN.load(Ordering::Relaxed))
     }
 }
 
@@ -208,6 +338,7 @@ async fn retarget<R: Runtime>(
     if let Some((_, _, old)) = cur.take() {
         for (idx, p) in pads.iter_mut().filter(|(_, p)| p.live) {
             p.state = GamepadState::default();
+            p.ui = PadUi::default();
             let ev = slot_event(app, *idx, p);
             // The old session may be gone already: then this fails harmlessly.
             let _ = pulsar_core::service::send_input_via(&old, &ev).await;
@@ -218,6 +349,8 @@ async fn retarget<R: Runtime>(
     }
     for p in pads.values_mut() {
         p.state = GamepadState::default();
+        p.ui = PadUi::default();
+        p.sent = None;
         p.live = false;
     }
     // DualSense: nothing replayed into the new session until the pad's next report; its
@@ -256,7 +389,17 @@ fn slot_event<R: Runtime>(app: &AppHandle<R>, idx: u8, p: &Pad) -> InputEvent {
         let m = t.0.lock().unwrap();
         target_for(m.get(short_name(&p.name)).map(String::as_str))
     };
-    InputEvent::GamepadSlot { slot: idx, kind: p.kind, target, state: p.state }
+    InputEvent::GamepadSlot { slot: idx, kind: p.kind, target, state: p.forwarded() }
+}
+
+fn emit_actions<R: Runtime>(app: &AppHandle<R>, actions: &[PadAction]) {
+    for a in actions {
+        let _ = match a {
+            PadAction::OverlayToggle => app.emit("pad-overlay-toggle", ()),
+            PadAction::Quit => app.emit("pad-quit", ()),
+            PadAction::Nav(k) => app.emit("pad-nav", *k),
+        };
+    }
 }
 
 // ── DualSense raw passthrough (ds5.rs / ds5_usb.rs) ──────────────────────────
@@ -306,7 +449,8 @@ impl Ds5Pad {
 fn ds5_payload<R: Runtime>(app: &AppHandle<R>, cur: &Option<Target>, idx: u8, p: &Ds5Pad) -> Option<(Ds5Sent, InputEvent)> {
     let (pane, _, _) = cur.as_ref()?;
     let r = p.latest?;
-    let capture = crate::ds5::capture();
+    // The session menu is open: the host gets a released pad, like the InputDevice pads.
+    let capture = crate::ds5::capture() && !OVERLAY_OPEN.load(Ordering::Relaxed);
     if crate::ds5::host_takes_raw(*pane) {
         let rep = Ds5Report::from_usb_input(&r)?;
         let rep = if capture { rep } else { crate::ds5::released(rep) };
@@ -431,7 +575,11 @@ async fn run<R: Runtime>(app: AppHandle<R>, sock: tokio::net::UdpSocket, token: 
                         p.state = state;
                         p.live = true;
                         p.last_rx = Instant::now();
+                        let mut actions = Vec::new();
+                        p.ui.step(&state, OVERLAY_OPEN.load(Ordering::Relaxed), &mut actions);
+                        emit_actions(&app, &actions);
                         let ev = slot_event(&app, pad, p);
+                        p.sent = Some(p.forwarded());
                         send(&cur, &ev).await;
                     }
                     PadMsg::Removed { pad } => {
@@ -444,8 +592,18 @@ async fn run<R: Runtime>(app: AppHandle<R>, sock: tokio::net::UdpSocket, token: 
             }
             _ = tick.tick() => {
                 retarget(&app, &mut cur, &mut pads, &mut ds5).await;
-                for (idx, p) in pads.iter().filter(|(_, p)| p.live && p.last_rx.elapsed() < RESEND_WINDOW) {
+                // Past the window only when the forwarded state changed with no datagram
+                // (the menu opened / closed while the pad sat still): the host must not keep
+                // a held stick while the pad drives the menu.
+                let open = OVERLAY_OPEN.load(Ordering::Relaxed);
+                for (idx, p) in pads.iter_mut().filter(|(_, p)| p.live) {
+                    // The menu may have closed with a button still held and no datagram since.
+                    p.ui.observe(&p.state, open);
+                    if p.last_rx.elapsed() >= RESEND_WINDOW && p.sent == Some(p.forwarded()) {
+                        continue;
+                    }
                     let ev = slot_event(&app, *idx, p);
+                    p.sent = Some(p.forwarded());
                     send(&cur, &ev).await;
                 }
                 for (idx, p) in ds5.iter_mut() {
@@ -538,6 +696,97 @@ mod tests {
         assert_eq!(short_name("Pad (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)"), "Pad");
         assert_eq!(short_name("  Pad  "), "Pad");
         assert_eq!(short_name("Pad (x"), "Pad (x");
+    }
+
+    fn st(buttons: u32) -> GamepadState {
+        GamepadState { buttons, ..Default::default() }
+    }
+
+    #[test]
+    fn overlay_combo_fires_once_and_is_latched() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        ui.step(&st(bt::BACK | bt::LB | bt::RB), false, &mut out);
+        assert!(out.is_empty());
+        let full = st(OVERLAY_COMBO | bt::A);
+        ui.step(&full, false, &mut out);
+        assert_eq!(out, vec![PadAction::OverlayToggle]);
+        // The combo's buttons are not forwarded; A is.
+        assert_eq!(ui.forward(&full, false).buttons, bt::A);
+        // Still held: no second toggle.
+        out.clear();
+        ui.step(&full, false, &mut out);
+        assert!(out.is_empty());
+        // X released, the rest still held: still latched.
+        let partial = st(bt::BACK | bt::LB | bt::RB);
+        ui.step(&partial, false, &mut out);
+        assert_eq!(ui.forward(&partial, false).buttons, 0);
+        // All released, then L1 alone: forwarded again.
+        ui.step(&st(0), false, &mut out);
+        ui.step(&st(bt::LB), false, &mut out);
+        assert_eq!(ui.forward(&st(bt::LB), false).buttons, bt::LB);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn quit_combo_is_distinct() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        ui.step(&st(QUIT_COMBO), false, &mut out);
+        assert_eq!(out, vec![PadAction::Quit]);
+        assert_eq!(ui.forward(&st(QUIT_COMBO), false).buttons, 0);
+    }
+
+    #[test]
+    fn open_menu_gets_nav_and_host_gets_neutral() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        let s = GamepadState { buttons: bt::DPAD_DOWN, left_x: 20000, right_trigger: 200, ..Default::default() };
+        ui.step(&st(0), true, &mut out);
+        ui.step(&s, true, &mut out);
+        assert_eq!(out, vec![PadAction::Nav("down"), PadAction::Nav("right")]);
+        assert_eq!(ui.forward(&s, true), GamepadState::default());
+        // Held: one step per press.
+        out.clear();
+        ui.step(&s, true, &mut out);
+        assert!(out.is_empty());
+        ui.step(&st(bt::A), true, &mut out);
+        ui.step(&st(bt::B), true, &mut out);
+        assert_eq!(out, vec![PadAction::Nav("go"), PadAction::Nav("escape")]);
+        // Closed (all released): no nav, the raw state is forwarded again.
+        out.clear();
+        ui.step(&st(0), false, &mut out);
+        ui.step(&s, false, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(ui.forward(&s, false), s);
+    }
+
+    #[test]
+    fn button_that_closed_menu_stays_off_host() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        ui.step(&st(0), true, &mut out);
+        ui.step(&st(bt::B), true, &mut out);
+        assert_eq!(out, vec![PadAction::Nav("escape")]);
+        // The UI closed the menu while B is still down (tick path, no datagram).
+        ui.observe(&st(bt::B), false);
+        assert_eq!(ui.forward(&st(bt::B), false).buttons, 0);
+        // B released, then pressed again: forwarded.
+        ui.step(&st(0), false, &mut out);
+        ui.step(&st(bt::B), false, &mut out);
+        assert_eq!(ui.forward(&st(bt::B), false).buttons, bt::B);
+    }
+
+    #[test]
+    fn held_button_when_menu_opens_is_not_a_press() {
+        let mut ui = PadUi::default();
+        let mut out = Vec::new();
+        ui.step(&st(bt::A), false, &mut out);
+        ui.step(&st(bt::A), true, &mut out);
+        assert!(out.is_empty());
+        ui.step(&st(0), true, &mut out);
+        ui.step(&st(bt::A), true, &mut out);
+        assert_eq!(out, vec![PadAction::Nav("go")]);
     }
 
     #[test]

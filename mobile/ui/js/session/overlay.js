@@ -35,7 +35,12 @@
  *   session-ended         — { slot }
  *   mode-changed          — 'remote' | 'game'
  *
- * Does NOT call any Tauri commands directly — it is a pure host surface.
+ * Its only Tauri traffic is the controller glue (desktop parity): it reports open /
+ * close to pad_feed.rs (`set_pad_overlay_open` — the host gets a neutral pad while the
+ * pad drives the menu) and listens for the pad combos and menu steps:
+ *   pad-overlay-toggle — Select+L1+R1+X → toggle()
+ *   pad-quit           — Start+Select+L1+R1 → end the session
+ *   pad-nav            — 'up'|'down'|'left'|'right'|'go'|'escape' → gamepad-nav.js
  * Feature panels (quality.js, hud.js, etc.) invoke commands from their own cards.
  *
  * Touch-first design (DT-overlay):
@@ -48,6 +53,8 @@
  */
 
 import { t } from '../i18n.js';
+import { invoke, listen, hasTauri } from '../tauri.js';
+import { padNav, clearPadFocus } from '../gamepad-nav.js';
 
 // ---- Registry -------------------------------------------------------------------
 
@@ -151,6 +158,7 @@ export function open() {
 	const _ca = _dockEl.querySelector('.overlay-card-area');
 	if (_ca) _ca.scrollTop = 0;
 	_open = true;
+	_reportPadOverlay(true);
 	// Disable input forwarding (input.js checks this) + hide the FAB so it doesn't
 	// float over the dock.
 	document.body.classList.add('overlay-open');
@@ -166,6 +174,8 @@ export function open() {
 /** Close the overlay dock. */
 export function close() {
 	_open = false;
+	_reportPadOverlay(false);
+	clearPadFocus();
 	document.body.classList.remove('overlay-open');
 	_dockEl?.classList.remove('open');
 	_backdropEl?.classList.remove('open');
@@ -183,6 +193,37 @@ export function toggle() {
 export function isOpen() {
 	return _open;
 }
+
+// ---- Controller glue (pad_feed.rs) ----------------------------------------------
+
+/** Tell the native pad feed whether the pad drives the menu (host gets a neutral pad). */
+function _reportPadOverlay(open) {
+	if (!hasTauri) return;
+	invoke('set_pad_overlay_open', { open }).catch(() => {});
+}
+
+const _inSession = () => document.body.classList.contains('in-session');
+
+/**
+ * End the session the pad plays in. One pane: the dock's End button path. In a split
+ * that button opens a touch-only picker sheet, so end the ACTIVE pane (the one the
+ * pad drives — the desktop quit combo ends its own window's session) directly.
+ * session.js is imported lazily: it is already loaded in-session, and a static import
+ * would add a cycle through the feature panels.
+ */
+function _endFromPad() {
+	close();
+	import('./session.js').then((s) => {
+		if (s.registry.length > 1) s.endSession(s.activeSlot());
+		else document.getElementById('btn-end')?.click();
+	}).catch(() => document.getElementById('btn-end')?.click());
+}
+
+// The feed only runs while a stream is on screen, so these fire in-session only; the
+// guards cover an event racing the session's end.
+listen('pad-overlay-toggle', () => { if (_inSession()) toggle(); }).catch(() => {});
+listen('pad-quit', () => { if (_inSession()) _endFromPad(); }).catch(() => {});
+listen('pad-nav', (key) => { if (_open && _inSession()) padNav(key); }).catch(() => {});
 
 // ---- DOM build ------------------------------------------------------------------
 
@@ -246,6 +287,8 @@ function _buildDOM() {
 	// gesture doesn't also forward to the host as remote input.
 	document.addEventListener('touchstart', (e) => {
 		if (e.touches && e.touches.length >= 3) {
+			// Three fingers on the on-screen controller (stick + button + trigger) is play.
+			if ([...e.touches].some((x) => x.target && x.target.closest && x.target.closest('.gamepad-layer'))) return;
 			e.stopPropagation();
 			toggle();
 		}

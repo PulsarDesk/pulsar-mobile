@@ -77,6 +77,8 @@ _importOverlay.then(() => import('./session/audio.js')).catch(() => null);
 _importOverlay.then(() => import('./session/sidechannels.js')).catch(() => null);
 _importOverlay.then(() => import('./session/files.js')).catch(() => null);
 _importOverlay.then(() => import('./session/keyboard.js')).catch(() => null);
+// On-screen touch controller (game mode; toggled from the overlay's Controllers card).
+_importOverlay.then(() => import('./session/vpad.js')).catch(() => null);
 // Global connected-controller monitor (toast on connect + the "Controllers" list).
 import('./session/gamepad-monitor.js').catch(() => null);
 
@@ -464,10 +466,15 @@ function wireTouchForwarding() {
 		if (_sessionMod && _sessionMod.registry && _sessionMod.registry.length >= 2) return true;
 		return !!(window.__pulsarSplitActive && window.__pulsarSplitActive());
 	};
+	// A finger on the on-screen controller (vpad.js) is gamepad input: a touch that
+	// joins it must not become a pinch / 2-finger gesture on the host either.
+	const onPad = (e) => !!(e.touches && [...e.touches].some((t) =>
+		t.target && t.target.closest && t.target.closest('.gamepad-layer')));
 	const uiBlocked = (e) =>
 		document.body.classList.contains('overlay-open') ||
 		document.body.classList.contains('fab-dragging') ||
-		(e.target && e.target.closest && e.target.closest(SKIP_SEL));
+		(e.target && e.target.closest && e.target.closest(SKIP_SEL)) ||
+		onPad(e);
 
 	// Aspect-fit rect (zoom factor 1) for the current video + screen, CSS px.
 	const fitRect = () => {

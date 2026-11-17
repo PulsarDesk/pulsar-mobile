@@ -249,6 +249,23 @@ function _tick() {
 	requestAnimationFrame(_tick);
 }
 
+/**
+ * One menu step from the NATIVE pad feed (pad_feed.rs `pad-nav`). In a session the
+ * Web Gamepad API sees nothing (PadInput consumes pad events before the WebView), so
+ * the session menu is driven by these relayed rising edges instead of `_tick`.
+ * @param {'up'|'down'|'left'|'right'|'go'|'escape'} key
+ */
+export function padNav(key) {
+	if (key === 'go') _activate();
+	else if (key === 'escape') _back();
+	else if (key === 'up' || key === 'down' || key === 'left' || key === 'right') _move(key);
+}
+
+/** Drop the focus ring (the menu it was in closed). */
+export function clearPadFocus() {
+	_setCurrent(null);
+}
+
 export function startGamepadNav() {
 	if (_running) return;
 	_running = true;

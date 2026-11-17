@@ -101,6 +101,8 @@ pub fn run() {
             pad_feed::set_gamepad_targets,
             // DualSense raw passthrough master switch (ds5.rs).
             ds5::set_ds5_enabled,
+            // The session menu is open: pads drive it, the host gets a neutral pad.
+            pad_feed::set_pad_overlay_open,
             // ── Session lifecycle (W2-teardown, session_cmds.rs) ──────────────
             session_cmds::end_session,
             // ── Auth race (W3-client-authprompt, session_cmds.rs) ─────────────

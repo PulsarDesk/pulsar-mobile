@@ -491,6 +491,8 @@ export default {
 	"m.gamepad.disconnected": "отключён",
 	"m.gamepad.generic": "Контроллер",
 	"m.gamepad.none": "Нет подключённых контроллеров",
+	"m.gamepad.onscreen": "Экранный геймпад",
+	"m.gamepad.combos": "Контроллер: Select+L1+R1+X открывает это меню, Start+Select+L1+R1 завершает сеанс.",
 	"m.settings.controllers": "Контроллеры",
 	"m.gamepad.emuAuto": "Авто",
 	"m.settings.overlayBtn": "Кнопка оверлея",

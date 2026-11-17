@@ -55,6 +55,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -419,7 +421,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         appResumed = true // load runs with the activity in the foreground
         activity.application.registerActivityLifecycleCallbacks(
             object : android.app.Application.ActivityLifecycleCallbacks {
-                override fun onActivityResumed(a: android.app.Activity) { if (a === activity) appResumed = true }
+                override fun onActivityResumed(a: android.app.Activity) {
+                    if (a !== activity) return
+                    appResumed = true
+                    // Back from another app mid-stream: some OEMs show the bars again.
+                    if (immersive) a.window.decorView.post { if (immersive) applyImmersive(true) }
+                }
                 override fun onActivityPaused(a: android.app.Activity) { if (a === activity) appResumed = false }
                 override fun onActivityCreated(a: android.app.Activity, b: android.os.Bundle?) {}
                 override fun onActivityStarted(a: android.app.Activity) {}
@@ -2295,6 +2302,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun startStreamService() {
         acquirePerfLocks()
+        setImmersive(true)
         val svc = Intent(activity, StreamService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) activity.startForegroundService(svc)
         else activity.startService(svc)
@@ -2302,7 +2310,38 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun stopStreamService() {
         releasePerfLocks()
+        setImmersive(false)
         activity.stopService(Intent(activity, StreamService::class.java))
+    }
+
+    // ---------------- immersive fullscreen (client stream) ----------------
+
+    // Status + navigation bars hidden while a stream is on screen (Moonlight-style); a swipe
+    // from the edge shows them transiently and they hide again by themselves. The app is
+    // already edge-to-edge, so the panes' layout does not change. Restored when the last
+    // stream stops — delayed, so a restream (stopStream + startStream) does not flash them.
+    private var immersive = false
+    private val immersiveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val showSystemBars = Runnable { applyImmersive(false) }
+
+    /** UI thread. */
+    private fun setImmersive(on: Boolean) {
+        immersiveHandler.removeCallbacks(showSystemBars)
+        if (on) applyImmersive(true) else if (immersive) immersiveHandler.postDelayed(showSystemBars, 800L)
+    }
+
+    /** UI thread. */
+    private fun applyImmersive(on: Boolean) {
+        immersive = on
+        try {
+            val c = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+            if (on) {
+                c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                c.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                c.show(WindowInsetsCompat.Type.systemBars())
+            }
+        } catch (e: Exception) { Log.w(TAG, "immersive($on) failed: ${e.message}") }
     }
 
     // ---------------- audio (M5) ----------------
