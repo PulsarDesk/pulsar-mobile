@@ -28,10 +28,19 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   Kotlin decoder reports dropped AUs (`needIdr` → IDR request) and its counters
   (`decoder_status`: decoded / dropped / stalled): a decoder that puts out < 85 % of what it is
   fed, or finds no input buffer for ≥ 5 %, 3 windows running (a window with a network burst
-  is skipped), steps the fps down ONE rung (`Controller::client_decoder_sheds`, retried upward after 5 min, doubling; the UI
-  shows `play-decode-limit`). Backlog drops alone are no verdict: the reorder buffer's release
-  of a held hole overflows the 16-AU backlog on any decoder. `last_req` keeps the session's fps,
-  not the decoder-forced one.
+  is skipped), steps to a lower-fps rung and caps the ladder there (`decoder_sheds_step` →
+  `Controller::client_decode_bound` fed the frame budget, since MediaCodec reports no decode
+  time; retried upward later, doubling; the UI shows `play-decode-limit`). Backlog drops alone
+  are no verdict: the reorder buffer's release of a held hole overflows the 16-AU backlog on any
+  decoder. `last_req` keeps the session's size + fps (the ladder's top), not the current rung.
+  Resolution/fps ladder ON (`apply_ladder`, desktop play.rs parity): top rung = requested size at
+  the decoder-capped fps (`decode_caps::effective_fps`), so no rung exceeds the decoder; floors
+  remote 720p (desktop 1080p) / game 720p60, last resort 720p30; a session-menu restream rebuilds
+  the ladder and asks the host for its start rung. Auto start = probe, else per-path memory, else
+  the controller's cautious no-memory start (was a fixed 8 Mbit). `acfg.mobile` (gentler start +
+  climb) from `mobile_link.rs` → plugin `networkKind` (ConnectivityManager: cellular, or metered
+  non-VPN Wi-Fi = a phone hotspot), once per session start like the desktop (no mid-session
+  re-detect there either).
   Still off on mobile: RFI and intra refresh (`rfi: false`, `ir_capable = false`) — they need
   the depacketizer to resume on a recovery frame and per-decoder MediaCodec verification.
 - `crates/tauri-plugin-pulsar-video/` — the native surface plugin.

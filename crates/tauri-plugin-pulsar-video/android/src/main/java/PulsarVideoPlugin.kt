@@ -34,6 +34,8 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.net.Uri
 import android.os.Build
@@ -1340,6 +1342,47 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val r = JSObject()
         r.put("ok", true); r.put("hw", hw); r.put("sw", sw); r.put("maxFps", maxFps)
         r.put("panelHz", Math.round(panelMaxHz()))
+        invoke.resolve(r)
+    }
+
+    /**
+     * Native-only (Rust, not a JS command): what the active network runs over, for the
+     * adaptive controller's phone-link mode (a cellular link reads its burst in the start
+     * probe and stalls on handovers: it starts lower and climbs gently). `cellular` = a
+     * cellular transport; `metered` = no NOT_METERED capability (a phone's Wi-Fi hotspot);
+     * `vpn` = the active network is a VPN (its metered flag says little, its transports
+     * include the underlying network's on recent Android). `known` = false when nothing
+     * could be read.
+     */
+    @Command
+    @Suppress("DEPRECATION") // activeNetworkInfo / TYPE_* before Android 6 only
+    fun networkKind(invoke: Invoke) {
+        var known = false; var cellular = false; var wifi = false; var vpn = false; var metered = false
+        try {
+            val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+                if (caps != null) {
+                    known = true
+                    cellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    vpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                }
+            } else {
+                val info = cm.activeNetworkInfo
+                if (info != null) {
+                    known = true
+                    cellular = info.type == ConnectivityManager.TYPE_MOBILE
+                    wifi = info.type == ConnectivityManager.TYPE_WIFI
+                    metered = cm.isActiveNetworkMetered
+                }
+            }
+        } catch (e: Exception) { Log.w(TAG, "networkKind error", e) }
+        Log.i(TAG, "networkKind known=$known cellular=$cellular wifi=$wifi vpn=$vpn metered=$metered")
+        val r = JSObject()
+        r.put("known", known); r.put("cellular", cellular); r.put("wifi", wifi)
+        r.put("vpn", vpn); r.put("metered", metered)
         invoke.resolve(r)
     }
 

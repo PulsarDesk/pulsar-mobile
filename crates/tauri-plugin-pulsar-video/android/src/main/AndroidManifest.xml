@@ -15,6 +15,9 @@
          WifiManager). Both are normal-level — no runtime prompt. The lock itself is
          acquired in PulsarVideoPlugin.load(). -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Adaptive streaming: networkKind() reads the active network's transport (cellular /
+         metered) through ConnectivityManager, which needs this. Normal-level, no prompt. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Host audio: MediaProjection playback-capture requires RECORD_AUDIO. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
