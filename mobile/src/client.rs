@@ -145,7 +145,7 @@ mod slot_gen_tests {
 
 #[cfg(test)]
 mod ladder_tests {
-    use super::{apply_ladder, decoder_sheds_step};
+    use super::{apply_ladder, decoder_sheds_step, restream_controller};
     use pulsar_core::adapt::{self, Controller};
 
     fn ctl(native: (u32, u32, u32), game: bool, start_kbps: u32) -> Controller {
@@ -159,7 +159,7 @@ mod ladder_tests {
     #[test]
     fn no_rung_exceeds_the_decoder_capped_top() {
         for game in [false, true] {
-            for native in [(1920, 1080, 120), (1920, 1080, 60), (1280, 720, 30), (2560, 1440, 90)] {
+            for native in [(1920, 1080, 120), (1920, 1080, 60), (1280, 720, 30), (2560, 1440, 90), (854, 480, 60), (1280, 720, 120)] {
                 let c = ctl(native, game, 0);
                 for p in c.points() {
                     assert!(p.width <= native.0 && p.height <= native.1 && p.fps <= native.2, "{p:?} over {native:?}");
@@ -183,6 +183,20 @@ mod ladder_tests {
         let thin = ctl((1920, 1080, 60), true, 1_500).point();
         assert_eq!((top.width, top.height, top.fps), (1920, 1080, 60));
         assert!(thin.height < 1080, "{thin:?}");
+    }
+
+    #[test]
+    fn a_restream_on_a_phone_link_keeps_the_running_rate() {
+        let mut cfg = adapt::Config::new(adapt::codec_from_wire("h265"), 50_000);
+        cfg.native = (1920, 1080, 60);
+        cfg.start_kbps = 20_000;
+        cfg.startup_windows = 0;
+        cfg.mobile = true;
+        apply_ladder(&mut cfg, true);
+        let c = restream_controller(cfg);
+        assert!(c.target_kbps() >= 20_000, "{}", c.target_kbps());
+        let p = c.point();
+        assert_eq!((p.width, p.height, p.fps), (1920, 1080, 60));
     }
 
     #[test]
@@ -502,6 +516,22 @@ fn decoder_sheds_step(ctl: &mut Controller) -> adapt::Decision {
     let fps = ctl.point().fps.max(1);
     ctl.client_decode_bound(1000.0 / fps as f32)
 }
+/// The controller a session-menu restream rebuilds: it starts at `acfg.start_kbps` (the
+/// picked bitrate, or the rate the link was just running at). On a phone link the core caps a
+/// new controller's start at `MOBILE_START_KBPS` (a session's first seconds, where the probe
+/// reads a cellular link's burst); mid-session that would throw away a rate the link has
+/// already proven and step the ladder down for nothing, so the start is restored and the
+/// rung re-picked for it.
+fn restream_controller(acfg: adapt::Config) -> Controller {
+    let start = acfg.start_kbps;
+    let mut ctl = Controller::new(acfg);
+    if start > 0 && ctl.target_kbps() < start.min(ctl.cap()) {
+        ctl.set_target(start);
+        ctl.set_manual_point(false);
+    }
+    ctl
+}
+
 /// After a stream re-request that rebuilds the host's encoder (a new size / fps), the next
 /// windows' loss is that rebuild gap, not congestion: the controller skips them (desktop
 /// hold.rs does the same).
@@ -1773,7 +1803,7 @@ pub async fn connect_host<R: Runtime>(
                     acfg.ir_capable = false;
                     acfg.mobile = link_mobile;
                     apply_ladder(&mut acfg, new_req.game_mode);
-                    let new_ctl = Controller::new(acfg);
+                    let new_ctl = restream_controller(acfg);
                     let new_top = (new_req.width, new_req.height, new_req.fps);
                     let mut send_req = new_req.clone();
                     let p = new_ctl.point();
@@ -2198,6 +2228,12 @@ pub async fn connect_host<R: Runtime>(
                                 cur_req.width = p.width;
                                 cur_req.height = p.height;
                                 cur_req.fps = p.fps;
+                                // The host rebuilds its encoder for a size / fps change (as the
+                                // tick below; desktop hold.rs does the same on its fast step): the
+                                // gap is not congestion, nor the decoder shedding frames.
+                                last_switch_at = Some(now);
+                                dec_base = None;
+                                dec_verdict = None;
                                 changed = true;
                             }
                             if changed {
