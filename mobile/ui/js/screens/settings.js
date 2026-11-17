@@ -328,6 +328,17 @@ function buildSettingsDom(section) {
           <span class="thumb"></span>
         </label>
       </div>
+      <div class="setting" style="margin-top:12px">
+        <div>
+          <div class="lbl" data-i18n="settings.clipboardSync">${t('settings.clipboardSync')}</div>
+          <div class="settings-field-hint" data-i18n="settings.clipboardSyncDesc">${t('settings.clipboardSyncDesc')}</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="s-clip-sync" aria-label="${t('settings.clipboardSync')}" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
     </div>
 
     <!-- ── Controllers (live connected-pad list) ── -->
@@ -976,6 +987,13 @@ function wireFields(section) {
   if (hostCursorEl) {
     hostCursorEl.addEventListener('change', () => setPref('hostCursor', hostCursorEl.checked));
   }
+  const clipSyncEl = document.getElementById('s-clip-sync');
+  if (clipSyncEl) {
+    clipSyncEl.addEventListener('change', () => {
+      setPref('clipboardSync', clipSyncEl.checked);
+      invoke('set_clipboard_sync', { enabled: clipSyncEl.checked }).catch(() => {});
+    });
+  }
   const overlayBtnEl = document.getElementById('s-overlay-btn');
   if (overlayBtnEl) {
     overlayBtnEl.addEventListener('change', () => {
@@ -1148,6 +1166,8 @@ async function syncFieldsFromConfig() {
   if (overlayBtnEl)                  overlayBtnEl.checked = getPref('overlayButton') !== false;
   const hostCursorInit = document.getElementById('s-host-cursor');
   if (hostCursorInit)                hostCursorInit.checked = getPref('hostCursor') !== false;
+  const clipSyncInit = document.getElementById('s-clip-sync');
+  if (clipSyncInit)                  clipSyncInit.checked = getPref('clipboardSync') !== false;
   const frameRateEl = document.getElementById('s-framerate');
   if (frameRateEl) {
     const fr = getPref('frameRate');

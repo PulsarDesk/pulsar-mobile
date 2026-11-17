@@ -3,4 +3,9 @@
 <paths>
     <external-files-path name="updates" path="updates/" />
     <cache-path name="updates_cache" path="updates/" />
+    <!-- Received files before Android 10 (ReceivedFiles.publishLegacy): the public
+         Downloads/Pulsar Received dir, or the app's external Downloads dir without the
+         storage permission. Android 10+ uses MediaStore URIs instead. -->
+    <external-path name="received" path="Download/Pulsar Received/" />
+    <external-files-path name="received_app" path="Download/Pulsar Received/" />
 </paths>

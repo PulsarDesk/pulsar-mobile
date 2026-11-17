@@ -945,6 +945,16 @@ pub async fn go_online<R: Runtime>(
                         };
 
                         let mut data = DataHandlers::default();
+                        // Two-way clipboard sync (clipsync.rs): the client's copies land on
+                        // this phone's clipboard; the phone's own copies (read only while
+                        // Pulsar is focused) go out through this outbound channel.
+                        let (clip_tx, clip_rx) = tokio::sync::mpsc::channel::<DataMsg>(8);
+                        data.outbound = Some(clip_rx);
+                        crate::clipsync::register_host(sid, clip_tx);
+                        let app_clip = app3.clone();
+                        data.on_clipboard = Box::new(move |text| {
+                            crate::clipsync::apply_remote(&app_clip, &text);
+                        });
                         // Feed client NACKs to the retransmit ring in the video forwarder above.
                         // MediaNack([0]) is the KEYFRAME-REQUEST sentinel (mirrors the desktop
                         // host): the client's retransmit repair failed, its reference chain is
@@ -1025,6 +1035,7 @@ pub async fn go_online<R: Runtime>(
                         }
 
                         // ── Teardown ──────────────────────────────────────────
+                        crate::clipsync::unregister_host(sid);
                         state3.peers.lock().unwrap().remove(&sid);
                         let _ = app3.emit("host-peer-disconnected", PeerDisconnectedPayload { sid });
 

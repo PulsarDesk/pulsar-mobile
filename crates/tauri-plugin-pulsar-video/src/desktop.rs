@@ -134,6 +134,21 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn read_clipboard(&self) -> crate::Result<AttachResponse> {
     Self::noop("no native clipboard on desktop")
   }
+  pub fn clipboard_poll(&self, _seq: i64) -> crate::Result<ClipPoll> {
+    Ok(ClipPoll::default())
+  }
+  pub fn write_clipboard(&self, _text: &str) -> crate::Result<AttachResponse> {
+    Self::noop("no native clipboard on desktop")
+  }
+  pub fn publish_download(&self, _path: &str, _name: &str) -> crate::Result<PublishedFile> {
+    Ok(PublishedFile { error: "no public Downloads on desktop".into(), ..Default::default() })
+  }
+  pub fn open_download(&self, _uri: &str, _mime: &str) -> crate::Result<AttachResponse> {
+    Self::noop("no file opener on desktop")
+  }
+  pub fn share_download(&self, _uri: &str, _mime: &str) -> crate::Result<AttachResponse> {
+    Self::noop("no share sheet on desktop")
+  }
   pub fn screen_refresh_rate(&self) -> crate::Result<AttachResponse> {
     Self::noop("no native display query on desktop")
   }

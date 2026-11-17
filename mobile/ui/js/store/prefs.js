@@ -19,6 +19,7 @@ const DEFAULTS = {
 	frameRate: 'auto',       // stream fps: 'auto' (=display refresh) | 'unlimited' | 30|60|120|144|168|244
 	resolution: 'auto',      // 'auto' (host default) | '720' | '1080' | '1440' | '2160'
 	hdr: false,              // request HDR (HEVC Main10 / PQ) from the host
+	clipboardSync: true,     // two-way clipboard sync with every open session (desktop parity)
 	gamepadTargets: {},      // controller name → host emulation: 'auto' | 'xbox' | 'ds4'
 };
 

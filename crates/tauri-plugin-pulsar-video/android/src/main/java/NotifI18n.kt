@@ -69,6 +69,22 @@ object NotifI18n {
                 "tr" -> "Uzak oturum aktif"; "ru" -> "Удалённый сеанс активен"
                 "kk" -> "Қашықтағы сеанс белсенді"; else -> "Remote session active"
             }
+            "chanFiles" -> when (l) {
+                "tr" -> "Alınan dosyalar"; "ru" -> "Полученные файлы"
+                "kk" -> "Алынған файлдар"; else -> "Received files"
+            }
+            "fileRecvTitle" -> when (l) {
+                "tr" -> "Dosya alındı"; "ru" -> "Файл получен"
+                "kk" -> "Файл алынды"; else -> "File received"
+            }
+            "fileOpen" -> when (l) {
+                "tr" -> "Aç"; "ru" -> "Открыть"
+                "kk" -> "Ашу"; else -> "Open"
+            }
+            "fileShare" -> when (l) {
+                "tr" -> "Paylaş"; "ru" -> "Поделиться"
+                "kk" -> "Бөлісу"; else -> "Share"
+            }
             else -> key
         }
     }

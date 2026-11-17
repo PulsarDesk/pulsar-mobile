@@ -27,7 +27,7 @@
  *   fs-entries   { slot, path, entries:[{name,dir,size}] }
  *   file-begin   { slot, id, name, size, chunks }
  *   file-progress{ slot, id, received, total }
- *   file-recv    { slot, id, name, savedPath }
+ *   file-recv    { slot, id, name, savedPath, uri, mime }  (uri = Downloads copy, Open/Share)
  *
  * Commands (JS → Rust, §2.3 contract):
  *   fs_list      { slot, path }        → () (reply via fs-entries)
@@ -256,6 +256,24 @@ async function _sendFile(file) {
 	}, 8000);
 }
 
+/**
+ * Open a received file in another app, or share it (system share sheet). The file lives
+ * in the public Downloads/Pulsar Received folder; `item.uri` is its content:// URI.
+ * @param {{uri: string, mime?: string}} item  @param {'open'|'share'} how
+ */
+async function _openReceived(item, how) {
+	try {
+		const res = await invoke(how === 'open' ? 'open_received' : 'share_received',
+			{ uri: item.uri, mime: item.mime || '' });
+		if (res && res.ok === false) {
+			_showToast(t(res.detail === 'no_app' ? 'm.files.noApp' : 'm.files.actionFail'), 'warn');
+		}
+	} catch (err) {
+		console.warn('[files] ' + how + '_received error:', err);
+		_showToast(t('m.files.actionFail'), 'warn');
+	}
+}
+
 /** Convert ArrayBuffer → base64 string (chunked to avoid stack overflow). */
 function _arrayBufferToBase64(buf) {
 	const bytes = new Uint8Array(buf);
@@ -333,15 +351,36 @@ async function _wireEvents() {
 			}
 		}),
 
-		await listen('file-recv', ({ slot, id, name, savedPath }) => {
+		await listen('file-recv', ({ slot, id, name, savedPath, uri, mime }) => {
 			if (slot !== _slot) return;
+			// Empty savedPath = the transfer was incomplete or could not be written.
+			const ok = !!savedPath;
 			const item = _xfers.get(id);
 			if (item) {
-				item.received = item.total;
-				item.state    = 'done';
+				item.received = ok ? item.total : item.received;
+				item.state    = ok ? 'done' : 'fail';
+				item.uri      = uri || '';
+				item.mime     = mime || '';
 				_renderXferQueue();
 			}
-			_showToast(t('files.downloaded', { name }), 'ok');
+			if (!ok) {
+				_showToast(t('files.downloadFail', { name }), 'danger');
+			} else if (uri) {
+				_showToast(t('m.files.savedTo', { name, path: savedPath }), 'ok');
+			} else {
+				_showToast(t('files.downloaded', { name }), 'ok');
+			}
+
+			// A file published to Downloads keeps its row (Open / Share); only the last
+			// few stay so the queue doesn't grow for the whole session.
+			if (ok && uri) {
+				const kept = [..._xfers.values()].filter((x) => x.direction === 'dl' && x.uri);
+				if (kept.length > 3) {
+					_xfers.delete(kept[0].id);
+					_renderXferQueue();
+				}
+				return;
+			}
 
 			// Auto-dismiss the completed item after 8 s
 			setTimeout(() => {
@@ -518,7 +557,13 @@ function _renderXferQueue() {
 			<span class="xfer-name" title="${_escapeHtml(item.name)}">${_escapeHtml(item.name)}</span>
 			<span class="xfer-pct">${item.state === 'pending' ? pct + '%' : item.state === 'done' ? '✓' : '✗'}</span>
 			${item.state === 'pending' ? `<div class="xfer-bar"><div class="xfer-fill" style="width:${pct}%"></div></div>` : ''}
+			${item.state === 'done' && item.uri ? `<div class="xfer-actions">
+				<button class="xfer-act" type="button" data-act="open">${t('m.files.open')}</button>
+				<button class="xfer-act" type="button" data-act="share">${t('m.files.share')}</button>
+			</div>` : ''}
 		`;
+		row.querySelector('[data-act="open"]')?.addEventListener('click', () => _openReceived(item, 'open'));
+		row.querySelector('[data-act="share"]')?.addEventListener('click', () => _openReceived(item, 'share'));
 
 		queue.appendChild(row);
 	});
@@ -706,6 +751,28 @@ function _injectStyles() {
 	grid-row: 1;
 }
 .xfer-done .xfer-pct { color: oklch(0.63 0.15 158); }
+
+/* Received file: Open / Share (row 2, full width) */
+.xfer-actions {
+	grid-column: 1 / -1;
+	grid-row: 2;
+	display: flex;
+	gap: 6px;
+	margin-top: 4px;
+}
+.xfer-act {
+	flex: 1;
+	min-height: 36px;
+	border: 1px solid oklch(1 0 0 / 0.14);
+	border-radius: 8px;
+	background: oklch(1 0 0 / 0.06);
+	color: oklch(0.92 0 0);
+	font: inherit;
+	font-size: 12px;
+	font-weight: 600;
+	cursor: pointer;
+}
+.xfer-act:active { background: oklch(1 0 0 / 0.16); }
 .xfer-fail .xfer-pct { color: oklch(0.575 0.205 25); }
 
 /* Progress bar spans full width on row 2 */

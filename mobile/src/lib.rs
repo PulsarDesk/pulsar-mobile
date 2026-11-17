@@ -8,6 +8,7 @@
 
 mod adapt_memory;
 mod client;
+mod clipsync;
 mod config;
 mod datachan;
 mod decode_caps;
@@ -67,6 +68,11 @@ pub fn run() {
         .manage(relay_cmds::LocalRelay::default())
         // Physical gamepads: Settings' per-controller host emulation (pad_feed.rs).
         .manage(pad_feed::PadTargets::default())
+        // Two-way clipboard sync watcher (clipsync.rs): idle while no session is open.
+        .setup(|app| {
+            clipsync::spawn_watcher(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // ── Input / session (client.rs) ───────────────────────────────────
             client::connect_host,
@@ -146,6 +152,10 @@ pub fn run() {
             net::relay_authorized,
             // ── Side-channel data (W4-rust-data, datachan.rs) ─────────────────
             datachan::send_clipboard,
+            datachan::open_received,
+            datachan::share_received,
+            // ── Two-way clipboard sync (clipsync.rs) ──────────────────────────
+            clipsync::set_clipboard_sync,
             datachan::send_chat,
             datachan::fs_list,
             datachan::fs_get,

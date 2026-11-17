@@ -95,3 +95,30 @@ pub struct HostStatus {
   pub stop_gen: u32,
   pub message: String,
 }
+
+/// Clipboard sync: `clipboardPoll` result. `seq` is the native clipboard-change counter the
+/// caller passes back next time; `changed` = the clipboard moved since that `seq` AND it could
+/// be read now (Android 10+ only lets a focused app read it), `text` its current text.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClipPoll {
+  pub ok: bool,
+  pub seq: i64,
+  pub changed: bool,
+  pub text: String,
+}
+
+/// A received file published to the public Downloads/Pulsar Received folder
+/// (`publishDownload`). `uri` is a `content://` URI other apps can open (MediaStore, or the
+/// plugin's FileProvider before Android 10), `location` a readable path
+/// ("Download/Pulsar Received/photo.png"), `mime` the guessed type. `ok: false` means
+/// `error` says why and the caller keeps the private copy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PublishedFile {
+  pub ok: bool,
+  pub uri: String,
+  pub location: String,
+  pub mime: String,
+  pub error: String,
+}
