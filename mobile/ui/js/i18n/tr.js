@@ -651,7 +651,7 @@ export default {
 	"m.update.installFailed": "Yükleyici açılamadı.",
 	// Pairing + host-key (TOFU) trust
 	"m.trust.title": "Cihaz kimliği değişti",
-	"m.trust.lead": "{id} cihazı, bu telefonun ilk bağlantında kaydettiğinden farklı bir güvenlik anahtarıyla yanıt verdi. Bu, o cihazda Pulsar yeniden kurulduğunda ya da sıfırlandığında olur — ama başka birinin o cihaz gibi davrandığı anlamına da gelebilir (örneğin ele geçirilmiş bir aktarıcı sunucu üzerinden).",
+	"m.trust.lead": "{id} cihazı, bu telefonun ilk bağlandığında kaydettiğinden farklı bir güvenlik anahtarıyla yanıt verdi. Bu, o cihazda Pulsar yeniden kurulduğunda ya da sıfırlandığında olur — ama başka birinin o cihaz gibi davrandığı anlamına da gelebilir (örneğin ele geçirilmiş bir aktarıcı sunucu üzerinden).",
 	"m.trust.advice": "Bağlantı engellendi. Yeni anahtara yalnızca neden değiştiğini biliyorsan güven — mümkünse önce cihazın sahibine sor.",
 	"m.trust.keep": "Bağlanma",
 	"m.trust.accept": "Yeni anahtara güven",
