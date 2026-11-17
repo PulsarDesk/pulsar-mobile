@@ -309,12 +309,13 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
-  /// Clipboard sync: has the clipboard changed since `seq` (-1 = read it regardless)? Returns
-  /// its text when it did and the app may read it now (focused). Rust-only (sync watcher).
-  pub fn clipboard_poll(&self, seq: i64) -> crate::Result<ClipPoll> {
+  /// Clipboard sync: has the clipboard changed since `seq` (-1 = baseline)? Returns its text
+  /// when it did and the app may read it now (focused). `since` (epoch ms, baseline only) =
+  /// when the session opened: a clip set after it is reported as `fresh`. Rust-only.
+  pub fn clipboard_poll(&self, seq: i64, since: i64) -> crate::Result<ClipPoll> {
     self
       .0
-      .run_mobile_plugin("clipboardPoll", ClipPollArgs { seq })
+      .run_mobile_plugin("clipboardPoll", ClipPollArgs { seq, since })
       .map_err(Into::into)
   }
 
@@ -608,6 +609,7 @@ struct PadRumbleArgs {
 #[derive(Serialize)]
 struct ClipPollArgs {
   seq: i64,
+  since: i64,
 }
 
 #[derive(Serialize)]

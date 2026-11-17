@@ -396,8 +396,13 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
 
     match msg {
         DataMsg::Clipboard(text) => {
-            let applied = crate::clipsync::apply_remote(app, &text);
-            let _ = app.emit("clipboard-in", ClipboardInPayload { slot, text, applied });
+            // Emitted once the sync write finished, so `applied` is only true when the text
+            // really is on the phone's clipboard (else the UI offers the manual "Copy").
+            let app2 = app.clone();
+            let text2 = text.clone();
+            crate::clipsync::apply_remote(app, &text, move |applied| {
+                let _ = app2.emit("clipboard-in", ClipboardInPayload { slot, text: text2, applied });
+            });
         }
         DataMsg::Chat(text) => {
             let _ = app.emit("chat-msg", ChatMsgPayload { slot, text });

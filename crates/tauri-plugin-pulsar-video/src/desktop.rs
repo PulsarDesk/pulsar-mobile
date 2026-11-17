@@ -134,7 +134,7 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn read_clipboard(&self) -> crate::Result<AttachResponse> {
     Self::noop("no native clipboard on desktop")
   }
-  pub fn clipboard_poll(&self, _seq: i64) -> crate::Result<ClipPoll> {
+  pub fn clipboard_poll(&self, _seq: i64, _since: i64) -> crate::Result<ClipPoll> {
     Ok(ClipPoll::default())
   }
   pub fn write_clipboard(&self, _text: &str) -> crate::Result<AttachResponse> {

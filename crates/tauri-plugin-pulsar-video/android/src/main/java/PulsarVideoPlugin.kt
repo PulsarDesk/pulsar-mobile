@@ -138,6 +138,9 @@ class VideoSizeArgs {
 @InvokeArg
 class ClipPollArgs {
     var seq: Long = -1
+    /** Baseline only: when the session opened (System.currentTimeMillis). A clip set after
+     *  it is a real copy, not the baseline, even if Pulsar only got focus later. 0 = unknown. */
+    var since: Long = 0
 }
 
 @InvokeArg
@@ -1333,7 +1336,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
      * - not focused → `seq` is echoed back unchanged so the caller retries later.
      * - `seq` == -1 (baseline when a session opens) → on API 26+ only the clip's timestamp is
      *   recorded (`changed: false`, new `seq`): reading the text would make Android 12+ toast
-     *   "pasted from your clipboard" on every connect. Older versions read the text.
+     *   "pasted from your clipboard" on every connect. Older versions read the text. A clip
+     *   set after `since` (the session opened before Pulsar got focus) is read instead and
+     *   reported with `fresh: true`, so that copy is sent rather than swallowed as baseline.
      * - otherwise the clip is read unless its timestamp shows it is the one already returned.
      */
     @Command
@@ -1342,7 +1347,11 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             val r = JSObject(); r.put("ok", true)
             val cur = clipSeq.get()
-            if (cur == a.seq || !appResumed || !activity.hasWindowFocus()) {
+            // Android 10+ denies background reads (null clip): only read while focused.
+            // Older versions allow them, and their change listener also fires in background.
+            val readable = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                (appResumed && activity.hasWindowFocus())
+            if (cur == a.seq || !readable) {
                 r.put("seq", a.seq); r.put("changed", false); invoke.resolve(r)
                 return@runOnUiThread
             }
@@ -1350,13 +1359,23 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val stamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                     cm.primaryClipDescription?.timestamp ?: 0L else 0L
-                if (stamp != 0L && (a.seq < 0 || stamp == clipStampSeen)) {
+                // Baseline taken late (the session opened while Pulsar was in the background,
+                // e.g. an unattended host): a clip set AFTER the session opened is a real copy
+                // the user expects to be sent, so it is read and reported (`fresh`). The stamp
+                // is wall-clock on current Android; tolerate an elapsedRealtime base too.
+                val since = if (a.since <= 0L || stamp == 0L) 0L
+                    else if (stamp < 1_000_000_000_000L)
+                        a.since - (System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime())
+                    else a.since
+                val fresh = a.seq < 0 && since > 0L && stamp > since
+                if (stamp != 0L && !fresh && (a.seq < 0 || stamp == clipStampSeen)) {
                     clipStampSeen = stamp
                     r.put("seq", cur); r.put("changed", false)
                 } else {
                     val text = cm.primaryClip?.getItemAt(0)?.coerceToText(activity)?.toString() ?: ""
                     clipStampSeen = stamp
                     r.put("seq", cur); r.put("changed", true); r.put("text", text)
+                    r.put("fresh", fresh)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "clipboard poll failed: ${e.message}")

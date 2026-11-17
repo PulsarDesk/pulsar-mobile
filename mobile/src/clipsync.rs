@@ -57,22 +57,45 @@ pub(crate) fn unregister_host(sid: u32) {
     }
 }
 
-/// Text that came from a peer: write it to the local clipboard. Returns `true` when sync is
-/// on and the write was started (the caller then skips the manual-flow toast). The write
-/// runs off the calling task: it hops to the Android UI thread.
-pub(crate) fn apply_remote<R: Runtime>(app: &AppHandle<R>, text: &str) -> bool {
+/// Text that came from a peer: write it to the local clipboard, then call `done(applied)`:
+/// `true` when sync is on and the write succeeded (the caller then skips the manual-flow
+/// toast), `false` otherwise (sync off, too big, or the write failed — e.g. no native
+/// clipboard on this platform). The write runs off the calling task: it hops to the Android
+/// UI thread, so `done` may run later on a blocking-pool thread.
+pub(crate) fn apply_remote<R: Runtime>(
+    app: &AppHandle<R>,
+    text: &str,
+    done: impl FnOnce(bool) + Send + 'static,
+) {
     if !enabled() || text.is_empty() || text.len() > MAX_BYTES {
-        return false;
+        done(false);
+        return;
     }
     *SEEN.lock().unwrap() = Some(text.to_string());
     let app = app.clone();
     let text = text.to_string();
-    tauri::async_runtime::spawn_blocking(move || match app.pulsar_video().write_clipboard(&text) {
-        Ok(r) if r.ok => {}
-        Ok(r) => log::warn!("clipboard sync: writing the remote clipboard failed: {}", r.detail),
-        Err(e) => log::warn!("clipboard sync: writing the remote clipboard failed: {e}"),
+    tauri::async_runtime::spawn_blocking(move || {
+        let ok = match app.pulsar_video().write_clipboard(&text) {
+            Ok(r) if r.ok => true,
+            Ok(r) => {
+                log::warn!("clipboard sync: writing the remote clipboard failed: {}", r.detail);
+                false
+            }
+            Err(e) => {
+                log::warn!("clipboard sync: writing the remote clipboard failed: {e}");
+                false
+            }
+        };
+        done(ok);
     });
-    true
+}
+
+/// Wall-clock now in epoch milliseconds (the base of Android's clip timestamps).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Is any session open (viewed or hosted)?
@@ -103,16 +126,23 @@ pub(crate) fn spawn_watcher<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         // The plugin's clipboard-change counter we last saw; -1 = no baseline yet.
         let mut last_seq: i64 = -1;
+        // When the current run of open sessions started (epoch ms; 0 = idle). The baseline
+        // can only be taken once Pulsar is focused; a clip set after this is a real copy.
+        let mut since: i64 = 0;
         loop {
             tokio::time::sleep(POLL).await;
             if !enabled() || !any_session(&app) {
                 *SEEN.lock().unwrap() = None;
                 last_seq = -1;
+                since = 0;
                 continue;
+            }
+            if since == 0 {
+                since = now_ms();
             }
             let app2 = app.clone();
             let seq = last_seq;
-            let poll = match tauri::async_runtime::spawn_blocking(move || app2.pulsar_video().clipboard_poll(seq)).await {
+            let poll = match tauri::async_runtime::spawn_blocking(move || app2.pulsar_video().clipboard_poll(seq, since)).await {
                 Ok(Ok(p)) if p.ok => p,
                 _ => continue,
             };
@@ -121,11 +151,16 @@ pub(crate) fn spawn_watcher<R: Runtime>(app: AppHandle<R>) {
             }
             let baseline = last_seq < 0;
             last_seq = poll.seq;
-            if baseline {
+            if baseline && !(poll.changed && poll.fresh) {
                 // The plugin may set the baseline from the clip's timestamp alone (no read,
                 // so no Android 12+ "pasted" toast): any later change then counts.
                 *SEEN.lock().unwrap() = Some(if poll.changed { poll.text } else { String::new() });
                 continue;
+            }
+            if baseline {
+                // A fresh clip (copied after the session opened, before Pulsar got focus):
+                // send it, unless it is peer text we wrote ourselves (SEEN holds that).
+                SEEN.lock().unwrap().get_or_insert_with(String::new);
             }
             if !poll.changed || poll.text.len() > MAX_BYTES {
                 continue;

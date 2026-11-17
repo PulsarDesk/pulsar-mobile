@@ -106,6 +106,9 @@ pub struct ClipPoll {
   pub seq: i64,
   pub changed: bool,
   pub text: String,
+  /// Baseline poll only: the clip was set after `since` (the session opened while Pulsar was
+  /// in the background), so `text` is a real copy to send, not the baseline.
+  pub fresh: bool,
 }
 
 /// A received file published to the public Downloads/Pulsar Received folder

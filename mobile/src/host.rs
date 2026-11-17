@@ -953,7 +953,7 @@ pub async fn go_online<R: Runtime>(
                         crate::clipsync::register_host(sid, clip_tx);
                         let app_clip = app3.clone();
                         data.on_clipboard = Box::new(move |text| {
-                            crate::clipsync::apply_remote(&app_clip, &text);
+                            crate::clipsync::apply_remote(&app_clip, &text, |_| {});
                         });
                         // Feed client NACKs to the retransmit ring in the video forwarder above.
                         // MediaNack([0]) is the KEYFRAME-REQUEST sentinel (mirrors the desktop
