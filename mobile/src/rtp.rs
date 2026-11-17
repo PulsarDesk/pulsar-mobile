@@ -25,7 +25,7 @@
 //! the last packet of a frame/TU; a defensive timestamp-change flush fires when the
 //! marker was lost.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 /// Annex-B start code prepended to every emitted H.264/H.265 NAL unit.
@@ -105,6 +105,8 @@ pub struct Depacketizer {
     /// a fresh empty `Vec`) so the next AU reuses the allocation. Empty until a
     /// caller hands a finished AU back via [`Depacketizer::recycle_au`].
     spare: Vec<u8>,
+    /// RTP timestamp of the access unit `push` returned last (see [`Depacketizer::au_ts`]).
+    out_ts: u32,
 }
 
 impl Depacketizer {
@@ -117,7 +119,21 @@ impl Depacketizer {
             av1_frag_obu_hdr: 0,
             av1_frag_pending: false,
             spare: Vec::new(),
+            out_ts: 0,
         }
+    }
+
+    /// RTP timestamp of the access unit the last `push` returned (the frame it belongs to).
+    pub fn au_ts(&self) -> u32 {
+        self.out_ts
+    }
+
+    /// Drop the access unit being assembled (and any fragment in flight): a hole was given up
+    /// on, so it is torn. RFI only — the keyframe path marks the next AU torn instead.
+    pub fn drop_partial(&mut self) {
+        self.au.clear();
+        self.fu = None;
+        self.av1_frag_pending = false;
     }
 
     /// Take the finished access unit, swapping in a recycled spare buffer instead of
@@ -190,8 +206,9 @@ impl Depacketizer {
         // Defensive: a new timestamp with an unfinished AU means the previous
         // frame's marker was lost — flush it before starting the new frame.
         let mut out = None;
-        if self.last_ts.is_some_and(|prev| prev != ts) && !self.au.is_empty() {
+        if let Some(prev) = self.last_ts.filter(|&prev| prev != ts && !self.au.is_empty()) {
             out = Some(self.take_au()); // A24: reuse a recycled buffer
+            self.out_ts = prev;
             self.fu = None;
         }
         self.last_ts = Some(ts);
@@ -204,6 +221,7 @@ impl Depacketizer {
 
         if marker && !self.au.is_empty() && out.is_none() {
             out = Some(self.take_au()); // A24: reuse a recycled buffer
+            self.out_ts = ts;
         }
         out
     }
@@ -498,10 +516,176 @@ const REORDER_RESYNC_DISTANCE: i32 = 256;
 /// (`pulsar_core::adapt::repair::RENDERER_WAIT_MAX_MS`, the desktop renderer's cap).
 const MAX_DELAY_CAP_MS: f32 = pulsar_core::adapt::repair::RENDERER_WAIT_MAX_MS;
 
+// ── Reference-frame invalidation (RFI) ─────────────────────────────────────────────────
+//
+// Ported from the desktop renderer (`pulsar-desktop` crates/pulsar-render/src/stream/rtp.rs),
+// constants and semantics unchanged. When the host advertises `FEAT_RFI` and streams with a
+// deep reference buffer for us (`StreamReq::rfi`), a hole is reported to it early —
+// `RFI_REPORT_AFTER` after the first packet behind it, longer on a path that reorders — while
+// NACK repair still runs, so the host can still reach the lost frame in its reference buffer:
+// it invalidates it and tags its next frame (predicted from an older, intact one) with a
+// Pulsar SEI. If the repair fails, the client drops access units until that tag (or a
+// keyframe) instead of waiting for an IDR; no recovery within `rfi_timeout` → the keyframe
+// request after all. A repaired hole costs nothing but a slightly less efficient frame.
+
+/// How long a hole must persist before it is reported, at least (plain reordering heals
+/// faster)…
+const RFI_REPORT_AFTER: Duration = Duration::from_millis(3);
+/// …and while the path reorders, `REORDER_SLACK` × the recent reorder lateness, at most
+/// `RFI_REPORT_MAX` (a hole given up on is reported at once). The desktop measured a fixed
+/// 3 ms reporting every late packet of a reordering path as lost (each answered with a
+/// recovery frame, release-at-tag then skipped packets still in flight: 11 fps).
+const REORDER_SLACK: f32 = 1.25;
+const RFI_REPORT_MAX: Duration = Duration::from_millis(100);
+/// How fast the reorder lateness peak decays (halves every this long without a new sample).
+const LATE_HALF_LIFE: Duration = Duration::from_secs(2);
+/// Waiting longer than this for a recovery frame → ask for a keyframe (`rfi_timeout`: at least
+/// this, more on a slow path). The wait starts only when the repair window ran out, by which
+/// time a recovery frame (sent ~1 RTT after the report) has normally arrived already. Every
+/// further hole seen while waiting restarts it (that hole was reported too).
+pub const RFI_TIMEOUT: Duration = Duration::from_millis(150);
+/// Upper bound on one recovery wait, however many holes keep restarting `RFI_TIMEOUT`.
+pub const RFI_GIVE_UP: Duration = Duration::from_millis(1000);
+/// The host's recovery-tag SEI UUID.
+const RFI_UUID: [u8; 16] = pulsar_core::service::media::RFI_RECOVERY_UUID;
+
+/// The recovery wait for the current RTT: `RFI_TIMEOUT`, or 1.5 RTT + 50 ms when that is
+/// longer (a report can only be answered after a round trip), never past `RFI_GIVE_UP`.
+pub fn rfi_timeout(rtt: Option<Duration>) -> Duration {
+    let by_rtt = rtt.map_or(Duration::ZERO, |r| r * 3 / 2 + Duration::from_millis(50));
+    RFI_TIMEOUT.max(by_rtt).min(RFI_GIVE_UP)
+}
+
+/// The RTP packet is the host's RFI recovery tag: a single-NAL packet holding the
+/// user-data-unregistered SEI with `RFI_UUID` (H.264 type 6 or HEVC prefix SEI 39). The host
+/// sends it as a packet of its own, the first of the recovery frame.
+pub fn is_recovery_tag_packet(p: &[u8]) -> bool {
+    let Some(pl) = rtp_payload(p) else { return false };
+    let at = |h: usize| pl.len() >= h + 18 && pl[h] == 5 && pl[h + 1] == 16 && pl[h + 2..h + 18] == RFI_UUID;
+    (!pl.is_empty() && pl[0] & 0x1f == 6 && at(1)) || (pl.len() > 2 && (pl[0] >> 1) & 0x3f == 39 && at(2))
+}
+
+/// The Annex-B access unit carries the host's RFI recovery tag (a user-data-unregistered SEI).
+pub fn au_has_recovery_tag(codec: Codec, au: &[u8]) -> bool {
+    let (hevc, hdr) = match codec {
+        Codec::H264 => (false, 1),
+        Codec::H265 => (true, 2),
+        Codec::Av1 => return false,
+    };
+    annexb_any_nal_at(au, |n| {
+        let sei = if hevc { n.len() > 2 && (n[0] >> 1) & 0x3f == 39 } else { !n.is_empty() && n[0] & 0x1f == 6 };
+        sei && n.len() >= hdr + 18 && n[hdr] == 5 && n[hdr + 1] == 16 && n[hdr + 2..hdr + 18] == RFI_UUID
+    })
+}
+
+/// RFI resume gate for the client's decode path (the desktop depacketizer's `awaiting_idr` /
+/// `awaiting_recovery` / `rfi_fallback` logic): which access units may go to the decoder after
+/// a hole the reorder buffer gave up on. Used only while the stream runs with RFI; the plain
+/// wait-for-keyframe gate in the client covers the rest. Pure (time is passed in).
+#[derive(Debug, Default)]
+pub struct RfiGate {
+    /// Access units are dropped until a whole keyframe (or, after a timed-out recovery wait,
+    /// a whole recovery frame — `fallback`).
+    waiting_idr: bool,
+    /// Access units are dropped until the host's recovery frame or a keyframe: (first hole of
+    /// this wait, latest hole).
+    awaiting_recovery: Option<(Instant, Instant)>,
+    /// The keyframe wait came from a recovery wait that timed out — a whole recovery frame
+    /// still ends it: holes keep being reported, and the host invalidates every frame
+    /// predicted from a lost one, so its recovery frame references one this decoder holds. At
+    /// high loss a small recovery frame arrives whole long before a large keyframe does.
+    fallback: bool,
+    /// RTP timestamp of the access unit the last hole ran into: never decoded (torn).
+    gap_ts: Option<u32>,
+}
+
+impl RfiGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The reorder buffer gave up on a hole; `post` is the first packet released after it.
+    /// The access unit it belongs to is torn — unless it is the recovery tag itself (a packet
+    /// of its own, the first of its frame: the common case at high loss). Then wait for the
+    /// recovery frame; a further hole while waiting restarts the timeout.
+    pub fn on_hole(&mut self, post: &[u8], now: Instant) {
+        self.gap_ts = if is_recovery_tag_packet(post) { None } else { rtp_ts(post) };
+        if !self.waiting_idr {
+            self.awaiting_recovery = Some(match self.awaiting_recovery {
+                Some((first, _)) => (first, now),
+                None => (now, now),
+            });
+        }
+    }
+
+    /// The stream restarted on a fresh RTP base (`post` = its first packet): wait for its
+    /// keyframe; no recovery frame can bridge an encoder restart.
+    pub fn on_resync(&mut self, post: &[u8]) {
+        self.awaiting_recovery = None;
+        self.fallback = false;
+        self.waiting_idr = true;
+        self.gap_ts = rtp_ts(post);
+    }
+
+    /// Access units are being dropped until a keyframe (the client asks the host for one).
+    pub fn wants_keyframe(&self) -> bool {
+        self.waiting_idr
+    }
+
+    /// A recovery wait that ran out turns into a keyframe wait. True when it just did.
+    pub fn poll(&mut self, now: Instant, rtt: Option<Duration>) -> bool {
+        let Some((first, last)) = self.awaiting_recovery else { return false };
+        if now.saturating_duration_since(last) >= rfi_timeout(rtt) || now.saturating_duration_since(first) >= RFI_GIVE_UP {
+            self.awaiting_recovery = None;
+            self.waiting_idr = true;
+            self.fallback = true;
+            return true;
+        }
+        false
+    }
+
+    /// May this access unit (RTP timestamp `ts`) go to the decoder? A torn one never does
+    /// (not even a keyframe); while waiting, only a whole keyframe or recovery frame ends the
+    /// wait.
+    pub fn admit(&mut self, codec: Codec, au: &[u8], ts: u32, now: Instant, rtt: Option<Duration>) -> bool {
+        let whole = self.gap_ts != Some(ts);
+        let key = whole && au_is_keyframe(codec, au);
+        let tag = whole && au_has_recovery_tag(codec, au);
+        if self.waiting_idr {
+            if !key && !(self.fallback && tag) {
+                return false;
+            }
+            self.waiting_idr = false;
+            self.fallback = false;
+        }
+        if self.awaiting_recovery.is_some() {
+            if key || tag {
+                self.awaiting_recovery = None;
+            } else {
+                self.poll(now, rtt);
+                return false;
+            }
+        }
+        if !whole {
+            // A torn AU outside any wait (cannot happen after `on_hole`): its references are
+            // gone, so wait for a keyframe.
+            self.waiting_idr = true;
+            return false;
+        }
+        true
+    }
+}
+
+/// RTP timestamp of a datagram.
+fn rtp_ts(p: &[u8]) -> Option<u32> {
+    (p.len() >= 12).then(|| u32::from_be_bytes([p[4], p[5], p[6], p[7]]))
+}
+
 pub struct ReorderBuffer {
-    /// Out-of-order packets awaiting release, keyed by extended seq. Owned copies
-    /// (the source recv datagram is reused by the batch). Recycled via `recycle`.
-    buf: BTreeMap<u64, Vec<u8>>,
+    /// Out-of-order packets awaiting release, keyed by extended seq, each with its arrival
+    /// time (RFI report delay). Owned copies (the source recv datagram is reused by the
+    /// batch). Recycled via `recycle`.
+    buf: BTreeMap<u64, (Instant, Vec<u8>)>,
     /// Extended seq of the next packet to release in order (`None` until primed).
     next: Option<u64>,
     /// Extended seq of the newest packet seen (restart detection, see
@@ -515,11 +699,25 @@ pub struct ReorderBuffer {
     /// Set by `pop_ready` when it skipped past a missing packet; read+cleared by the
     /// caller (`take_gap_declared`) to engage the awaiting-IDR gate + keyframe NACK.
     gap_declared: bool,
+    /// The declared gap was a stream restart (fresh RTP base), not a hole (`take_resynced`).
+    resynced: bool,
     /// Window counters for the ABR controller's *true* loss (declared gaps only).
     win_recv: u32,
     win_lost: u32,
     /// Free list of packet buffers so the hot path stays allocation-free.
     pool: Vec<Vec<u8>>,
+    /// RFI: holes are reported to the host (`set_rfi`).
+    rfi: bool,
+    /// RFI: hole starts already reported; pruned once `next` passes them.
+    reported: Vec<u64>,
+    /// RFI: held packets that are the host's recovery tag (`is_recovery_tag_packet`).
+    tags: BTreeSet<u64>,
+    /// RFI: the lost range waiting to be sent to the host (merged since the last take).
+    rfi_req: Option<(u16, u16)>,
+    /// How late packets arrive behind their successors on this path (ms, a peak that halves
+    /// every `LATE_HALF_LIFE`) and when it was last raised — sizes the RFI report delay.
+    late_peak: f32,
+    late_at: Option<Instant>,
 }
 
 impl Default for ReorderBuffer {
@@ -538,25 +736,116 @@ impl ReorderBuffer {
             max_delay: Duration::from_secs_f32(MAX_DELAY_CAP_MS / 1000.0),
             blocked_since: None,
             gap_declared: false,
+            resynced: false,
             win_recv: 0,
             win_lost: 0,
             pool: Vec::new(),
+            rfi: false,
+            reported: Vec::new(),
+            tags: BTreeSet::new(),
+            rfi_req: None,
+            late_peak: 0.0,
+            late_at: None,
         }
+    }
+
+    /// Drop every held packet (recycling the buffers).
+    fn drop_held(&mut self) {
+        let drained: Vec<Vec<u8>> = self.buf.values_mut().map(|(_, v)| std::mem::take(v)).collect();
+        self.buf.clear();
+        for v in drained {
+            self.recycle(v);
+        }
+        self.reported.clear();
+        self.tags.clear();
     }
 
     /// Drop all buffered state — called on restream, where the host restarts its
     /// RTP sequence base (and the depacketizer is rebuilt).
     pub fn reset(&mut self) {
-        let drained: Vec<Vec<u8>> = self.buf.values_mut().map(std::mem::take).collect();
-        self.buf.clear();
-        for v in drained {
-            self.recycle(v);
-        }
+        self.drop_held();
         self.next = None;
         self.blocked_since = None;
         self.gap_declared = false;
+        self.resynced = false;
         self.win_recv = 0;
         self.win_lost = 0;
+        self.rfi_req = None;
+    }
+
+    /// RFI on / off for this stream (see `RfiGate`). Off: nothing is reported or released early.
+    pub fn set_rfi(&mut self, on: bool) {
+        self.rfi = on;
+        if !on {
+            self.reported.clear();
+            self.tags.clear();
+            self.rfi_req = None;
+        }
+    }
+
+    /// The lost range to report to the host (`DataMsg::MediaRfi`), if any, merged since the
+    /// last call.
+    pub fn take_rfi_request(&mut self) -> Option<(u16, u16)> {
+        self.rfi_req.take()
+    }
+
+    fn report_lost(&mut self, first: u64, last: u64) {
+        self.reported.push(first);
+        let (first, last) = (first as u16, last as u16);
+        self.rfi_req = Some(match self.rfi_req {
+            Some((f, _)) => (f, last),
+            None => (first, last),
+        });
+    }
+
+    /// The reorder lateness peak at `now` (ms, decayed).
+    fn late_ms(&self, now: Instant) -> f32 {
+        let Some(at) = self.late_at else { return 0.0 };
+        let half_lives = now.saturating_duration_since(at).as_secs_f32() / LATE_HALF_LIFE.as_secs_f32();
+        self.late_peak * 0.5f32.powf(half_lives)
+    }
+
+    /// A packet filled a hole `late` after a later packet had arrived.
+    fn note_late(&mut self, now: Instant, late: Duration) {
+        let ms = late.as_secs_f32() * 1000.0;
+        if ms >= self.late_ms(now) {
+            self.late_peak = ms;
+            self.late_at = Some(now);
+        }
+    }
+
+    /// How long a hole waits before it is reported for RFI (see `REORDER_SLACK`).
+    fn report_after(&self, now: Instant) -> Duration {
+        Duration::from_secs_f32(self.late_ms(now) * REORDER_SLACK / 1000.0).clamp(RFI_REPORT_AFTER, RFI_REPORT_MAX)
+    }
+
+    /// RFI: report every hole in front of a held packet that has persisted `report_after`,
+    /// once each (the early hole report — NACK repair keeps running meanwhile). Call once per
+    /// drain, before `pop_ready`.
+    pub fn poll_rfi(&mut self, now: Instant) {
+        if !self.rfi {
+            return;
+        }
+        let Some(next) = self.next else { return };
+        self.reported.retain(|&s| s >= next);
+        // Fast path: no hole at all (the held run is contiguous from `next`).
+        match (self.buf.keys().next(), self.buf.keys().next_back()) {
+            (Some(&lo), Some(&hi)) if lo == next && hi - lo + 1 == self.buf.len() as u64 => return,
+            (None, _) => return,
+            _ => {}
+        }
+        let wait = self.report_after(now);
+        let mut expect = next;
+        let mut found: Vec<(u64, u64)> = Vec::new();
+        for (&s, (t, _)) in &self.buf {
+            if s != expect && now.saturating_duration_since(*t) >= wait && !self.reported.contains(&expect) {
+                found.push((expect, s - 1));
+            }
+            expect = s + 1;
+        }
+        for (f, l) in found {
+            self.report_lost(f, l);
+        }
     }
 
     /// How long a hole may hold the packets behind it (ms): the shared repair loop's
@@ -589,8 +878,14 @@ impl ReorderBuffer {
         }
     }
 
-    /// Insert one video RTP packet (an owned copy is taken).
+    /// Insert one video RTP packet (an owned copy is taken), arriving now.
+    #[cfg(test)]
     pub fn push(&mut self, seq: u16, pkt: &[u8]) {
+        self.push_at(seq, pkt, Instant::now());
+    }
+
+    /// Insert one video RTP packet (an owned copy is taken) that arrived at `now`.
+    pub fn push_at(&mut self, seq: u16, pkt: &[u8], now: Instant) {
         self.win_recv = self.win_recv.saturating_add(1);
 
         let next = match self.next {
@@ -600,8 +895,7 @@ impl ReorderBuffer {
                 let ext = seq as u64;
                 self.next = Some(ext);
                 self.highest = ext;
-                let b = self.take_buf(pkt);
-                self.buf.insert(ext, b);
+                self.hold(ext, pkt, now);
                 return;
             }
         };
@@ -618,17 +912,13 @@ impl ReorderBuffer {
         // Far behind the cursor, or far ahead of the newest packet: everything between
         // (a retransmit of a held hole, packets queued behind it) is this stream.
         if delta < -REORDER_RESYNC_DISTANCE || ahead_of_newest > REORDER_RESYNC_DISTANCE {
-            let drained: Vec<Vec<u8>> = self.buf.values_mut().map(std::mem::take).collect();
-            self.buf.clear();
-            for v in drained {
-                self.recycle(v);
-            }
+            self.drop_held();
             self.next = Some(ext);
             self.highest = ext;
             self.blocked_since = None;
             self.gap_declared = true; // ask the decoder to re-anchor on the new stream
-            let b = self.take_buf(pkt);
-            self.buf.insert(ext, b);
+            self.resynced = true;
+            self.hold(ext, pkt, now);
             return;
         }
 
@@ -636,16 +926,32 @@ impl ReorderBuffer {
         if ext < next || self.buf.contains_key(&ext) {
             return;
         }
+        if ext < self.highest {
+            // A hole filled: how long after the first later packet did it come?
+            if let Some(t) = self.buf.range(ext + 1..).map(|(_, (t, _))| *t).min() {
+                self.note_late(now, now.saturating_duration_since(t));
+            }
+        }
         self.highest = self.highest.max(ext);
 
+        self.hold(ext, pkt, now);
+    }
+
+    fn hold(&mut self, ext: u64, pkt: &[u8], now: Instant) {
+        if self.rfi && is_recovery_tag_packet(pkt) {
+            self.tags.insert(ext);
+        }
         let b = self.take_buf(pkt);
-        self.buf.insert(ext, b);
+        self.buf.insert(ext, (now, b));
     }
 
     /// Pop the next packet to feed the depacketizer, in sequence order. Returns
     /// `None` while the head-of-line packet is missing and still within its wait
     /// window. On overflow or timeout it skips the hole (declaring a gap — see
-    /// `take_gap_declared`) and resumes releasing in order.
+    /// `take_gap_declared`) and resumes releasing in order. RFI: a hole already reported
+    /// to the host is skipped at once when its recovery frame is held behind it — every
+    /// frame from the hole up to it was predicted from the lost one, and holding them for
+    /// the whole repair window would release them as one burst behind the recovery frame.
     pub fn pop_ready(&mut self, now: Instant) -> Option<Vec<u8>> {
         loop {
             let next = self.next?;
@@ -653,13 +959,14 @@ impl ReorderBuffer {
 
             if first < next {
                 // Stale leftover (push normally drops these) — discard defensively.
-                if let Some(v) = self.buf.remove(&first) {
+                if let Some((_, v)) = self.buf.remove(&first) {
                     self.recycle(v);
                 }
                 continue;
             }
             if first == next {
-                let v = self.buf.remove(&first).expect("key just observed");
+                let (_, v) = self.buf.remove(&first).expect("key just observed");
+                self.tags.remove(&first);
                 self.next = Some(next.wrapping_add(1));
                 self.blocked_since = None;
                 return Some(v);
@@ -667,6 +974,9 @@ impl ReorderBuffer {
 
             // first > next → a hole at `next`. Hold until max_delay / capacity.
             let overflow = self.buf.len() > REORDER_CAPACITY;
+            // RFI: only past a hole reported as lost — a fresh one in front of the tag is most
+            // likely a packet still on its way (the tag answers an older report).
+            let recovered = self.rfi && self.reported.contains(&next) && self.tags.range(next..).next().is_some();
             let timed_out = match self.blocked_since {
                 Some(t) => now.saturating_duration_since(t) >= self.max_delay,
                 None => {
@@ -674,10 +984,15 @@ impl ReorderBuffer {
                     false
                 }
             };
-            if !(overflow || timed_out) {
+            if !(overflow || timed_out || recovered) {
                 return None;
             }
 
+            // A hole given up on before it was reported (the buffer filled up, a short wait)
+            // is reported now.
+            if self.rfi && !self.reported.contains(&next) {
+                self.report_lost(next, first - 1);
+            }
             // Declare a gap: count the skipped seqs as true loss and jump the cursor
             // to the next available packet (released in order on the next iteration).
             self.win_lost = self.win_lost.saturating_add((first - next) as u32);
@@ -691,6 +1006,11 @@ impl ReorderBuffer {
     /// call — the caller engages the awaiting-IDR gate + sends a keyframe NACK.
     pub fn take_gap_declared(&mut self) -> bool {
         std::mem::replace(&mut self.gap_declared, false)
+    }
+
+    /// True (and cleared) if the last declared gap was a stream restart (fresh RTP base).
+    pub fn take_resynced(&mut self) -> bool {
+        std::mem::replace(&mut self.resynced, false)
     }
 
     /// Window `(received, lost)` packet counts, resetting the window. `lost` counts only
@@ -739,6 +1059,32 @@ fn annexb_any_nal(au: &[u8], pred: impl Fn(u8) -> bool) -> bool {
         }
     }
     false
+}
+
+/// Like `annexb_any_nal`, but `pred` sees each NAL's bytes (up to the next start code).
+fn annexb_any_nal_at(au: &[u8], pred: impl Fn(&[u8]) -> bool) -> bool {
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while i + 3 < au.len() {
+        if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            starts.push(i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    starts.iter().enumerate().any(|(k, &s)| {
+        // The NAL ends where the next start code begins (its 3- or 4-byte form).
+        let end = starts.get(k + 1).map_or(au.len(), |&n| {
+            let e = n - 3;
+            if e > s && au[e - 1] == 0 {
+                e - 1
+            } else {
+                e
+            }
+        });
+        pred(&au[s..end.max(s)])
+    })
 }
 
 /// AV1: true if the temporal unit contains a sequence-header OBU (type 1), which the
@@ -1234,5 +1580,203 @@ mod tests {
         assert!(au_is_keyframe(Codec::H265, &idr));
         let trail = annexb(&[&[0x02u8, 0x01]]); // type 1 = TRAIL_R (non-IRAP)
         assert!(!au_is_keyframe(Codec::H265, &trail));
+    }
+
+    /// H.264 recovery-tag SEI NAL (user data unregistered, the host's UUID).
+    fn tag_sei_h264() -> Vec<u8> {
+        let mut n = vec![0x06, 5, 16];
+        n.extend_from_slice(&RFI_UUID);
+        n.push(0x80);
+        n
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn recovery_tag_is_found_in_packets_and_access_units() {
+        let sei = tag_sei_h264();
+        assert!(is_recovery_tag_packet(&rtp(false, 1, 1, &sei)));
+        assert!(!is_recovery_tag_packet(&rtp(false, 1, 1, &[0x41, 0x22])));
+        let mut hevc = vec![39 << 1, 0x01, 5, 16];
+        hevc.extend_from_slice(&RFI_UUID);
+        assert!(is_recovery_tag_packet(&rtp(false, 1, 1, &hevc)));
+        assert!(au_has_recovery_tag(Codec::H264, &annexb(&[&sei, &[0x41, 0x22]])));
+        assert!(au_has_recovery_tag(Codec::H265, &annexb(&[&hevc, &[0x02, 0x01]])));
+        assert!(!au_has_recovery_tag(Codec::H264, &annexb(&[&[0x06, 5, 16, 1, 2], &[0x41, 0x22]])));
+        assert!(!au_has_recovery_tag(Codec::Av1, &sei));
+    }
+
+    #[test]
+    fn the_recovery_wait_grows_with_a_slow_round_trip() {
+        assert_eq!(rfi_timeout(None), RFI_TIMEOUT);
+        assert_eq!(rfi_timeout(Some(ms(40))), RFI_TIMEOUT);
+        assert_eq!(rfi_timeout(Some(ms(300))), ms(500));
+        assert_eq!(rfi_timeout(Some(Duration::from_secs(2))), RFI_GIVE_UP);
+    }
+
+    /// RFI: a hole is reported after `RFI_REPORT_AFTER` (while repair still runs), and the
+    /// host's recovery tag held behind it releases past it at once — no repair-window wait.
+    #[test]
+    fn rfi_reports_the_hole_and_releases_at_the_recovery_tag() {
+        let t0 = Instant::now();
+        let mut rb = ReorderBuffer::new();
+        rb.set_rfi(true);
+        rb.set_max_delay_ms(250.0);
+        let slice = [0x41u8, 0x22];
+        rb.push_at(10, &rtp(true, 1, 10, &slice), t0);
+        assert!(rb.pop_ready(t0).is_some());
+        // 11 lost; 12 (frame 2) arrives.
+        rb.push_at(12, &rtp(true, 2, 12, &slice), t0);
+        rb.poll_rfi(t0 + ms(1));
+        assert_eq!(rb.take_rfi_request(), None, "not before RFI_REPORT_AFTER (reordering)");
+        assert_eq!(rb.pop_ready(t0 + ms(1)), None, "held for the repair");
+        rb.poll_rfi(t0 + ms(4));
+        assert_eq!(rb.take_rfi_request(), Some((11, 11)), "reported while repair still runs");
+        // The recovery frame: its tag packet, then its slice.
+        rb.push_at(13, &rtp(false, 3, 13, &tag_sei_h264()), t0 + ms(20));
+        rb.push_at(14, &rtp(true, 3, 14, &slice), t0 + ms(20));
+        rb.poll_rfi(t0 + ms(20));
+        assert_eq!(rb.take_rfi_request(), None, "a reported hole is not reported twice");
+        let got: Vec<u16> = std::iter::from_fn(|| rb.pop_ready(t0 + ms(20)))
+            .map(|p| u16::from_be_bytes([p[2], p[3]]))
+            .collect();
+        assert_eq!(got, vec![12, 13, 14], "released at once, long before the 250 ms window");
+        assert!(rb.take_gap_declared());
+        assert!(!rb.take_resynced());
+    }
+
+    /// RFI: a fresh (unreported) hole in front of a tag is not skipped — it is most likely a
+    /// packet still on its way.
+    #[test]
+    fn rfi_tag_does_not_skip_an_unreported_hole() {
+        let t0 = Instant::now();
+        let mut rb = ReorderBuffer::new();
+        rb.set_rfi(true);
+        rb.set_max_delay_ms(250.0);
+        rb.push_at(1, &rtp(true, 1, 1, &[0x41, 0x22]), t0);
+        assert!(rb.pop_ready(t0).is_some());
+        rb.push_at(3, &rtp(false, 3, 3, &tag_sei_h264()), t0);
+        assert_eq!(rb.pop_ready(t0 + ms(1)), None);
+        assert!(!rb.take_gap_declared());
+    }
+
+    /// RFI on a reordering path: a hole is reported only once it waited out the lateness the
+    /// path showed (else every late packet was "lost" and answered with a recovery frame).
+    #[test]
+    fn rfi_report_waits_out_the_paths_reordering() {
+        let t0 = Instant::now();
+        let mut rb = ReorderBuffer::new();
+        rb.set_rfi(true);
+        let p = |seq: u16| rtp(true, seq as u32, seq, &[0x41, 0x22]);
+        rb.push_at(1, &p(1), t0);
+        rb.push_at(3, &p(3), t0);
+        // 2 comes 40 ms late: the path reorders.
+        rb.push_at(2, &p(2), t0 + ms(40));
+        while rb.pop_ready(t0 + ms(40)).is_some() {}
+        rb.poll_rfi(t0 + ms(40));
+        assert_eq!(rb.take_rfi_request(), None, "filled, never reported");
+        // 4 lost, 5 arrives: a 30 ms old hole is reordering on this path…
+        rb.push_at(5, &p(5), t0 + ms(40));
+        rb.poll_rfi(t0 + ms(70));
+        assert_eq!(rb.take_rfi_request(), None);
+        // …reported after 1.25 × the lateness (50 ms).
+        rb.poll_rfi(t0 + ms(91));
+        assert_eq!(rb.take_rfi_request(), Some((4, 4)));
+    }
+
+    /// RFI off: nothing is reported, the tag releases nothing early.
+    #[test]
+    fn rfi_off_reports_nothing() {
+        let t0 = Instant::now();
+        let mut rb = ReorderBuffer::new();
+        rb.set_max_delay_ms(250.0);
+        rb.push_at(1, &rtp(true, 1, 1, &[0x41, 0x22]), t0);
+        assert!(rb.pop_ready(t0).is_some());
+        rb.push_at(3, &rtp(false, 3, 3, &tag_sei_h264()), t0);
+        rb.poll_rfi(t0 + ms(50));
+        assert_eq!(rb.take_rfi_request(), None);
+        assert_eq!(rb.pop_ready(t0 + ms(50)), None);
+    }
+
+    /// The gate: after a hole only the whole recovery frame (or a keyframe) resumes decoding.
+    #[test]
+    fn rfi_gate_resumes_at_a_whole_recovery_frame() {
+        let t0 = Instant::now();
+        let mut g = RfiGate::new();
+        let p_frame = annexb(&[&[0x41, 0x22]]);
+        let recovery = annexb(&[&tag_sei_h264(), &[0x41, 0x22]]);
+        assert!(g.admit(Codec::H264, &p_frame, 1, t0, None), "no hole: decodes");
+        // A hole ran into frame 2.
+        g.on_hole(&rtp(true, 2, 5, &[0x41]), t0);
+        assert!(!g.admit(Codec::H264, &p_frame, 2, t0, None), "the torn AU never decodes");
+        assert!(!g.admit(Codec::H264, &p_frame, 3, t0, None), "predicted from the lost frame");
+        assert!(!g.wants_keyframe(), "no keyframe while the recovery frame is due");
+        assert!(g.admit(Codec::H264, &recovery, 4, t0 + ms(30), None), "the recovery frame decodes");
+        assert!(g.admit(Codec::H264, &p_frame, 5, t0 + ms(40), None));
+    }
+
+    /// The gate: a recovery frame the hole ran through is not accepted.
+    #[test]
+    fn rfi_gate_rejects_a_damaged_recovery_frame() {
+        let t0 = Instant::now();
+        let mut g = RfiGate::new();
+        let recovery = annexb(&[&tag_sei_h264(), &[0x41, 0x22]]);
+        g.on_hole(&rtp(true, 4, 9, &[0x41]), t0);
+        assert!(!g.admit(Codec::H264, &recovery, 4, t0, None));
+        // A hole that ends right at the tag packet did not run through the frame.
+        g.on_hole(&rtp(false, 6, 12, &tag_sei_h264()), t0);
+        assert!(g.admit(Codec::H264, &recovery, 6, t0, None));
+    }
+
+    /// The gate: no recovery frame in time → the keyframe; a whole recovery frame still ends
+    /// that keyframe wait (the fallback), a stream restart's wait does not.
+    #[test]
+    fn rfi_gate_falls_back_to_a_keyframe() {
+        let t0 = Instant::now();
+        let mut g = RfiGate::new();
+        let p_frame = annexb(&[&[0x41, 0x22]]);
+        let recovery = annexb(&[&tag_sei_h264(), &[0x41, 0x22]]);
+        let idr = annexb(&[&[0x67, 1], &[0x65, 0x11]]);
+        g.on_hole(&rtp(true, 2, 5, &[0x41]), t0);
+        assert!(!g.poll(t0 + ms(100), None));
+        assert!(g.poll(t0 + RFI_TIMEOUT, None), "timed out");
+        assert!(g.wants_keyframe());
+        assert!(!g.admit(Codec::H264, &p_frame, 3, t0 + ms(200), None));
+        assert!(g.admit(Codec::H264, &recovery, 4, t0 + ms(210), None), "fallback: recovery frame");
+        assert!(!g.wants_keyframe());
+        // Encoder restart: only the keyframe.
+        g.on_resync(&rtp(true, 100, 1, &[0x41]));
+        assert!(!g.admit(Codec::H264, &recovery, 101, t0, None));
+        assert!(!g.admit(Codec::H264, &idr, 100, t0, None), "the restart's first AU may be torn");
+        assert!(g.admit(Codec::H264, &idr, 102, t0, None));
+    }
+
+    /// The gate: every further hole restarts the timeout, up to `RFI_GIVE_UP` in all.
+    #[test]
+    fn rfi_gate_gives_up_after_a_second() {
+        let t0 = Instant::now();
+        let mut g = RfiGate::new();
+        let mut t = t0;
+        while t < t0 + RFI_GIVE_UP {
+            g.on_hole(&rtp(true, 2, 5, &[0x41]), t);
+            assert!(!g.wants_keyframe());
+            t += ms(100);
+        }
+        assert!(g.poll(t0 + RFI_GIVE_UP, None));
+    }
+
+    #[test]
+    fn depacketizer_reports_the_au_timestamp_and_drops_partials() {
+        let mut d = Depacketizer::new(Codec::H264);
+        assert!(d.push(&rtp(false, 7, 1, &[0x41, 0x01])).is_none());
+        d.drop_partial();
+        assert!(d.push(&rtp(true, 7, 3, &[0x41, 0x02])).is_some());
+        assert_eq!(d.au_ts(), 7);
+        // A ts change flushes the unmarked previous AU: its own timestamp is reported.
+        assert!(d.push(&rtp(false, 8, 4, &[0x41, 0x03])).is_none());
+        assert!(d.push(&rtp(false, 9, 5, &[0x41, 0x04])).is_some());
+        assert_eq!(d.au_ts(), 8);
     }
 }

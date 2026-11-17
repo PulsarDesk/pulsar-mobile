@@ -32,8 +32,14 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   shows `play-decode-limit`). Backlog drops alone are no verdict: the reorder buffer's release
   of a held hole overflows the 16-AU backlog on any decoder. `last_req` keeps the session's fps,
   not the decoder-forced one.
-  Still off on mobile: RFI and intra refresh (`rfi: false`, `ir_capable = false`) — they need
-  the depacketizer to resume on a recovery frame and per-decoder MediaCodec verification.
+  RFI (reference-frame invalidation, desktop parity, untested on a device): asked for when the
+  host advertises `FEAT_RFI` (H.264 / HEVC, not AV1). `rtp.rs` `ReorderBuffer` reports a hole
+  early (`poll_rfi`: 3 ms, longer on a reordering path; at once when given up on) → the read loop
+  sends `DataMsg::MediaRfi` while NACK repair still runs; a held recovery-tag packet (the host's
+  `PULSAR-RFI-RECOV` SEI) releases past a reported hole at once; `RfiGate` drops AUs until a whole
+  recovery frame or keyframe, and after `rfi_timeout` (150 ms, 1.5 RTT + 50 ms, ≤ 1 s) asks for
+  the keyframe after all. A written-off packet sends no IDR request while RFI is on. Still off:
+  intra refresh (`ir_capable = false`) — it needs per-decoder MediaCodec verification.
 - `crates/tauri-plugin-pulsar-video/` — the native surface plugin.
   `PulsarVideoPlugin.kt` (~2.8k lines) is the center of gravity.
   `DecoderProbe.kt`: hardware-decoder detection + Moonlight's vendor gates;
