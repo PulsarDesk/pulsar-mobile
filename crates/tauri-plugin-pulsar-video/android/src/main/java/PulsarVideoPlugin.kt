@@ -150,6 +150,17 @@ class PadRumbleArgs {
 }
 
 @InvokeArg
+class Ds5UsbPollArgs {
+    var fresh: Boolean = false
+}
+
+@InvokeArg
+class Ds5UsbCloseArgs {
+    var id: Int = 0
+    var failed: Boolean = false
+}
+
+@InvokeArg
 class DecoderCapsArgs {
     var width: Int = 0
     var height: Int = 0
@@ -1429,6 +1440,38 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val r = JSObject(); r.put("ok", true); invoke.resolve(r)
     }
 
+    /** USB DualSense raw passthrough (Ds5Usb.kt; Rust: ds5_usb.rs). */
+    private val ds5Usb by lazy { Ds5Usb(activity, padInput) }
+
+    /** Native-only: open USB DualSenses for raw passthrough + the capture gate (stream on
+     *  screen and the window focused; otherwise Rust sends the pads as released). */
+    @Command
+    fun ds5UsbPoll(invoke: Invoke) {
+        val a = invoke.parseArgs(Ds5UsbPollArgs::class.java)
+        activity.runOnUiThread {
+            val r = JSObject()
+            try {
+                r.put("pads", ds5Usb.poll(a.fresh))
+                r.put("capture", panes.any { it.active } && activity.hasWindowFocus())
+                r.put("ok", true)
+            } catch (e: Exception) {
+                Log.w(TAG, "ds5 usb poll failed: ${e.message}")
+                r.put("ok", false)
+            }
+            invoke.resolve(r)
+        }
+    }
+
+    /** Native-only: close a pad from ds5UsbPoll (its interface is already handed back). */
+    @Command
+    fun ds5UsbClose(invoke: Invoke) {
+        val a = invoke.parseArgs(Ds5UsbCloseArgs::class.java)
+        activity.runOnUiThread {
+            ds5Usb.close(a.id, a.failed)
+            val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+        }
+    }
+
     // ---------------- display refresh vote (1.3) ----------------
 
     /** Stream fps per slot (0 = none); the display vote follows the highest active one. */
@@ -1520,6 +1563,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 val name = (dev.name ?: "Controller").replace("\\", "\\\\").replace("\"", "\\\"")
                 if (!first) sb.append(","); first = false
                 sb.append("{\"name\":\"").append(name).append("\",\"level\":").append(level).append("}")
+            }
+            // A USB DualSense claimed for raw passthrough is no InputDevice meanwhile: keep it
+            // listed (no "disconnected" toast mid-stream).
+            for (n in ds5Usb.names()) {
+                val name = n.replace("\\", "\\\\").replace("\"", "\\\"")
+                if (!first) sb.append(","); first = false
+                sb.append("{\"name\":\"").append(name).append("\",\"level\":-1}")
             }
         } catch (_: Exception) {}
         sb.append("]")

@@ -595,6 +595,9 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             // way the host does) gets the motors natively.
             crate::pad_feed::rumble(app, pad, large, small);
         }
+        // DualSense raw passthrough: the host's virtual pad state (triggers, lightbar,
+        // LEDs, rumble) for the USB pad driven at that gamepad slot (ds5.rs).
+        DataMsg::Ds5Output { slot: pad, report } => crate::ds5::on_output(slot, pad, &report),
         DataMsg::HostPointer { active, x, y } => {
             // The person at the host is on their own mouse (remote mode, issue #7): the UI
             // marks the host pointer ("Host") and says why input is held back. x/y < 0 =

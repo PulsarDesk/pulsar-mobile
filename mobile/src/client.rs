@@ -1640,6 +1640,9 @@ pub async fn connect_host<R: Runtime>(
     let abr_req0 = req.clone();
 
     // ── Expose the input sender for this slot ────────────────────────────────
+    // DualSense raw passthrough: does this host take `Ds5Input` (FEAT_DS5)? Set before the
+    // sender is visible, so pad_feed never sees the session without its answer.
+    crate::ds5::set_host_features(slot, &caps.features);
     app.state::<InputSenders>().0.lock().unwrap().insert(slot, sess.sender());
 
     // ── Push our identity to the host (name + id + avatar) ───────────────────
@@ -2046,6 +2049,9 @@ pub async fn connect_host<R: Runtime>(
                                             nack_seqs.extend(vo.nacks);
                                             reorder.push_at(seq, rtp, now);
                                         }
+                                    } else if tag == service::media::TAG_DS5 {
+                                        // DualSense haptics slot for a raw-driven pad (ds5.rs).
+                                        crate::ds5::on_media(slot, bytes);
                                     } else if tag == service::media::TAG_AUDIO || tag == service::media::TAG_AUDIO_FEC {
                                         if tag == service::media::TAG_AUDIO {
                                             audio_pkts += 1;
@@ -2621,6 +2627,7 @@ pub async fn connect_host<R: Runtime>(
 
             let _ = app2.pulsar_video().stop_stream(slot);
             app2.state::<InputSenders>().0.lock().unwrap().remove(&slot);
+            crate::ds5::clear_host(slot);
             app2.state::<SessionRegistry>().remove(slot);
             // W5: release the claimed display so a future reconnect can reclaim it.
             app2.state::<ClaimedDisplays>().release(slot);

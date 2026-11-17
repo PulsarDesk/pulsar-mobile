@@ -32,8 +32,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use pulsar_core::SessionSender;
+use pulsar_core::input::ds5::report::USB_INPUT_LEN;
+use pulsar_core::input::ds5::wire::{Ds5Report, Ds5Transport};
 use pulsar_core::input::{EmulationTarget, GamepadKind, GamepadState};
-use pulsar_core::service::InputEvent;
+use pulsar_core::service::{DataMsg, InputEvent};
 use tauri::{AppHandle, Manager, Runtime};
 
 /// Re-send period of every connected pad's last state.
@@ -144,6 +146,9 @@ pub fn ensure_started<R: Runtime>(app: &AppHandle<R>) {
         // Bind inside get_or_init: two concurrent connects (split view) create ONE socket
         // and ONE task, never a leaked second pair.
         let Some((port, token)) = *FEED.get_or_init(|| bind(app)) else { return };
+        // USB DualSense raw passthrough (claims pads only while a FEAT_DS5 session is up).
+        #[cfg(target_os = "android")]
+        crate::ds5_usb::ensure_started(app);
         if let Err(e) = app.pulsar_video().pad_feed_start(port, &token_hex(&token)) {
             log::warn!("pulsar: pad feed start failed: {e:?}");
         }
@@ -185,7 +190,12 @@ fn current_target<R: Runtime>(app: &AppHandle<R>) -> Option<Target> {
 
 /// Follow the active pane. On a change the old session gets a neutral state for each pad
 /// it saw, and every pad is zeroed and stays silent until its next datagram.
-async fn retarget<R: Runtime>(app: &AppHandle<R>, cur: &mut Option<Target>, pads: &mut HashMap<u8, Pad>) {
+async fn retarget<R: Runtime>(
+    app: &AppHandle<R>,
+    cur: &mut Option<Target>,
+    pads: &mut HashMap<u8, Pad>,
+    ds5: &mut HashMap<u8, Ds5Pad>,
+) {
     let now = current_target(app);
     let same = match (cur.as_ref(), now.as_ref()) {
         (Some(a), Some(b)) => a.0 == b.0 && a.1 == b.1,
@@ -202,11 +212,23 @@ async fn retarget<R: Runtime>(app: &AppHandle<R>, cur: &mut Option<Target>, pads
             // The old session may be gone already: then this fails harmlessly.
             let _ = pulsar_core::service::send_input_via(&old, &ev).await;
         }
+        for (idx, p) in ds5.iter() {
+            ds5_let_go(&old, *idx, p).await;
+        }
     }
     for p in pads.values_mut() {
         p.state = GamepadState::default();
         p.live = false;
     }
+    // DualSense: nothing replayed into the new session until the pad's next report; its
+    // outputs follow the new target (the old host's triggers / rumble are reset).
+    for p in ds5.values_mut() {
+        p.latest = None;
+        p.sent = None;
+        p.caps_for = None;
+        p.pending = false;
+    }
+    crate::ds5::set_output_pane(now.as_ref().map(|t| t.0));
     *cur = now;
 }
 
@@ -237,18 +259,165 @@ fn slot_event<R: Runtime>(app: &AppHandle<R>, idx: u8, p: &Pad) -> InputEvent {
     InputEvent::GamepadSlot { slot: idx, kind: p.kind, target, state: p.state }
 }
 
+// ── DualSense raw passthrough (ds5.rs / ds5_usb.rs) ──────────────────────────
+//
+// A USB DualSense claimed by `ds5_usb.rs` reaches this loop as raw USB input reports. To a
+// host that advertises FEAT_DS5 it goes as `Ds5Input` (after `Ds5Caps` + the pad's
+// feature reports, once per target session); to any other host as a plain `GamepadSlot`
+// (the pad is no longer an Android InputDevice while claimed, so PadInput can't send it).
+
+/// Least gap between two sends of one DualSense (250 Hz, desktop `INPUT_GAP`).
+pub const DS5_INPUT_GAP: Duration = Duration::from_millis(4);
+/// Re-send a DualSense's latest state at least this often (desktop `INPUT_KEEPALIVE`).
+pub const DS5_KEEPALIVE: Duration = Duration::from_secs(1);
+/// Re-send `Ds5Caps` + `Ds5Feature` this often. The host applies them only to a virtual
+/// pad that is already plugged in, and it plugs one in ~3 s after the slot's first
+/// `Ds5Input` (desktop host `PLUG_DELAY`): caps sent before that are dropped, which would
+/// leave the host on its defaults (speaker on, default IMU calibration). Idempotent there.
+const DS5_CAPS_REFRESH: Duration = Duration::from_secs(2);
+
+struct Ds5Pad {
+    name: String,
+    /// Feature reports read at open, forwarded as `Ds5Feature` (0x05 calibration, 0x20
+    /// firmware, like the desktop).
+    features: Vec<(u8, Vec<u8>)>,
+    latest: Option<[u8; USB_INPUT_LEN]>,
+    /// The target (pane, generation) `Ds5Caps` went to, and when.
+    caps_for: Option<(u8, u64, Instant)>,
+    /// What the current target got last (raw report or plain state) and when.
+    sent: Option<(Ds5Sent, Instant)>,
+    /// A newer report waits for the send gap.
+    pending: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ds5Sent {
+    Raw(Ds5Report),
+    Plain(GamepadState),
+}
+
+impl Ds5Pad {
+    fn new(name: String, features: Vec<(u8, Vec<u8>)>) -> Self {
+        Ds5Pad { name, features, latest: None, caps_for: None, sent: None, pending: false }
+    }
+}
+
+/// What the current target should get for this pad now (`None` = no report yet).
+fn ds5_payload<R: Runtime>(app: &AppHandle<R>, cur: &Option<Target>, idx: u8, p: &Ds5Pad) -> Option<(Ds5Sent, InputEvent)> {
+    let (pane, _, _) = cur.as_ref()?;
+    let r = p.latest?;
+    let capture = crate::ds5::capture();
+    if crate::ds5::host_takes_raw(*pane) {
+        let rep = Ds5Report::from_usb_input(&r)?;
+        let rep = if capture { rep } else { crate::ds5::released(rep) };
+        Some((Ds5Sent::Raw(rep), InputEvent::Ds5Input { slot: idx, report: rep }))
+    } else {
+        let state = if capture { crate::ds5::usb_to_state(&r) } else { GamepadState::default() };
+        let target = {
+            let t = app.state::<PadTargets>();
+            let m = t.0.lock().unwrap();
+            target_for(m.get(short_name(&p.name)).map(String::as_str))
+        };
+        Some((Ds5Sent::Plain(state), InputEvent::GamepadSlot { slot: idx, kind: GamepadKind::Ds5, target, state }))
+    }
+}
+
+/// Send this pad's latest state to the current target when due: changed and past the
+/// send gap, or `keepalive` and unchanged for [`DS5_KEEPALIVE`].
+async fn ds5_forward<R: Runtime>(app: &AppHandle<R>, cur: &Option<Target>, idx: u8, p: &mut Ds5Pad, keepalive: bool) {
+    let Some((pane, gen, sender)) = cur.as_ref() else { return };
+    let Some((what, ev)) = ds5_payload(app, cur, idx, p) else { return };
+    let due = match p.sent {
+        None => true,
+        Some((last, at)) => {
+            let e = at.elapsed();
+            (last != what && e >= DS5_INPUT_GAP) || (keepalive && e >= DS5_KEEPALIVE)
+        }
+    };
+    if !due {
+        p.pending = p.sent.is_some_and(|(last, _)| last != what);
+        return;
+    }
+    let caps_due = match p.caps_for {
+        Some((cp, cg, at)) => (cp, cg) != (*pane, *gen) || at.elapsed() >= DS5_CAPS_REFRESH,
+        None => true,
+    };
+    if matches!(what, Ds5Sent::Raw(_)) && caps_due {
+        let caps = DataMsg::Ds5Caps { slot: idx, transport: Ds5Transport::Usb, features: crate::ds5::USB_FEATURES };
+        let _ = pulsar_core::service::send_data_via(sender, &caps).await;
+        for (id, data) in p.features.iter().filter(|(id, _)| *id == 0x05 || *id == 0x20) {
+            let msg = DataMsg::Ds5Feature { slot: idx, id: *id, data: data.clone() };
+            let _ = pulsar_core::service::send_data_via(sender, &msg).await;
+        }
+        p.caps_for = Some((*pane, *gen, Instant::now()));
+    }
+    p.pending = false;
+    if pulsar_core::service::send_input_via(sender, &ev).await.is_ok() {
+        p.sent = Some((what, Instant::now()));
+    }
+}
+
+/// The pad stops being forwarded to `to`: let every control go there (the host's virtual
+/// pad keeps its last input) and drop its virtual pad.
+async fn ds5_let_go(to: &SessionSender, idx: u8, p: &Ds5Pad) {
+    match p.sent {
+        Some((Ds5Sent::Raw(r), _)) => {
+            let ev = InputEvent::Ds5Input { slot: idx, report: crate::ds5::released(r) };
+            let _ = pulsar_core::service::send_input_via(to, &ev).await;
+        }
+        Some((Ds5Sent::Plain(_), _)) | None => {}
+    }
+    if p.sent.is_some() {
+        let _ = pulsar_core::service::send_input_via(to, &InputEvent::GamepadDisconnect { slot: idx }).await;
+    }
+}
+
+async fn on_ds5_event<R: Runtime>(app: &AppHandle<R>, cur: &Option<Target>, ds5: &mut HashMap<u8, Ds5Pad>, ev: crate::ds5::Event) {
+    use crate::ds5::Event;
+    match ev {
+        Event::Opened { pad, name, features } => {
+            log::info!("pulsar: pad {pad} = {name} (USB DualSense, raw)");
+            ds5.insert(pad, Ds5Pad::new(name, features));
+        }
+        Event::Input { pad, report } => {
+            if let Some(p) = ds5.get_mut(&pad) {
+                p.latest = Some(report);
+                ds5_forward(app, cur, pad, p, false).await;
+            }
+        }
+        Event::Closed { pad } => {
+            if let (Some(p), Some((_, _, s))) = (ds5.remove(&pad), cur.as_ref()) {
+                ds5_let_go(s, pad, &p).await;
+            }
+        }
+    }
+}
+
 async fn run<R: Runtime>(app: AppHandle<R>, sock: tokio::net::UdpSocket, token: [u8; TOKEN_LEN]) {
     let mut pads: HashMap<u8, Pad> = HashMap::new();
+    let mut ds5: HashMap<u8, Ds5Pad> = HashMap::new();
+    let mut ds5_rx = crate::ds5::take_events();
     let mut cur: Option<Target> = None;
     let mut buf = [0u8; 512];
     let mut tick = tokio::time::interval(RESEND);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        let ds5_pending = ds5.values().any(|p| p.pending);
         tokio::select! {
+            ev = async { ds5_rx.as_mut()?.recv().await }, if ds5_rx.is_some() => {
+                let Some(ev) = ev else { ds5_rx = None; continue };
+                retarget(&app, &mut cur, &mut pads, &mut ds5).await;
+                on_ds5_event(&app, &cur, &mut ds5, ev).await;
+            }
+            _ = tokio::time::sleep(DS5_INPUT_GAP), if ds5_pending => {
+                for (idx, p) in ds5.iter_mut().filter(|(_, p)| p.pending) {
+                    ds5_forward(&app, &cur, *idx, p, false).await;
+                }
+            }
             r = sock.recv(&mut buf) => {
                 let Ok(n) = r else { continue };
                 let Some(msg) = parse_authed(&buf[..n], &token) else { continue };
-                retarget(&app, &mut cur, &mut pads).await;
+                retarget(&app, &mut cur, &mut pads, &mut ds5).await;
                 match msg {
                     PadMsg::Connected { pad, vendor, product, name } => {
                         let kind = GamepadKind::from_vid_pid(vendor, product);
@@ -274,10 +443,13 @@ async fn run<R: Runtime>(app: AppHandle<R>, sock: tokio::net::UdpSocket, token: 
                 }
             }
             _ = tick.tick() => {
-                retarget(&app, &mut cur, &mut pads).await;
+                retarget(&app, &mut cur, &mut pads, &mut ds5).await;
                 for (idx, p) in pads.iter().filter(|(_, p)| p.live && p.last_rx.elapsed() < RESEND_WINDOW) {
                     let ev = slot_event(&app, *idx, p);
                     send(&cur, &ev).await;
+                }
+                for (idx, p) in ds5.iter_mut() {
+                    ds5_forward(&app, &cur, *idx, p, true).await;
                 }
             }
         }

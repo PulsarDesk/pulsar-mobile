@@ -21,6 +21,7 @@ const DEFAULTS = {
 	hdr: false,              // request HDR (HEVC Main10 / PQ) from the host
 	audioQuality: 'auto',    // host audio: 'auto' | 'standard' | 'high' | 'raw' (next connect)
 	gamepadTargets: {},      // controller name → host emulation: 'auto' | 'xbox' | 'ds4'
+	ds5Passthrough: true,    // drive a USB DualSense raw for FEAT_DS5 hosts (ds5.rs)
 };
 
 /** Host emulation target for a controller name ('auto' | 'xbox' | 'ds4'). */

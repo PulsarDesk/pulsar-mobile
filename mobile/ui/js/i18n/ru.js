@@ -497,6 +497,8 @@ export default {
 	"m.settings.overlayBtnHint": "Плавающая кнопка для открытия оверлея. Когда выкл — открывайте тремя пальцами.",
 	"m.settings.hostCursor": "Показывать курсор другой стороны",
 	"m.settings.hostCursorHint": "В удалённом рабочем столе, пока человек у хоста пользуется своей мышью, его курсор помечен «Host».",
+	"m.settings.ds5Passthrough": "Прямая передача DualSense (USB)",
+	"m.settings.ds5PassthroughHint": "DualSense, подключённый USB-кабелем, доходит до поддерживающих это хостов как настоящий DualSense: датчики движения, сенсорная панель, адаптивные триггеры и световая полоса. Android один раз запросит доступ к USB. По Bluetooth он остаётся обычным контроллером.",
 	"m.hostptr.notice": "Другая сторона пользуется мышью",
 	"m.input.title": "Касания и клавиши не доходят до другой стороны",
 	"m.input.uinput_denied": "на Linux нет доступа к /dev/uinput (нет правила udev)",

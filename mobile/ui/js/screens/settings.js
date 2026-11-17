@@ -30,7 +30,7 @@ import { getConfig, setConfig } from '../store/config.js';
 import { getPref, setPref, gamepadTarget, setGamepadTarget } from '../store/prefs.js';
 import { invoke }                   from '../tauri.js';
 import { resolveFrameRate, refreshHz, resolveResolution } from './connect.js';
-import { connectedPads, pushGamepadTargets } from '../session/gamepad-monitor.js';
+import { connectedPads, pushGamepadTargets, pushDs5Enabled } from '../session/gamepad-monitor.js';
 
 // ── Expose config module on window so i18n.js setLang can call setConfig ──────
 // (i18n.js checks window.__pulsarConfigMod before falling back to raw invoke)
@@ -344,6 +344,17 @@ function buildSettingsDom(section) {
     <div class="sect-label" style="margin:16px 2px 8px;" data-i18n="m.settings.controllers">${t('m.settings.controllers')}</div>
     <div class="card">
       <div id="s-controllers-list"></div>
+      <div class="setting" style="margin-top:12px">
+        <div>
+          <div class="lbl" data-i18n="m.settings.ds5Passthrough">${t('m.settings.ds5Passthrough')}</div>
+          <div class="settings-field-hint" data-i18n="m.settings.ds5PassthroughHint">${t('m.settings.ds5PassthroughHint')}</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="s-ds5-passthrough" aria-label="${t('m.settings.ds5Passthrough')}" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
     </div>
 
     <!-- ── Video ── -->
@@ -991,6 +1002,13 @@ function wireFields(section) {
   if (hostCursorEl) {
     hostCursorEl.addEventListener('change', () => setPref('hostCursor', hostCursorEl.checked));
   }
+  const ds5El = document.getElementById('s-ds5-passthrough');
+  if (ds5El) {
+    ds5El.addEventListener('change', () => {
+      setPref('ds5Passthrough', ds5El.checked);
+      pushDs5Enabled();
+    });
+  }
   const overlayBtnEl = document.getElementById('s-overlay-btn');
   if (overlayBtnEl) {
     overlayBtnEl.addEventListener('change', () => {
@@ -1165,6 +1183,8 @@ async function syncFieldsFromConfig() {
   if (overlayBtnEl)                  overlayBtnEl.checked = getPref('overlayButton') !== false;
   const hostCursorInit = document.getElementById('s-host-cursor');
   if (hostCursorInit)                hostCursorInit.checked = getPref('hostCursor') !== false;
+  const ds5Init = document.getElementById('s-ds5-passthrough');
+  if (ds5Init)                       ds5Init.checked = getPref('ds5Passthrough') !== false;
   const frameRateEl = document.getElementById('s-framerate');
   if (frameRateEl) {
     const fr = getPref('frameRate');

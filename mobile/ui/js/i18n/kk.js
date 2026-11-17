@@ -497,6 +497,8 @@ export default {
 	"m.settings.overlayBtnHint": "Сеанста оверлейді ашатын қалқымалы түйме. Өшірулі кезде 3 саусақпен ашыңыз.",
 	"m.settings.hostCursor": "Қарсы жақтың курсорын көрсету",
 	"m.settings.hostCursorHint": "Қашықтағы жұмыс үстелінде хосттағы адам өз тінтуірін қолданғанда оның курсоры «Host» белгісімен көрінеді.",
+	"m.settings.ds5Passthrough": "DualSense тікелей жіберу (USB)",
+	"m.settings.ds5PassthroughHint": "USB кабелімен қосылған DualSense қолдайтын хосттарға нағыз DualSense ретінде жетеді: қозғалыс датчиктері, сенсорлық тақта, бейімделгіш триггерлер және жарық жолағы. Android USB рұқсатын бір рет сұрайды. Bluetooth арқылы ол қарапайым контроллер болып қалады.",
 	"m.hostptr.notice": "Қарсы жақ тінтуірді қолданып жатыр",
 	"m.input.title": "Түрту мен пернелер қарсы жаққа жетпейді",
 	"m.input.uinput_denied": "Linux-та /dev/uinput қолжетімсіз (udev ережесі жоқ)",

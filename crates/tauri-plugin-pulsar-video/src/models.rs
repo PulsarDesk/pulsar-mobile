@@ -111,3 +111,31 @@ pub struct HostStatus {
   pub stop_gen: u32,
   pub message: String,
 }
+
+/// One DualSense the plugin opened over USB host for raw passthrough (`ds5UsbPoll`,
+/// native-only). `fd` is the usbfs file descriptor of the open `UsbDeviceConnection`
+/// (owned by Kotlin until `ds5UsbClose`); the HID interface `iface` is already claimed.
+/// `pad` is the gamepad slot reserved for it in the pad feed's numbering.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Ds5UsbPad {
+  pub id: u32,
+  pub pad: u8,
+  pub fd: i32,
+  pub iface: u8,
+  pub ep_in: u8,
+  /// 0 = no interrupt OUT endpoint (output reports go as SET_REPORT control transfers).
+  pub ep_out: u8,
+  pub product: u16,
+  pub name: String,
+}
+
+/// `ds5UsbPoll` (native-only): the pads this call opened, and whether pad input should
+/// reach the host now (a stream is on screen and the window has focus).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Ds5UsbPoll {
+  pub ok: bool,
+  pub capture: bool,
+  pub pads: Vec<Ds5UsbPad>,
+}
