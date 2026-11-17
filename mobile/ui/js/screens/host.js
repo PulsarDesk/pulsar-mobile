@@ -270,7 +270,20 @@ function openApprovalSheet(req) {
 	if (nameEl) nameEl.textContent = primary;
 	if (detailEl) detailEl.textContent = rest.join(' · ');
 
-	if (pwEl) pwEl.textContent = req.hasPassword ? t('approve.pwOk') : t('approve.pwNone');
+	// A pairing request (`pair-request`) reuses this sheet: permanent trust, so its own
+	// title / lead / button, and the client's key fingerprint instead of the password line.
+	const pair = req.kind === 'pair';
+	const titleEl = $('h-req-title');
+	const leadEl  = $('h-req-lead');
+	const allowEl = $('h-req-allow-lbl');
+	if (titleEl) titleEl.textContent = pair ? t('m.pair.reqTitle') : t('m.host.reqTitle');
+	if (leadEl)  leadEl.textContent  = pair ? t('m.pair.reqLead')  : t('approve.lead');
+	if (allowEl) allowEl.textContent = pair ? t('m.pair.allow')    : t('m.host.allow');
+	if (pwEl) {
+		pwEl.textContent = pair
+			? t('m.pair.fingerprint', { fp: req.fingerprint || '?' }) + ' · ' + t('m.pair.reqNote')
+			: (req.hasPassword ? t('approve.pwOk') : t('approve.pwNone'));
+	}
 
 	// The auto-deny countdown lives ON the Deny button now, e.g. "Deny (20s)".
 	const setDeny = () => { if (denyCnt) denyCnt.textContent = '(' + countdownRemaining + 's)'; };
@@ -668,7 +681,7 @@ function buildDOM(root) {
         font-weight:700;letter-spacing:-0.02em;margin:0 0 4px">
       ${t('m.host.reqTitle')}
     </h3>
-    <p style="margin:0;font-size:13.5px;color:var(--text-muted)">
+    <p id="h-req-lead" style="margin:0;font-size:13.5px;color:var(--text-muted)">
       ${t('approve.lead')}
     </p>
   </div>
@@ -712,7 +725,7 @@ function buildDOM(root) {
         <path d="M20 6 9 17l-5-5" stroke="currentColor"
           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      ${t('m.host.allow')}
+      <span id="h-req-allow-lbl">${t('m.host.allow')}</span>
     </button>
     <button id="h-req-deny" class="btn btn-ghost full"
       style="border-color:var(--danger);color:var(--danger);font-size:17px;padding:16px">
@@ -880,6 +893,23 @@ async function subscribeEvents() {
 				reqId:       payload.reqId || payload.req_id,
 				peer:        payload.peer || '?',
 				hasPassword: !!(payload.hasPassword || payload.has_password),
+			});
+		})
+	);
+
+	// A connected client asks to be paired (trusted permanently). Rust asks only when the
+	// session did NOT prove a password (it was let in by Allow or unattended access).
+	unlisteners.push(
+		await listen('pair-request', (payload) => {
+			if (!payload) return;
+			openApprovalSheet({
+				kind:        'pair',
+				reqId:       payload.reqId,
+				peer:        payload.peer || '?',
+				hasPassword: false,
+				name:        payload.name || null,
+				id:          payload.id || null,
+				fingerprint: payload.fingerprint || '',
 			});
 		})
 	);

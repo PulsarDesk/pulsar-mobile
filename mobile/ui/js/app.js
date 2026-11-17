@@ -39,6 +39,7 @@ import { getPref, setPref } from './store/prefs.js';
 import { initRouter, show, premount, setMode, enterSession, exitSession, setNetPill, setNetPillMode } from './router.js';
 import * as tauri            from './tauri.js';
 import { toast }             from './toast.js';
+import { identityChangedId, confirmIdentityChange } from './trust-guard.js';
 const { invoke, hasTauri, listen } = tauri;
 
 // Screen modules — each calls registerScreen() at import time
@@ -322,7 +323,14 @@ function wireSessionBar() {
 				// The Settings audio-quality pick applies to split panes too.
 				audioQuality: getPref('audioQuality') || 'auto',
 				...creds,
-			})).catch((e) => { if (!(e && e.cancelled)) console.warn('[app] split connect error', e); });
+			})).catch((e) => {
+				if (e && e.cancelled) return;
+				// A changed host key blocks the pane; the warning lets the user trust the new
+				// key explicitly (then tapping split again pins and connects it).
+				const changedId = identityChangedId(e);
+				if (changedId) { confirmIdentityChange(changedId, splitRelay); return; }
+				console.warn('[app] split connect error', e);
+			});
 		}
 	});
 

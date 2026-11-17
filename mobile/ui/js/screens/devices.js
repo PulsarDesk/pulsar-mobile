@@ -329,6 +329,78 @@ import {
   peerEvents,
 } from '../store/peers.js';
 import { doConnect } from './connect.js';
+import { invoke, hasTauri } from '../tauri.js';
+import { relay, netmode, deviceName } from '../store/config.js';
+import { withRelayAuth } from '../relay-auth.js';
+import { toast, hideToast } from '../toast.js';
+import { identityChangedId, confirmIdentityChange } from '../trust-guard.js';
+
+// ---------------------------------------------------------------------------
+// Pairing (client side): the host trusts this phone's key, so later connects skip
+// its password + approval. `_paired` caches the Rust-side flags (device_creds.json)
+// per normalised id; refreshed on every render.
+// ---------------------------------------------------------------------------
+
+/** @type {Record<string, boolean>} */
+let _paired = {};
+
+async function refreshPaired() {
+  if (!hasTauri) return;
+  const targets = savedPeers().map((p) => normalizeId(String(p.id)));
+  if (!targets.length) { _paired = {}; return; }
+  try {
+    const info = await invoke('device_creds', { relay: relay(), targets });
+    const next = {};
+    for (const [k, v] of Object.entries(info || {})) next[k] = !!(v && v.paired);
+    _paired = next;
+  } catch (_) { /* older backend: no pairing badges */ }
+}
+
+function pairReasonText(r) {
+  if (r && r.paired) return t('m.pair.ok');
+  const reason = r && r.reason;
+  if (reason === 'denied')      return t('m.pair.denied');
+  if (reason === 'timeout')     return t('m.pair.timeout');
+  if (reason === 'unsupported') return t('m.pair.unsupported');
+  return t('m.pair.failed', { e: reason || '?' });
+}
+
+/** @param {string} id */
+async function pairDevice(id) {
+  const target = normalizeId(String(id));
+  toast(t('m.pair.busy'), 45000);
+  try {
+    const r = await withRelayAuth(relay(), (creds) => invoke('pair_device', {
+      relay: relay(), target, netmode: netmode(), name: deviceName(), ...creds,
+    }));
+    if (r && r.paired) _paired[target] = true;
+    toast(pairReasonText(r));
+  } catch (e) {
+    if (e && e.cancelled) { hideToast(); return; }
+    // The host's key changed since the first connect: blocked unless explicitly trusted.
+    const changedId = identityChangedId(e);
+    if (changedId) {
+      hideToast();
+      if (await confirmIdentityChange(changedId, relay())) return pairDevice(id);
+      return;
+    }
+    toast(t('m.pair.failed', { e: String(e && e.message ? e.message : e) }));
+  }
+}
+
+/** @param {string} id */
+async function unpairDevice(id) {
+  const target = normalizeId(String(id));
+  _paired[target] = false;
+  try {
+    const remote = await invoke('unpair_device', {
+      relay: relay(), target, netmode: netmode(), name: deviceName(),
+    });
+    toast(remote ? t('m.pair.unpairOk') : t('m.pair.unpairLocal'));
+  } catch (_) {
+    toast(t('m.pair.unpairLocal'));
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -535,6 +607,12 @@ function openActionSheet(id, ctx) {
   if (isSavedDevice) {
     actions.push({ key: 'fav',    icon: starIcon(isFav), label: isFav ? t('devices.unfav') : t('devices.fav') });
     actions.push({ key: 'edit',   icon: editIcon(),      label: t('devices.edit') });
+    if (hasTauri) {
+      const paired = !!_paired[normalizeId(String(id))];
+      actions.push(paired
+        ? { key: 'unpair', icon: pairIcon(), label: t('m.pair.unpair') }
+        : { key: 'pair',   icon: pairIcon(), label: t('m.pair.pair') });
+    }
     actions.push({ key: 'forget', icon: trashIcon(),     label: t('devices.remove'), danger: true });
   } else {
     if (ctx === 'remote' || ctx === 'game') {
@@ -592,6 +670,12 @@ function handleAction(action, id, ctx, peer) {
       return; // openEditSheet manages its own sheet
     case 'forget':
       removePeer(id);
+      break;
+    case 'pair':
+      pairDevice(id);
+      break;
+    case 'unpair':
+      unpairDevice(id);
       break;
     case 'save':
       addPeer(fmtPeerId(id), id, peer?.cat || 'pc');
@@ -1044,6 +1128,11 @@ const editIcon = () => `<svg width="20" height="20" viewBox="0 0 24 24" fill="no
   <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
 
+const pairIcon = () => `<svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+  <path d="M10 14a4 4 0 005.66 0l3-3a4 4 0 00-5.66-5.66l-1 1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M14 10a4 4 0 00-5.66 0l-3 3a4 4 0 005.66 5.66l1-1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+
 const trashIcon = () => `<svg width="20" height="20" viewBox="0 0 24 24" fill="none">
   <polyline points="3 6 5 6 21 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1063,6 +1152,7 @@ const saveIcon = () => `<svg width="20" height="20" viewBox="0 0 24 24" fill="no
 /** Full screen render — called on mount + on peerEvents 'change' */
 function render() {
   if (!_root) return;
+  refreshPaired();
 
   // Devices is the saved-devices address book ONLY — recents + "on your network"
   // live on the Connect screen now, so we don't render history/LAN sections here.

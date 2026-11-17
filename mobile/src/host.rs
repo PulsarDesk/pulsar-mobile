@@ -50,6 +50,7 @@ use pulsar_core::service::{
 };
 use crate::client::parse_mode;
 use crate::config::load_config;
+use crate::trust::AuthVia;
 
 // ── Session ID counter ────────────────────────────────────────────────────────
 
@@ -350,7 +351,7 @@ async fn approval_race<R: Runtime>(
     host_state: &Arc<HostState>,
     peer: &str,
     connect_password: &str,
-) -> bool {
+) -> Option<AuthVia> {
     // Always read the initial Auth first (None = garbage/hang-up → treat as "no password").
     let first = recv_auth(sess).await;
     let has_pw = first.as_ref().is_some_and(|a| !a.is_empty());
@@ -377,14 +378,14 @@ async fn approval_race<R: Runtime>(
         if let Some(new_pw) = rotated {
             let _ = accept(sess).await;
             let _ = app.emit("host-password", HostPasswordPayload { password: new_pw });
-            return true;
+            return Some(AuthVia::Password);
         }
     }
 
     // Fast path: standing connect-password.
     if cred == Credential::Fixed {
         let _ = accept(sess).await;
-        return true;
+        return Some(AuthVia::Password);
     }
 
     // Slow path: tell the client a password is required, show the approval sheet,
@@ -435,7 +436,149 @@ async fn approval_race<R: Runtime>(
         let _ = reject(sess).await;
     }
 
-    allowed
+    allowed.then_some(AuthVia::Operator)
+}
+
+// ── Pairing (host side) ───────────────────────────────────────────────────────
+
+/// Payload of `pair-request`: a connected client asks to be trusted permanently.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PairRequestPayload {
+    req_id: u32,
+    peer: String,
+    /// The name the client announced (or its verified beacon name).
+    name: String,
+    /// Its relay id when known (verified beacon match).
+    id: Option<String>,
+    /// Short fingerprint of the client's static key.
+    fingerprint: String,
+}
+
+/// How long the pairing sheet waits for the phone's user (the sheet counts the same 30 s;
+/// the client waits `PAIR_WAIT` = 45 s).
+const PAIR_ASK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ask the phone's user on the pairing sheet. `Some(allow)`, or `None` on timeout.
+async fn ask_operator_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    host_state: &Arc<HostState>,
+    peer: &str,
+    key: &[u8; 32],
+    name: &str,
+    id: Option<String>,
+) -> Option<bool> {
+    let req_id = host_state.next_req.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = oneshot::channel::<bool>();
+    host_state.pending.lock().unwrap().insert(req_id, tx);
+    let _ = app.emit(
+        "pair-request",
+        PairRequestPayload {
+            req_id,
+            peer: peer.to_string(),
+            name: name.to_string(),
+            id,
+            fingerprint: crate::trust::fingerprint(&crate::trust::key_hex(key)),
+        },
+    );
+    let _ = app.pulsar_video().notify_request(peer);
+    let out = tokio::time::timeout(PAIR_ASK_TIMEOUT, rx).await.ok().and_then(|r| r.ok());
+    host_state.pending.lock().unwrap().remove(&req_id);
+    let _ = app.pulsar_video().cancel_notify_request();
+    log::info!("pulsar host: pairing — operator decision for {peer}: {out:?}");
+    out
+}
+
+/// One session's pairing state: one decision per session; repeated requests re-send it.
+enum PairState {
+    Idle,
+    Pending,
+    Done(bool, String),
+}
+
+/// Build the session's `DataHandlers::on_pair` (desktop `pairing::make_on_pair`). A session
+/// that proved a password (or is already paired) pairs at once; one let in by the user's
+/// Allow or by unattended access first gets the pairing sheet — pairing is never silent.
+#[allow(clippy::too_many_arguments)]
+fn make_on_pair<R: Runtime>(
+    app: AppHandle<R>,
+    host_state: Arc<HostState>,
+    sender: pulsar_core::SessionSender,
+    peer: String,
+    peer_id: Option<String>,
+    fallback_name: Option<String>,
+    pubkey: Option<[u8; 32]>,
+    via: AuthVia,
+) -> impl FnMut(DataMsg) + Send + 'static {
+    let state = Arc::new(Mutex::new(PairState::Idle));
+    move |m: DataMsg| {
+        let reply = |sender: &pulsar_core::SessionSender, paired: bool, reason: String| {
+            let sender = sender.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = pulsar_core::service::send_data_via(&sender, &DataMsg::PairResult { paired, reason }).await;
+            });
+        };
+        let Some(key) = pubkey else {
+            reply(&sender, false, "unsupported".into());
+            return;
+        };
+        let label = peer_id.clone().unwrap_or_else(|| peer.clone());
+        match m {
+            DataMsg::Unpair => {
+                crate::trust::remove_paired(&app, &crate::trust::key_hex(&key));
+                *state.lock().unwrap() = PairState::Done(false, String::new());
+                reply(&sender, false, String::new());
+            }
+            DataMsg::PairRequest { name } => {
+                let mut st = state.lock().unwrap();
+                match &*st {
+                    PairState::Pending => return,
+                    PairState::Done(p, r) => {
+                        reply(&sender, *p, r.clone());
+                        return;
+                    }
+                    PairState::Idle => {}
+                }
+                let name = if name.trim().is_empty() {
+                    fallback_name.clone().unwrap_or_else(|| label.clone())
+                } else {
+                    name
+                };
+                match crate::trust::pair_decision(via) {
+                    crate::trust::PairDecision::Accept => {
+                        crate::trust::add_paired(&app, &key, &name, &label);
+                        *st = PairState::Done(true, String::new());
+                        reply(&sender, true, String::new());
+                    }
+                    crate::trust::PairDecision::AskOperator => {
+                        *st = PairState::Pending;
+                        drop(st);
+                        let (app, host_state, sender, state) =
+                            (app.clone(), host_state.clone(), sender.clone(), state.clone());
+                        let (peer, peer_id) = (peer.clone(), peer_id.clone());
+                        tauri::async_runtime::spawn(async move {
+                            let (paired, reason) =
+                                match ask_operator_pair(&app, &host_state, &peer, &key, &name, peer_id).await {
+                                    Some(true) => {
+                                        crate::trust::add_paired(&app, &key, &name, &label);
+                                        (true, "")
+                                    }
+                                    Some(false) => (false, "denied"),
+                                    None => (false, "timeout"),
+                                };
+                            *state.lock().unwrap() = PairState::Done(paired, reason.into());
+                            let _ = pulsar_core::service::send_data_via(
+                                &sender,
+                                &DataMsg::PairResult { paired, reason: reason.into() },
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ── go_online ─────────────────────────────────────────────────────────────────
@@ -550,22 +693,38 @@ pub async fn go_online<R: Runtime>(
                             .map(|a| a.to_string())
                             .unwrap_or_else(|| "?.?.?.?".to_string());
 
+                        // The client's STATIC key (verified by the session handshake) —
+                        // what a pairing is keyed on, never the spoofable relay id.
+                        let peer_pubkey = sess.peer_pubkey().await;
+                        let paired = !unatt
+                            && peer_pubkey.as_ref().is_some_and(|k| crate::trust::is_paired(&app3, k));
+
                         // ── Auth ──────────────────────────────────────────────
-                        let authed = if unatt {
+                        let auth_via = if unatt {
                             // Unattended: auto-accept, skip both the OTP and the approval
                             // prompt. Unconditional — a stored connect password does not
                             // turn this back into a gated path (see the note above).
                             let _ = recv_auth(&mut sess).await;
                             let _ = accept(&mut sess).await;
-                            true
+                            Some(AuthVia::Unattended)
+                        } else if paired {
+                            // Paired device (Settings → Paired devices): no password, no
+                            // approval sheet (desktop `Gate::Paired`).
+                            log::info!("pulsar host: paired device {peer} — skipping password + approval");
+                            let _ = recv_auth(&mut sess).await;
+                            let _ = accept(&mut sess).await;
+                            if let Some(k) = peer_pubkey.as_ref() {
+                                crate::trust::touch_paired(&app3, k);
+                            }
+                            Some(AuthVia::Paired)
                         } else {
                             approval_race(&app3, &mut sess, &state3, &peer, &cpw).await
                         };
 
-                        if !authed {
+                        let Some(auth_via) = auth_via else {
                             log::info!("pulsar host: peer {peer} denied");
                             return;
-                        }
+                        };
 
                         // ── Assign a session ID ───────────────────────────────
                         let sid = next_sid();
@@ -595,6 +754,8 @@ pub async fn go_online<R: Runtime>(
                         // Kept for the kick branch below (the video/audio forwarders move
                         // their own clones): a kicked client is told with an explicit Bye.
                         let bye_sender = sender.clone();
+                        // PairResult replies of the pairing handler (`make_on_pair`).
+                        let pair_sender = sender.clone();
                         // Remote control needs the control AccessibilityService. When it is
                         // off (or this build has none) the client's taps and keys vanish: tell
                         // it on a press (ControlNotice; at most once a minute). Not at accept
@@ -878,6 +1039,19 @@ pub async fn go_online<R: Runtime>(
                         data.on_clipboard = Box::new(move |text| {
                             crate::clipsync::apply_remote(&app_clip, &text, |_| {});
                         });
+                        // Pairing (PairRequest / Unpair): trust this session's key — at once
+                        // when it proved a password, after the pairing sheet otherwise.
+                        let (beacon_name, beacon_id) = peer_identity(&app3, &sess).await;
+                        data.on_pair = Box::new(make_on_pair(
+                            app3.clone(),
+                            state3.clone(),
+                            pair_sender,
+                            peer.clone(),
+                            beacon_id,
+                            beacon_name,
+                            peer_pubkey,
+                            auth_via,
+                        ));
                         // Feed client NACKs to the retransmit ring in the video forwarder above.
                         // MediaNack([0]) is the KEYFRAME-REQUEST sentinel (mirrors the desktop
                         // host): the client's retransmit repair failed, its reference chain is
