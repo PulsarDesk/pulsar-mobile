@@ -13,6 +13,13 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   pad_feed.rs: physical gamepads — Kotlin `PadInput` sends pad state over a loopback
   UDP socket (token-prefixed datagrams), forwarded to the active pane's host as
   `GamepadSlot`; neutral state on focus loss / pane change / session end; rumble back.
+  ds5.rs + ds5_usb.rs (Android) + plugin `Ds5Usb.kt`: DualSense raw passthrough (desktop
+  `ds5/client.rs` parity) for hosts advertising `FEAT_DS5` — USB only: Kotlin claims the HID
+  interface (USB permission dialog), Rust does report I/O on the usbfs fd (`Ds5Input` with
+  gyro/touchpad, `Ds5Caps`/`Ds5Feature`, `Ds5Output` → triggers/lightbar/LEDs/rumble, HD
+  haptics → classic rumble) and hands the pad back to `hid-playstation` (`USBDEVFS_CONNECT`)
+  when no FEAT_DS5 session is left. Bluetooth stays a plain `GamepadSlot` (no raw HID for
+  apps on stock Android); no pad speaker/mic. Untested on a device.
 - `mobile/ui/` — **static** webview UI, plain ES modules, no bundler
   (`frontendDist: "ui"`). i18n: `ui/js/i18n/{en,tr,ru,kk}.js`.
 - Client streaming loop (`client.rs` read loop): loss repair and ABR plumbing are the

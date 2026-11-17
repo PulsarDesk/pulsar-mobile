@@ -11,6 +11,9 @@ mod client;
 mod config;
 mod datachan;
 mod decode_caps;
+mod ds5;
+#[cfg(target_os = "android")]
+mod ds5_usb;
 mod host;
 mod identity;
 mod input_cmds;
@@ -95,6 +98,8 @@ pub fn run() {
             // Physical pads are read natively (pad_feed.rs); the UI only pushes the
             // per-controller emulation choice.
             pad_feed::set_gamepad_targets,
+            // DualSense raw passthrough master switch (ds5.rs).
+            ds5::set_ds5_enabled,
             // ── Session lifecycle (W2-teardown, session_cmds.rs) ──────────────
             session_cmds::end_session,
             // ── Auth race (W3-client-authprompt, session_cmds.rs) ─────────────

@@ -75,6 +75,19 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
     }
 
     private val pads = HashMap<Int, Pad>() // deviceId -> pad (UI thread only)
+    // Slots held by pads driven outside this class (USB DualSense passthrough, Ds5Usb.kt).
+    private val reserved = HashSet<Int>() // UI thread only
+
+    /** Take the lowest free pad slot for a pad Ds5Usb drives. UI thread. */
+    fun reserveIdx(): Int {
+        val used = pads.values.map { it.idx }.toSet() + reserved
+        val idx = (0..15).first { it !in used }
+        reserved.add(idx)
+        return idx
+    }
+
+    /** Give back a slot from [reserveIdx]. UI thread. */
+    fun releaseIdx(idx: Int) { reserved.remove(idx) }
     @Volatile private var port = 0
     @Volatile private var token = ByteArray(0)
     private var sock: DatagramSocket? = null
@@ -143,7 +156,7 @@ class PadInput(private val activity: Activity, private val shouldCapture: () -> 
 
     private fun padFor(dev: InputDevice): Pad {
         pads[dev.id]?.let { return it }
-        val used = pads.values.map { it.idx }.toSet()
+        val used = pads.values.map { it.idx }.toSet() + reserved
         val idx = (0..15).first { it !in used }
         val p = Pad(idx, dev.id)
         val has = { axis: Int -> dev.getMotionRange(axis) != null }

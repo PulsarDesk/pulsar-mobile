@@ -491,6 +491,8 @@ export default {
 	"m.settings.overlayBtnHint": "Floating button that opens the overlay in-session. When off, open with a 3-finger tap.",
 	"m.settings.hostCursor": "Show the other side's cursor",
 	"m.settings.hostCursorHint": "In remote desktop, while the person at the host uses their own mouse, their pointer is marked «Host».",
+	"m.settings.ds5Passthrough": "DualSense passthrough (USB)",
+	"m.settings.ds5PassthroughHint": "A DualSense connected by USB cable reaches hosts that support it as a real DualSense: motion sensors, touchpad, adaptive triggers and lightbar. Android asks once for USB access. Over Bluetooth it stays a regular controller.",
 	"m.hostptr.notice": "The other side is using the mouse",
 	"m.input.title": "Your touches and keys do not reach the other side",
 	"m.input.uinput_denied": "no access to /dev/uinput on Linux (udev rule missing)",

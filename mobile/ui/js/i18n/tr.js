@@ -491,6 +491,8 @@ export default {
 	"m.settings.overlayBtnHint": "Oturumda overlay'i açan yüzen tuş. Kapalıyken 3 parmakla dokunarak aç.",
 	"m.settings.hostCursor": "Karşı tarafın imlecini göster",
 	"m.settings.hostCursorHint": "Uzak masaüstünde karşıdaki kişi kendi faresini kullanırken onun imleci «Host» etiketiyle işaretlenir.",
+	"m.settings.ds5Passthrough": "DualSense doğrudan aktarım (USB)",
+	"m.settings.ds5PassthroughHint": "USB kabloyla bağlı bir DualSense, destekleyen hostlara gerçek bir DualSense olarak ulaşır: hareket sensörleri, dokunmatik yüzey, uyarlanabilir tetikler ve ışık çubuğu. Android USB erişimi için bir kez izin ister. Bluetooth ile normal bir kumanda olarak kalır.",
 	"m.hostptr.notice": "Karşı taraf fareyi kullanıyor",
 	"m.input.title": "Dokunma ve klavye karşı tarafa ulaşmıyor",
 	"m.input.uinput_denied": "Linux'ta /dev/uinput erişimi yok (udev kuralı eksik)",

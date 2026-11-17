@@ -564,6 +564,16 @@ struct PadRumbleArgs {
 }
 
 #[derive(Serialize)]
+struct Ds5UsbPollArgs {
+  fresh: bool,
+}
+
+#[derive(Serialize)]
+struct Ds5UsbCloseArgs {
+  id: u32,
+}
+
+#[derive(Serialize)]
 struct NotifLangArgs<'a> {
   lang: &'a str,
 }
@@ -655,6 +665,16 @@ pub trait PulsarVideoW5Ext<R: Runtime> {
 
   /// Host rumble for physical pad `pad` (0..255 per motor, both 0 = stop). Native-only.
   fn pad_rumble(&self, pad: u8, large: u8, small: u8) -> crate::Result<AttachResponse>;
+
+  /// DualSense raw passthrough: open every USB DualSense the app may use (asks the user
+  /// for USB permission once per device while `fresh`), claim its HID interface and
+  /// return the newly opened ones, plus whether a stream is on screen with focus.
+  /// Native-only.
+  fn ds5_usb_poll(&self, fresh: bool) -> crate::Result<Ds5UsbPoll>;
+
+  /// Close a pad opened by [`Self::ds5_usb_poll`] (after Rust released its interface and
+  /// re-attached the kernel driver) and free its gamepad slot. Native-only.
+  fn ds5_usb_close(&self, id: u32) -> crate::Result<AttachResponse>;
 }
 
 impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
@@ -711,6 +731,20 @@ impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
     self
       .0
       .run_mobile_plugin("padRumble", PadRumbleArgs { pad, large, small })
+      .map_err(Into::into)
+  }
+
+  fn ds5_usb_poll(&self, fresh: bool) -> crate::Result<Ds5UsbPoll> {
+    self
+      .0
+      .run_mobile_plugin("ds5UsbPoll", Ds5UsbPollArgs { fresh })
+      .map_err(Into::into)
+  }
+
+  fn ds5_usb_close(&self, id: u32) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("ds5UsbClose", Ds5UsbCloseArgs { id })
       .map_err(Into::into)
   }
 }

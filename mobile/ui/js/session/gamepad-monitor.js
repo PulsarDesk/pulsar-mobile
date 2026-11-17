@@ -31,6 +31,17 @@ export function pushGamepadTargets() {
 }
 pushGamepadTargets();
 
+/**
+ * Push the DualSense passthrough switch (Settings → Controllers) to the native side
+ * (ds5.rs): on = a USB DualSense is driven raw for hosts that support it (gyro, touchpad,
+ * adaptive triggers, lightbar); off = it stays a plain controller.
+ */
+export function pushDs5Enabled() {
+	if (!hasTauri) return;
+	invoke('set_ds5_enabled', { enabled: getPref('ds5Passthrough') !== false }).catch(() => {});
+}
+pushDs5Enabled();
+
 /** Latest native list: [{ name, level }] (level 0..100, or -1 if unknown). */
 let _list = [];
 let _names = new Set();
