@@ -1737,8 +1737,13 @@ pub async fn connect_host<R: Runtime>(
                 // Times out every repair sweep (50 ms, was 400): the sweep, the reorder
                 // buffer's flush past a hole and the uneven Pings run on time even while no
                 // packet arrives.
+                // RFI: sooner when a hole is due to be reported (`rfi_report_due`, ≥ 1 ms).
                 result = tokio::time::timeout(
-                    Duration::from_millis(REPAIR_SWEEP_MS),
+                    reorder
+                        .rfi_report_due(Instant::now())
+                        .map_or(Duration::from_millis(REPAIR_SWEEP_MS), |d| {
+                            d.clamp(Duration::from_millis(1), Duration::from_millis(REPAIR_SWEEP_MS))
+                        }),
                     sess.recv(),
                 ) => {
                     // B13: read the clock ONCE per recv-arm iteration and thread it

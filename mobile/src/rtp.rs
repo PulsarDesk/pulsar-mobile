@@ -649,6 +649,15 @@ impl RfiGate {
     /// wait.
     pub fn admit(&mut self, codec: Codec, au: &[u8], ts: u32, now: Instant, rtt: Option<Duration>) -> bool {
         let whole = self.gap_ts != Some(ts);
+        if !self.waiting_idr && self.awaiting_recovery.is_none() {
+            if !whole {
+                // A torn AU outside any wait (cannot happen after `on_hole`): its references
+                // are gone, so wait for a keyframe.
+                self.waiting_idr = true;
+            }
+            return whole;
+        }
+        // Only scanned while waiting (the steady state decodes every whole AU).
         let key = whole && au_is_keyframe(codec, au);
         let tag = whole && au_has_recovery_tag(codec, au);
         if self.waiting_idr {
@@ -848,6 +857,28 @@ impl ReorderBuffer {
         }
     }
 
+    /// RFI: how long until `poll_rfi` has a hole to report (`None` = no unreported hole). The
+    /// client shortens its receive timeout to it, so a hole found at the end of a frame's
+    /// burst is reported on time instead of at the next frame or recv timeout (the desktop
+    /// renderer polls every 20 ms; this client's idle timeout is 50 ms).
+    pub fn rfi_report_due(&self, now: Instant) -> Option<Duration> {
+        if !self.rfi {
+            return None;
+        }
+        let next = self.next?;
+        let wait = self.report_after(now);
+        let mut expect = next;
+        let mut due: Option<Duration> = None;
+        for (&s, (t, _)) in &self.buf {
+            if s != expect && !self.reported.contains(&expect) {
+                let left = (*t + wait).saturating_duration_since(now);
+                due = Some(due.map_or(left, |d| d.min(left)));
+            }
+            expect = s + 1;
+        }
+        due
+    }
+
     /// How long a hole may hold the packets behind it (ms): the shared repair loop's
     /// `RepairTracker::renderer_wait_ms` — its RTT-derived repair window plus one sweep
     /// (60-250 ms), the desktop renderer's `maxdelay`. The old `1.5 × RTT + 100 ms`
@@ -962,6 +993,7 @@ impl ReorderBuffer {
                 if let Some((_, v)) = self.buf.remove(&first) {
                     self.recycle(v);
                 }
+                self.tags.remove(&first);
                 continue;
             }
             if first == next {
@@ -1062,29 +1094,26 @@ fn annexb_any_nal(au: &[u8], pred: impl Fn(u8) -> bool) -> bool {
 }
 
 /// Like `annexb_any_nal`, but `pred` sees each NAL's bytes (up to the next start code).
+/// Streams over the access unit (no allocation: it runs on every AU during a recovery wait).
 fn annexb_any_nal_at(au: &[u8], pred: impl Fn(&[u8]) -> bool) -> bool {
-    let mut starts = Vec::new();
+    let mut prev: Option<usize> = None;
     let mut i = 0usize;
     while i + 3 < au.len() {
         if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
-            starts.push(i + 3);
+            if let Some(s) = prev {
+                // The NAL ends where this start code begins (its 3- or 4-byte form).
+                let e = if i > s && au[i - 1] == 0 { i - 1 } else { i };
+                if pred(&au[s..e.max(s)]) {
+                    return true;
+                }
+            }
+            prev = Some(i + 3);
             i += 3;
         } else {
             i += 1;
         }
     }
-    starts.iter().enumerate().any(|(k, &s)| {
-        // The NAL ends where the next start code begins (its 3- or 4-byte form).
-        let end = starts.get(k + 1).map_or(au.len(), |&n| {
-            let e = n - 3;
-            if e > s && au[e - 1] == 0 {
-                e - 1
-            } else {
-                e
-            }
-        });
-        pred(&au[s..end.max(s)])
-    })
+    prev.is_some_and(|s| pred(&au[s..]))
 }
 
 /// AV1: true if the temporal unit contains a sequence-header OBU (type 1), which the
@@ -1684,6 +1713,29 @@ mod tests {
         // …reported after 1.25 × the lateness (50 ms).
         rb.poll_rfi(t0 + ms(91));
         assert_eq!(rb.take_rfi_request(), Some((4, 4)));
+    }
+
+    /// RFI: the client wakes when an unreported hole falls due (`rfi_report_due`), not at its
+    /// next recv timeout.
+    #[test]
+    fn rfi_report_due_tracks_the_unreported_hole() {
+        let t0 = Instant::now();
+        let mut rb = ReorderBuffer::new();
+        rb.set_rfi(true);
+        let p = |seq: u16| rtp(true, seq as u32, seq, &[0x41, 0x22]);
+        rb.push_at(1, &p(1), t0);
+        assert!(rb.pop_ready(t0).is_some());
+        assert_eq!(rb.rfi_report_due(t0), None, "no hole");
+        rb.push_at(3, &p(3), t0);
+        assert_eq!(rb.rfi_report_due(t0 + ms(1)), Some(ms(2)));
+        assert_eq!(rb.rfi_report_due(t0 + ms(5)), Some(Duration::ZERO), "overdue: wake now");
+        rb.poll_rfi(t0 + ms(5));
+        assert_eq!(rb.take_rfi_request(), Some((2, 2)));
+        assert_eq!(rb.rfi_report_due(t0 + ms(5)), None, "reported");
+        let mut off = ReorderBuffer::new();
+        off.push_at(1, &p(1), t0);
+        off.push_at(3, &p(3), t0);
+        assert_eq!(off.rfi_report_due(t0), None, "RFI off");
     }
 
     /// RFI off: nothing is reported, the tag releases nothing early.
