@@ -416,7 +416,11 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
         DataMsg::Chat(text) => {
             let _ = app.emit("chat-msg", ChatMsgPayload { slot, text });
         }
+        // Voice call (call.rs): signalling, and the host's mic while the call is up.
+        DataMsg::Call(sig) => crate::call::on_signal(app, crate::call::CallKey::Client(slot as u64), sig),
+        m @ (DataMsg::Audio(_) | DataMsg::AudioEnd) => crate::call::on_voice(app, &m),
         DataMsg::PeerName(name) => {
+            crate::call::set_peer_name(crate::call::CallKey::Client(slot as u64), &name);
             // The HOST's display name for this session (host→client push).
             let _ = app.emit("peer-name", PeerNamePayload { slot, name });
         }

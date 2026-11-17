@@ -23,6 +23,7 @@ const DEFAULTS = {
 	clipboardSync: true,     // two-way clipboard sync with every open session (desktop parity)
 	gamepadTargets: {},      // controller name → host emulation: 'auto' | 'xbox' | 'ds4'
 	ds5Passthrough: true,    // drive a USB DualSense raw for FEAT_DS5 hosts (ds5.rs)
+	ringtone: 'system',      // incoming voice call: 'system' | 'classic' | 'chime' | 'pulse' | 'none' (call.js)
 };
 
 /** Host emulation target for a controller name ('auto' | 'xbox' | 'ds4'). */

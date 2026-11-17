@@ -31,6 +31,7 @@ import { invoke, listen, hasTauri, clipboard, share } from '../tauri.js';
 import { t } from '../i18n.js';
 import { getConfig } from '../store/config.js';
 import { withRelayAuth } from '../relay-auth.js';
+import { callFor, callAction, primaryAction, onCalls, callable } from '../call.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -197,6 +198,17 @@ function renderOtp() {
 }
 
 /** Render the peer list. */
+/** The call button's text for a phase. */
+function callLabel(phase) {
+	return phase === 'idle' ? t('call.start')
+		: phase === 'incoming' ? t('call.answer')
+		: phase === 'outgoing' ? t('call.cancel')
+		: t('call.hangup');
+}
+
+// A call changing (either side) re-draws the peer rows' call buttons.
+onCalls(() => renderPeers());
+
 function renderPeers() {
 	const listEl = $('h-peer-list');
 	const emptyEl = $('h-peer-empty');
@@ -225,6 +237,14 @@ function renderPeers() {
 				<div class="when">${fmtElapsed(p.elapsed)}</div>
 			</div>
 			<button
+				class="btn btn-ghost h-call-btn h-call-${callFor('host', p.sid)}"
+				data-sid="${p.sid}"
+				aria-label="${callLabel(callFor('host', p.sid))} — ${p.peer}"
+				title="${callable('host', p.sid) ? '' : t('call.na')}"
+				${callable('host', p.sid) ? '' : 'disabled'}
+				style="padding:10px 14px;font-size:13px;margin-right:6px;${callable('host', p.sid) ? '' : 'opacity:0.4;'}"
+			>${callLabel(callFor('host', p.sid))}</button>
+			<button
 				class="btn btn-ghost h-kick-btn"
 				data-sid="${p.sid}"
 				aria-label="${t('home.kick')} — ${p.peer}"
@@ -232,6 +252,15 @@ function renderPeers() {
 			>${t('home.kickLabel')}</button>
 		</div>
 	`).join('');
+
+	// Voice call: ring the client / answer / cancel / hang up (call.js).
+	listEl.querySelectorAll('.h-call-btn').forEach(btn => {
+		btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const sid = Number(btn.dataset.sid);
+			callAction('host', sid, primaryAction(callFor('host', sid)));
+		});
+	});
 
 	// Attach kick handlers.
 	listEl.querySelectorAll('.h-kick-btn').forEach(btn => {

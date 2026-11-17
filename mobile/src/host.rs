@@ -1042,6 +1042,23 @@ pub async fn go_online<R: Runtime>(
                         // Pairing (PairRequest / Unpair): trust this session's key — at once
                         // when it proved a password, after the pairing sheet otherwise.
                         let (beacon_name, beacon_id) = peer_identity(&app3, &sess).await;
+                        // Voice calls (call.rs): signalling, the client's mic played here, and
+                        // the client's display name for the call card.
+                        crate::call::register_host(
+                            sid as u64,
+                            sess.sender(),
+                            beacon_name.as_deref().unwrap_or(&peer),
+                        );
+                        crate::call::host_up(&app3, sid as u64);
+                        let app_call = app3.clone();
+                        data.on_call = Box::new(move |sig| {
+                            crate::call::on_signal(&app_call, crate::call::CallKey::Host(sid as u64), sig)
+                        });
+                        let app_voice = app3.clone();
+                        data.on_audio = Box::new(move |m| crate::call::on_voice(&app_voice, &m));
+                        data.on_peer_name = Box::new(move |name| {
+                            crate::call::set_peer_name(crate::call::CallKey::Host(sid as u64), &name)
+                        });
                         data.on_pair = Box::new(make_on_pair(
                             app3.clone(),
                             state3.clone(),
@@ -1134,6 +1151,7 @@ pub async fn go_online<R: Runtime>(
                         }
 
                         // ── Teardown ──────────────────────────────────────────
+                        crate::call::session_gone(&app3, crate::call::CallKey::Host(sid as u64));
                         crate::clipsync::unregister_host(sid);
                         state3.peers.lock().unwrap().remove(&sid);
                         let _ = app3.emit("host-peer-disconnected", PeerDisconnectedPayload { sid });

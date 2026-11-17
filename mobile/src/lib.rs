@@ -7,6 +7,7 @@
 //! video on a surface BEHIND a transparent webview. `pulsar-core` is added at M4.
 
 mod adapt_memory;
+mod call;
 mod client;
 mod clipsync;
 mod config;
@@ -100,6 +101,10 @@ pub fn run() {
             client::reverse_play,
             client::mic_start,
             client::mic_stop,
+            call::call_action,
+            call::call_states,
+            call::set_ringtone,
+            call::ringtone_preview,
             // ── Extended input commands (W2-inputcmds, input_cmds.rs) ─────────
             input_cmds::send_scroll,
             input_cmds::send_key,

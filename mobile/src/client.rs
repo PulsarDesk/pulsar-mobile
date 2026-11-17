@@ -1782,6 +1782,8 @@ pub async fn connect_host<R: Runtime>(
         let app_av = app.clone();
         let name_for_push = dev_name.clone();
         let id_str = format!("{:09}", my_id.0);
+        // Voice calls: say we take them (the host offers calling only then).
+        crate::call::session_up(&app, crate::call::CallKey::Client(slot as u64));
         let avatar_mode = load_config(&app).avatar_mode;
         tauri::async_runtime::spawn(async move {
             let _ = send_data_via(&sender, &DataMsg::PeerName(name_for_push)).await;
@@ -2752,6 +2754,7 @@ pub async fn connect_host<R: Runtime>(
             app2.state::<PwPending>().0.lock().unwrap().remove(&slot);
 
             let _ = app2.pulsar_video().stop_stream(slot);
+            crate::call::session_gone(&app2, crate::call::CallKey::Client(slot as u64));
             app2.state::<InputSenders>().0.lock().unwrap().remove(&slot);
             crate::ds5::clear_host(slot);
             app2.state::<SessionRegistry>().remove(slot);

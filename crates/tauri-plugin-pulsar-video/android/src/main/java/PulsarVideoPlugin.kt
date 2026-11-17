@@ -209,6 +209,29 @@ class StartStreamArgs {
 }
 
 @InvokeArg
+class VoiceFeedArgs {
+    var data: String? = null
+}
+
+@InvokeArg
+class RingStartArgs {
+    var data: String? = null
+    var system: Boolean = false
+}
+
+@InvokeArg
+class CallServiceArgs {
+    var on: Boolean = false
+}
+
+@InvokeArg
+class CallNotifyArgs {
+    /** The caller's name (the notification text is composed here, in the app's language). */
+    var title: String = ""
+    var body: String = ""
+}
+
+@InvokeArg
 class FeedAudioArgs {
     var data: String? = null
     /** RTP payload type: 97 = Opus, 98 = uncompressed L16 (big-endian interleaved stereo). */
@@ -1985,6 +2008,69 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     // ---- W4-mic commands --------------------------------------------------------
+
+    // ---------------- voice calls (CallAudio.kt; called from Rust `call.rs`) ----------------
+
+    @Command
+    fun voiceFeed(invoke: Invoke) {
+        val args = invoke.parseArgs(VoiceFeedArgs::class.java)
+        val pcm = args.data?.let { Base64.decode(it, Base64.DEFAULT) } ?: ByteArray(0)
+        CallAudio.voiceFeed(pcm)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    @Command
+    fun voiceStop(invoke: Invoke) {
+        CallAudio.voiceStop()
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    @Command
+    fun ringStart(invoke: Invoke) {
+        val args = invoke.parseArgs(RingStartArgs::class.java)
+        val pcm = args.data?.let { Base64.decode(it, Base64.DEFAULT) } ?: ByteArray(0)
+        CallAudio.ringStart(activity.applicationContext, pcm, args.system)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    @Command
+    fun ringStop(invoke: Invoke) {
+        CallAudio.ringStop(activity.applicationContext)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    @Command
+    fun callNotify(invoke: Invoke) {
+        val args = invoke.parseArgs(CallNotifyArgs::class.java)
+        CallAudio.notifyIncoming(activity.applicationContext, args.title)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    @Command
+    fun callService(invoke: Invoke) {
+        val args = invoke.parseArgs(CallServiceArgs::class.java)
+        if (args.on) {
+            // A microphone service may only start with the permission granted (Android 14+):
+            // ask now (the user just started / answered a call on screen); the call layer asks
+            // again once frames are missing, by then the permission is there.
+            if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.RECORD_AUDIO), MIC_PERM_CODE)
+            } else {
+                CallService.start(activity.applicationContext)
+            }
+        } else {
+            CallService.stop(activity.applicationContext)
+        }
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
+
+    @Command
+    fun callNotifyClear(invoke: Invoke) {
+        CallAudio.notifyClear(activity.applicationContext)
+        val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+    }
 
     /**
      * Start capturing microphone audio.

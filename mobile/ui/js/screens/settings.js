@@ -31,6 +31,7 @@ import { getPref, setPref, gamepadTarget, setGamepadTarget } from '../store/pref
 import { invoke, listen, hasTauri } from '../tauri.js';
 import { resolveFrameRate, refreshHz, resolveResolution } from './connect.js';
 import { connectedPads, pushGamepadTargets, pushDs5Enabled } from '../session/gamepad-monitor.js';
+import { RINGTONES, ringtone, setRingtone } from '../call.js';
 
 // ── Expose config module on window so i18n.js setLang can call setConfig ──────
 // (i18n.js checks window.__pulsarConfigMod before falling back to raw invoke)
@@ -311,6 +312,13 @@ function buildSettingsDom(section) {
           <option value="raw" data-i18n="m.settings.aq.raw">${t('m.settings.aq.raw')}</option>
         </select>
         <span class="settings-field-hint" data-i18n="m.settings.audioQualityHint">${t('m.settings.audioQualityHint')}</span>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label for="s-ringtone" data-i18n="call.ringtone">${t('call.ringtone')}</label>
+        <select id="s-ringtone" class="input framerate-select">
+          ${RINGTONES.map((r) => '<option value="' + r + '" data-i18n="call.ring.' + r + '">' + t('call.ring.' + r) + '</option>').join('')}
+        </select>
+        <span class="settings-field-hint" data-i18n="call.ringtoneHint">${t('call.ringtoneHint')}</span>
       </div>
       <div class="setting" style="margin-top:12px">
         <div>
@@ -1082,6 +1090,11 @@ function wireFields(section) {
     hostAudioEl.addEventListener('change', () => setPref('playHostAudio', hostAudioEl.checked));
   }
   // Audio quality: applies on the next connect (the host encodes it from the stream request).
+  // Ringtone of an incoming voice call: picking one plays it for a few seconds (call.js).
+  const ringtoneEl = document.getElementById('s-ringtone');
+  if (ringtoneEl) {
+    ringtoneEl.addEventListener('change', () => setRingtone(ringtoneEl.value));
+  }
   const audioQualityEl = document.getElementById('s-audio-quality');
   if (audioQualityEl) {
     audioQualityEl.addEventListener('change', () => setPref('audioQuality', audioQualityEl.value));
@@ -1284,6 +1297,8 @@ async function syncFieldsFromConfig() {
   refreshRelayStatus();
   // Client-only prefs (not on the rust config) come from the prefs store.
   if (hostAudioEl)                   hostAudioEl.checked = getPref('playHostAudio') !== false;
+  const ringtoneInit = document.getElementById('s-ringtone');
+  if (ringtoneInit) ringtoneInit.value = ringtone();
   const audioQualityInit = document.getElementById('s-audio-quality');
   if (audioQualityInit)              audioQualityInit.value = getPref('audioQuality') || 'auto';
   if (perfHudEl)                     perfHudEl.checked = getPref('hudVisible') !== false;

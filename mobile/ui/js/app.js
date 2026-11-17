@@ -75,6 +75,8 @@ _importOverlay.then(() => import('./session/hud.js')).catch(() => null);
 _importOverlay.then(() => import('./session/quality.js')).catch(() => null);
 _importOverlay.then(() => import('./session/display.js')).catch(() => null);
 _importOverlay.then(() => import('./session/audio.js')).catch(() => null);
+// Voice calls (call card on every screen + the overlay's "Voice call" card).
+_importOverlay.then(() => import('./call.js')).catch(() => null);
 _importOverlay.then(() => import('./session/sidechannels.js')).catch(() => null);
 _importOverlay.then(() => import('./session/files.js')).catch(() => null);
 _importOverlay.then(() => import('./session/keyboard.js')).catch(() => null);

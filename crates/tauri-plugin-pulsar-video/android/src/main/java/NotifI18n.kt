@@ -85,6 +85,22 @@ object NotifI18n {
                 "tr" -> "Paylaş"; "ru" -> "Поделиться"
                 "kk" -> "Бөлісу"; else -> "Share"
             }
+            "chanCalls" -> when (l) {
+                "tr" -> "Sesli aramalar"; "ru" -> "Голосовые звонки"
+                "kk" -> "Дауыстық қоңыраулар"; else -> "Voice calls"
+            }
+            "callInTitle" -> when (l) {
+                "tr" -> "Gelen arama"; "ru" -> "Входящий звонок"
+                "kk" -> "Кіріс қоңырау"; else -> "Incoming call"
+            }
+            "callActive" -> when (l) {
+                "tr" -> "Sesli görüşme sürüyor"; "ru" -> "Идёт голосовой звонок"
+                "kk" -> "Дауыстық қоңырау жүріп жатыр"; else -> "Voice call in progress"
+            }
+            "callInText" -> when (l) {
+                "tr" -> "Yanıtlamak için dokun"; "ru" -> "Нажмите, чтобы ответить"
+                "kk" -> "Жауап беру үшін түртіңіз"; else -> "Tap to answer"
+            }
             else -> key
         }
     }

@@ -182,6 +182,36 @@ impl<R: Runtime> PulsarVideo<R> {
     Ok(Vec::new())
   }
 
+  // ---- Voice-call no-ops (the desktop app has its own SDL3 player and ringer) ----
+
+  pub fn voice_feed(&self, _pcm: &[u8]) -> crate::Result<AttachResponse> {
+    Self::noop("no call audio on desktop")
+  }
+
+  pub fn voice_stop(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no call audio on desktop")
+  }
+
+  pub fn ring_start(&self, _pcm: &[u8], _system: bool) -> crate::Result<AttachResponse> {
+    Self::noop("no ringer on desktop")
+  }
+
+  pub fn ring_stop(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no ringer on desktop")
+  }
+
+  pub fn call_notify(&self, _title: &str, _body: &str) -> crate::Result<AttachResponse> {
+    Self::noop("no call notification on desktop")
+  }
+
+  pub fn call_service(&self, _on: bool) -> crate::Result<AttachResponse> {
+    Self::noop("no call service on desktop")
+  }
+
+  pub fn call_notify_clear(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no call notification on desktop")
+  }
+
   // ---- In-app update no-ops (Android-only; the UI never offers it elsewhere) ----
 
   pub fn update_download(&self, _url: &str, _version: &str, _size: u64) -> crate::Result<AttachResponse> {

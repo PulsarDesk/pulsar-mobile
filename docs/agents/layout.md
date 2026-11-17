@@ -16,6 +16,18 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   which reads only while Pulsar's window is focused (Android 10+), so a copy in another app goes
   out when the user returns to Pulsar. Baseline uses the clip timestamp (no Android 12+ "pasted"
   toast on connect). Untested on a device.
+  call.rs: voice calls (protocol: pulsar-core `call`, same as desktop), as client (key = slot)
+  and host (key = sid). Ringing, the peer's voice, an "incoming call" notification and a
+  `microphone` foreground service while a call is up are the plugin's `CallAudio.kt` /
+  `CallService.kt` (`ringStart` built-in tone or the phone ringtone, `voiceFeed` on a
+  VOICE_COMMUNICATION track so host playback capture never echoes it back); this phone's mic is
+  call.rs's own pump over the plugin AudioRecord. UI: `ui/js/call.js` (call card on every
+  screen, the overlay's Voice call card, `callFor` for the host screen's peer rows, ringtone
+  pref → `set_ringtone`). The microphone service starts when WE ring (Pulsar is on screen
+  then), so the mic works if the peer answers after the user left Pulsar; answering happens
+  in-app (the notification opens it). Calling is offered only to a peer that said `Hello`.
+  Echo: Android's own canceller (VOICE_COMMUNICATION mic + voice-call track).
+  Untested on a device (2026-11-17).
   Received files (datachan.rs `FileEnd`): reassembled in private storage, then the plugin's
   `ReceivedFiles.kt` copies them to public Downloads/Pulsar Received (MediaStore on 10+, the
   public dir with WRITE_EXTERNAL_STORAGE ≤ 9) and posts a notification with Open / Share; the

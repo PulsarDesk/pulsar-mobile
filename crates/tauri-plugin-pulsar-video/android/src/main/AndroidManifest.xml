@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Voice calls: CallService keeps the call's mic alive while Pulsar is in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Keep-awake: the client's Wi-Fi low-latency lock during a stream and the host's screen
          wake lock while this phone shares its screen. Normal-level, no prompt. Without it every
@@ -67,6 +69,11 @@
             android:name=".StreamService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <!-- Voice call up: the mic keeps working in the background (CallService.kt). -->
+        <service
+            android:name=".CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
         <!-- Host (M16): screen capture requires a mediaProjection foreground service. -->
         <service
             android:name=".HostService"

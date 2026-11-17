@@ -494,6 +494,56 @@ impl<R: Runtime> PulsarVideo<R> {
   ///
   /// This is a **native-only** bridge method — it is NOT registered as a JS
   /// command in `lib.rs`/`default.toml`. Only Rust code calls it.
+  /// Voice call: play one chunk of the peer's mic (s16le 48 kHz mono) on a voice-call
+  /// AudioTrack of its own (not the session audio's playout).
+  pub fn voice_feed(&self, pcm: &[u8]) -> crate::Result<AttachResponse> {
+    let data = base64::engine::general_purpose::STANDARD.encode(pcm);
+    self
+      .0
+      .run_mobile_plugin("voiceFeed", VoiceArgs { data })
+      .map_err(Into::into)
+  }
+
+  /// Voice call: close the peer-voice track.
+  pub fn voice_stop(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("voiceStop", ()).map_err(Into::into)
+  }
+
+  /// Ring: loop `pcm` (one cycle, s16le 48 kHz mono) on the ringtone stream, or the
+  /// phone's own ringtone when `system`; vibrates too when the ringer mode allows it.
+  pub fn ring_start(&self, pcm: &[u8], system: bool) -> crate::Result<AttachResponse> {
+    let data = base64::engine::general_purpose::STANDARD.encode(pcm);
+    self
+      .0
+      .run_mobile_plugin("ringStart", RingArgs { data, system })
+      .map_err(Into::into)
+  }
+
+  pub fn ring_stop(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("ringStop", ()).map_err(Into::into)
+  }
+
+  /// A high-priority "incoming call" notification (tap = open Pulsar), for a call that rings
+  /// while the app is in the background.
+  pub fn call_notify(&self, title: &str, body: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("callNotify", NotifyArgs { title, body })
+      .map_err(Into::into)
+  }
+
+  /// The call's `microphone` foreground service (the mic keeps working in the background).
+  pub fn call_service(&self, on: bool) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("callService", CallServiceArgs { on })
+      .map_err(Into::into)
+  }
+
+  pub fn call_notify_clear(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("callNotifyClear", ()).map_err(Into::into)
+  }
+
   pub fn poll_mic_frame(&self) -> crate::Result<Vec<u8>> {
     let resp = self
       .0
@@ -657,6 +707,28 @@ struct ClipPollArgs {
 #[derive(Serialize)]
 struct ClipWriteArgs<'a> {
   text: &'a str,
+}
+
+#[derive(Serialize)]
+struct VoiceArgs {
+  data: String,
+}
+
+#[derive(Serialize)]
+struct RingArgs {
+  data: String,
+  system: bool,
+}
+
+#[derive(Serialize)]
+struct CallServiceArgs {
+  on: bool,
+}
+
+#[derive(Serialize)]
+struct NotifyArgs<'a> {
+  title: &'a str,
+  body: &'a str,
 }
 
 #[derive(Serialize)]
