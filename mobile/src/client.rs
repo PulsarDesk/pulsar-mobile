@@ -710,6 +710,13 @@ pub struct ConnectResult {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// The stream runs with reference-frame invalidation: the host offers it (`host_rfi`) and the
+/// codec carries the recovery tag (an SEI — H.264 / HEVC; AV1 has none). Desktop parity:
+/// play/hold.rs `rfi_reach`.
+fn rfi_reach(host_rfi: bool, codec: &str) -> bool {
+    host_rfi && codec_enum(codec) != Codec::Av1
+}
+
 fn mime_for(codec: &str) -> &'static str {
     match codec {
         "h265" | "hevc" => "video/hevc",
@@ -1132,6 +1139,10 @@ pub async fn connect_host<R: Runtime>(
     let mos = true;
     // W5: detect FEAT_NACK support so request_keyframe knows whether MediaNack works.
     let feat_nack = caps.features.iter().any(|f| f == service::media::FEAT_NACK);
+    // Reference-frame invalidation (desktop parity, play.rs `host_rfi`): the client reports a
+    // lost frame's packets and resumes at the host's tagged recovery frame instead of waiting
+    // for a keyframe (H.264 / HEVC; the recovery tag is an SEI). Needs the NACK path.
+    let host_rfi = mos && feat_nack && caps.features.iter().any(|f| f == service::media::FEAT_RFI);
 
     // Emit host displays for the multi-monitor picker (W4-multimonitor).
     if !caps.displays.is_empty() {
@@ -1397,8 +1408,9 @@ pub async fn connect_host<R: Runtime>(
         // (several losses per frame) preferred, XOR for older hosts.
         fec: mos,
         fec_rs: mos,
-        // Reference-frame invalidation recovery: the desktop renderer only, for now.
-        rfi: false,
+        // Reference-frame invalidation recovery (deep reference buffer on the host); AV1 has no
+        // recovery tag.
+        rfi: rfi_reach(host_rfi, &resolved_codec),
         // Opus at the standard rate; the higher qualities (and raw PCM) are desktop-only so far.
         audio_quality: Default::default(),
         // Audio parity (rides the session); the feeder rebuilds lost packets from it.
@@ -1556,12 +1568,18 @@ pub async fn connect_host<R: Runtime>(
         let mut nack_seqs: Vec<u16> = Vec::new();
         let mut loss_corrupt = false;
         let mut waiting_idr = false;
+        // RFI (see `rfi_reach`): the reorder buffer reports holes to the host early
+        // (`DataMsg::MediaRfi`) and `RfiGate` resumes decoding at the host's recovery frame;
+        // `None` = the plain wait-for-keyframe gate below. Rebuilt on every restream.
+        let mut rfi_gate = rfi_reach(host_rfi, &cur_req.codec).then(crate::rtp::RfiGate::new);
+        reorder.set_rfi(rfi_gate.is_some());
         // A keyframe is wanted (a torn / reference-less AU was dropped, the decoder lost one):
         // asked for as soon as the shared keyframe pacing allows (gaps double during a loss
         // streak — the old fixed 400 ms re-ask was a keyframe storm on a lossy link).
         let mut want_idr = false;
-        // Capped at 1 s: this client freezes until the keyframe (no RFI / intra refresh), so
-        // the desktop's back-off to 4 s would freeze it up to 4 s per loss.
+        // Capped at 1 s: this client freezes until the keyframe (no intra refresh; with RFI only
+        // after a recovery wait ran out), so the desktop's back-off to 4 s would freeze it up to
+        // 4 s per loss.
         let mut kf_pacer = KeyframePacer::with_max(Instant::now(), KF_GAP_MAX_FROZEN);
         let mut total_lost: u64 = 0;
         let mut framed: Vec<u8> = Vec::new();
@@ -1639,7 +1657,9 @@ pub async fn connect_host<R: Runtime>(
                 }
 
                 // ── Restream path: quality/codec change requested (W3-quality)
-                Some(new_req) = restream_rx.recv() => {
+                Some(mut new_req) = restream_rx.recv() => {
+                    // RFI follows the (possibly new) codec: AV1 has no recovery tag.
+                    new_req.rfi = rfi_reach(host_rfi, &new_req.codec);
                     // Re-arm the native decoder with the new mime type.
                     let new_mime = mime_for(&new_req.codec);
                     let new_cenum = codec_enum(&new_req.codec);
@@ -1673,6 +1693,8 @@ pub async fn connect_host<R: Runtime>(
                         // The host restarts its RTP sequence base on a restream → reset the
                         // reorder buffer so the discontinuity isn't counted as loss.
                         reorder.reset();
+                        rfi_gate = new_req.rfi.then(crate::rtp::RfiGate::new);
+                        reorder.set_rfi(rfi_gate.is_some());
                         repair_st.reset_stream();
                         nack_seqs.clear();
                         want_idr = false;
@@ -1720,8 +1742,13 @@ pub async fn connect_host<R: Runtime>(
                 // Times out every repair sweep (50 ms, was 400): the sweep, the reorder
                 // buffer's flush past a hole and the uneven Pings run on time even while no
                 // packet arrives.
+                // RFI: sooner when a hole is due to be reported (`rfi_report_due`, ≥ 1 ms).
                 result = tokio::time::timeout(
-                    Duration::from_millis(REPAIR_SWEEP_MS),
+                    reorder
+                        .rfi_report_due(Instant::now())
+                        .map_or(Duration::from_millis(REPAIR_SWEEP_MS), |d| {
+                            d.clamp(Duration::from_millis(1), Duration::from_millis(REPAIR_SWEEP_MS))
+                        }),
                     sess.recv(),
                 ) => {
                     // B13: read the clock ONCE per recv-arm iteration and thread it
@@ -1755,7 +1782,7 @@ pub async fn connect_host<R: Runtime>(
                                             repair_st.on_xor_parity(rtp, now, host_nack)
                                         };
                                         for (seq, pkt) in &po.rebuilt {
-                                            reorder.push(*seq, pkt);
+                                            reorder.push_at(*seq, pkt, now);
                                         }
                                         nack_seqs.extend(po.nacks);
                                     } else if tag == service::media::TAG_VIDEO {
@@ -1788,7 +1815,7 @@ pub async fn connect_host<R: Runtime>(
                                                 frame_clock.reset();
                                             }
                                             nack_seqs.extend(vo.nacks);
-                                            reorder.push(seq, rtp);
+                                            reorder.push_at(seq, rtp, now);
                                         }
                                     } else if tag == service::media::TAG_AUDIO || tag == service::media::TAG_AUDIO_FEC {
                                         if tag == service::media::TAG_AUDIO {
@@ -1874,12 +1901,30 @@ pub async fn connect_host<R: Runtime>(
                     // so a blocked head-of-line hole is flushed once its RTT-sized
                     // hold window expires even when no new packets arrive.
                     let mut fed_this_drain: u32 = 0;
+                    let rtt_now = Some(repair_st.rtt().ema())
+                        .filter(|&ms| ms > 0.0)
+                        .map(|ms| Duration::from_secs_f32(ms / 1000.0));
+                    // RFI: report the holes that persisted past the path's reordering, while the
+                    // host can still reach the lost frame (the NACK repair keeps running).
+                    reorder.poll_rfi(Instant::now());
                     while let Some(pkt) = reorder.pop_ready(Instant::now()) {
                         if reorder.take_gap_declared() {
-                            // A real (post-hold) gap: whatever AU it lands in is torn.
-                            loss_corrupt = true;
                             // Everything held behind it goes out at once (decoder stats: a burst).
                             dec_disturbed = true;
+                            let resync = reorder.take_resynced();
+                            if let Some(g) = rfi_gate.as_mut() {
+                                // The AU in progress is torn: drop it; the gate then waits for the
+                                // recovery frame (a hole) or the keyframe (a stream restart).
+                                depack.drop_partial();
+                                if resync {
+                                    g.on_resync(&pkt);
+                                } else {
+                                    g.on_hole(&pkt, Instant::now());
+                                }
+                            } else {
+                                // A real (post-hold) gap: whatever AU it lands in is torn.
+                                loss_corrupt = true;
+                            }
                         }
                         if let Some(au) = depack.push(&pkt) {
                             aus += 1;
@@ -1892,9 +1937,15 @@ pub async fn connect_host<R: Runtime>(
                             // contains SPS/IDR NALs — a torn IDR passed the keyframe check
                             // and got fed ("half the screen is corrupt"). A gap-flagged AU
                             // is NEVER fed; only a CLEAN keyframe clears the gate.
-                            let torn = loss_corrupt;
-                            loss_corrupt = false;
-                            let feed = if torn {
+                            let feed = if let Some(g) = rfi_gate.as_mut() {
+                                // RFI: drop until the recovery frame (or a keyframe); a keyframe is
+                                // asked for only once the recovery wait ran out.
+                                let ok = g.admit(cenum, &au, depack.au_ts(), Instant::now(), rtt_now);
+                                if !ok && g.wants_keyframe() {
+                                    want_idr = true;
+                                }
+                                ok
+                            } else if std::mem::take(&mut loss_corrupt) {
                                 waiting_idr = true;
                                 false
                             } else if waiting_idr {
@@ -1908,7 +1959,9 @@ pub async fn connect_host<R: Runtime>(
                                 true
                             };
                             if !feed {
-                                want_idr = true;
+                                if rfi_gate.is_none() {
+                                    want_idr = true;
+                                }
                                 depack.recycle_au(au);
                             } else {
                                 // A clean keyframe goes to the decoder: nothing more to ask for.
@@ -1941,12 +1994,29 @@ pub async fn connect_host<R: Runtime>(
                     if fed_this_drain > DECODE_BURST_AUS {
                         dec_disturbed = true;
                     }
+                    if let Some(g) = rfi_gate.as_mut() {
+                        // RFI: tell the host about the lost packets at once, while it can still
+                        // reach the lost frame — it invalidates it and tags its recovery frame
+                        // (desktop parity, play/hold.rs). The NACK repair keeps running.
+                        if let Some((first, last)) = reorder.take_rfi_request() {
+                            log::debug!("pulsar: video hole slot={slot} seq {first}..={last} — reference-frame invalidation request");
+                            let _ = send_data_via(&data_sender, &DataMsg::MediaRfi { first, last }).await;
+                        }
+                        // No recovery frame in time (the host could not reach the lost frame, or
+                        // it was lost too): the keyframe request after all.
+                        if g.poll(Instant::now(), rtt_now) {
+                            log::info!("pulsar: no RFI recovery frame in time slot={slot} — requesting IDR");
+                            want_idr = true;
+                        }
+                    }
 
                     // ── Repair sweep (every REPAIR_SWEEP_MS) ─────────────────────
                     // Held-back NACKs whose wait ran out with no packet to carry them, one
                     // re-NACK ~1 RTT after a NACK, and the write-offs: a written-off packet is a
                     // failed repair — the reference chain is broken until a keyframe (asked for
-                    // at most once a second from here; the gate below asks too).
+                    // at most once a second from here; the gate below asks too). With RFI no
+                    // keyframe: the hole was already reported and the gate resumes at the host's
+                    // recovery frame (or asks for one itself when none comes).
                     let now_s = Instant::now();
                     if now_s.saturating_duration_since(last_sweep) >= Duration::from_millis(REPAIR_SWEEP_MS) {
                         last_sweep = now_s;
@@ -1954,6 +2024,7 @@ pub async fn connect_host<R: Runtime>(
                         nack_seqs.extend(sw.nacks);
                         if sw.expired > 0
                             && host_nack
+                            && rfi_gate.is_none()
                             && cur_req.loss_recovery != LossRecovery::IntraRefresh
                             && kf_pacer.try_request(now_s, Duration::from_secs(1), repair_st.rtt().ema())
                         {
