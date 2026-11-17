@@ -272,6 +272,8 @@ class PointerRelArgs {
 
 @InvokeArg
 class PointerBtnArgs {
+    // pulsar-core mouse_button ids: 0 left, 1 right, 2 middle, 3 back, 4 forward.
+    var button: Int = 0
     var down: Boolean = false
 }
 
@@ -416,7 +418,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var hMime = "video/avc"
     private var hW = 0
     private var hH = 0
-    private var hFps = 30
+    private var hFps = 0 // 0 = the client asked for none: HostEncoder.plan's default
     private var hKbps = 0
 
     /** Whether OUR activity is currently resumed (foreground). Drives notifyRequest's
@@ -662,8 +664,12 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             val r = JSObject(); r.put("ok", false); r.put("detail", "stale"); invoke.resolve(r); return
         }
         hPort = a.port; hAudioPort = a.audio_port
-        hMime = if (a.codec == "h265" || a.codec == "hevc") "video/hevc" else "video/avc"
-        hW = a.width; hH = a.height; hFps = if (a.fps > 0) a.fps else 30; hKbps = a.bitrate_kbps
+        // The client picks from the codecs hostEncoderCaps advertised; anything this phone
+        // cannot encode (an old client's pick) falls back to H.264, which every client takes.
+        hMime = HostEncoder.mimeFor(a.codec).let { m ->
+            if (m == "video/avc" || HostEncoder.bestEncoder(m) != null) m else "video/avc"
+        }
+        hW = a.width; hH = a.height; hFps = a.fps; hKbps = a.bitrate_kbps
         hRecovery = a.loss_recovery ?: "normal"
         if (projectionLost) {
             // The projection was stopped outside Pulsar while sessions were up; they are
@@ -994,8 +1000,27 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     fun hostPointerButton(invoke: Invoke) {
         val a = invoke.parseArgs(PointerBtnArgs::class.java)
         val (dw, dh) = screenSize()
-        Log.i(TAG, "pointerButton down=${a.down} cursor=${cursorX.toInt()},${cursorY.toInt()} display=${dw}x${dh}")
+        Log.i(TAG, "pointerButton ${a.button} down=${a.down} cursor=${cursorX.toInt()},${cursorY.toInt()} display=${dw}x${dh}")
         val svc = PulsarA11yService.instance
+        when (a.button) {
+            0, 2 -> {} // left / middle: the tap / drag finger below
+            1 -> {
+                // Right click → long-press at the cursor: Android's context-menu / selection
+                // gesture (there is no secondary button for a touch screen). On the press, as
+                // a desktop shows its menu; the release has nothing left to do.
+                if (a.down) activity.runOnUiThread { svc?.longPress(cursorX, cursorY) }
+                val r = JSObject(); r.put("ok", svc != null); invoke.resolve(r); return
+            }
+            3 -> {
+                // Back side button → the Back action (on the press; the release is inert).
+                if (a.down) activity.runOnUiThread { svc?.back() }
+                val r = JSObject(); r.put("ok", svc != null); invoke.resolve(r); return
+            }
+            else -> {
+                // Forward (4): Android has no "forward" navigation action. Dropped.
+                val r = JSObject(); r.put("ok", false); invoke.resolve(r); return
+            }
+        }
         if (a.down) {
             downX = cursorX; downY = cursorY; downTime = System.currentTimeMillis()
             activity.runOnUiThread { svc?.dragStart(cursorX, cursorY) }
@@ -1013,15 +1038,23 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val r = JSObject(); r.put("ok", svc != null); invoke.resolve(r)
     }
 
-    /** Mouse wheel → a short swipe at the cursor (content scrolls with the wheel direction). */
+    /** Mouse wheel (both axes) → a short swipe at the cursor (content scrolls with the wheel
+     *  direction). A notch on both axes at once is one diagonal swipe. */
     @Command
     fun hostScroll(invoke: Invoke) {
         val a = invoke.parseArgs(ScrollArgs::class.java)
-        val (_, h) = screenSize()
+        val (w, h) = screenSize()
         // Wheel dy>0 = scroll down → content moves up → finger swipes UP (sy decreases).
-        val amt = (a.dy.toFloat() * 40f).coerceIn(-h * 0.6f, h * 0.6f)
-        val sy = cursorY.coerceIn(h * 0.15f, h * 0.85f)
-        PulsarA11yService.instance?.gesture(cursorX, sy, cursorX, (sy - amt).coerceIn(0f, h - 1f), 110L)
+        // Wheel dx>0 = scroll right → content moves left → finger swipes LEFT.
+        val amtY = (a.dy.toFloat() * 40f).coerceIn(-h * 0.6f, h * 0.6f)
+        val amtX = (a.dx.toFloat() * 40f).coerceIn(-w * 0.6f, w * 0.6f)
+        // Keep the swipe's start inside the screen far enough for the stroke to fit.
+        val sy = if (amtY != 0f) cursorY.coerceIn(h * 0.15f, h * 0.85f) else cursorY
+        val sx = if (amtX != 0f) cursorX.coerceIn(w * 0.15f, w * 0.85f) else cursorX
+        PulsarA11yService.instance?.gesture(
+            sx, sy,
+            (sx - amtX).coerceIn(0f, w - 1f), (sy - amtY).coerceIn(0f, h - 1f), 110L
+        )
         val r = JSObject(); r.put("ok", true); invoke.resolve(r)
     }
 
@@ -2195,34 +2228,90 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         // packet loss, and ignoring it here meant the phone kept blasting the original
         // bitrate forever → sustained 20-40% loss, corruption, stall spam (the ABR steps
         // were visible in the desktop log while the phone logged "re-stream ignored").
-        if (hostEncoder != null) {
-            val kbps = minOf(if (hKbps > 0) hKbps else 6000, 8000)
-            Log.i(TAG, "startCapture: already running — applying re-stream bitrate ${kbps}k live (recovery=$hRecovery kept: GOP can't change live)")
-            hostEncoder?.setBitrate(kbps * 1000)
-            return
-        }
-        val dm = activity.resources.displayMetrics
-        // Capture the phone's NATIVE screen (IGNORE the client's res/fps — desktop gaming
-        // defaults). Downscale so the larger dim ≤ 1280: native 1080x2400 (2.6 MP) overloads a
-        // software/emulator H.264 encoder + needs a high bitrate → glitchy macroblocks; a smaller
-        // frame (same aspect → no distortion) is sharper per-bit + far lighter.
         // Use the REAL display size (not the activity's metrics): while hosting the app is
         // backgrounded / may be orientation-locked, but MediaProjection mirrors the physical
         // display's CURRENT rotation — so the encoder must match that, not the app's frame.
         val (rw, rh) = realDisplaySize()
-        var w = rw
-        var h = rh
-        val maxDim = 1280
-        if (maxOf(w, h) > maxDim) {
-            val s = maxDim.toDouble() / maxOf(w, h)
-            w = (w * s).toInt(); h = (h * s).toInt()
+        // The client's size / fps / bit rate, up to what the screen and the encoder can do
+        // (HostEncoder.plan). Was: always the native screen capped at 1280 px, 30 fps and
+        // 8 Mbit/s whatever the client asked — the software-encoder limits, which plan()
+        // still applies when the phone has no hardware encoder for the codec.
+        val plan = HostEncoder.plan(hMime, rw, rh, displayRefreshHz(), hW, hH, hFps, hKbps)
+        val running = hostEncoder
+        if (running != null) {
+            // A re-stream mid-session (the client's ABR, or a pick in its session menu). Like
+            // the desktop host: a bitrate-only change is applied live (no restart, no
+            // keyframe glitch); a new codec / size / fps rebuilds the encoder on the same
+            // VirtualDisplay (Android 14+ refuses a second createVirtualDisplay).
+            // A plan the encoder already refused (it then runs at the safe fallback) is not
+            // retried on every ABR step: each retry is up to four failed configures.
+            val same = running.mime == hMime && running.streamWidth == plan.w && running.streamHeight == plan.h && running.fps == plan.fps
+            if (same || plan.copy(bps = 0) == refusedPlan) {
+                Log.i(TAG, "startCapture: already running — re-stream bitrate ${plan.bps / 1000}k live (recovery=$hRecovery kept: GOP can't change live)")
+                running.setBitrate(plan.bps)
+            } else {
+                Log.i(TAG, "startCapture: re-stream ${running.mime} ${running.streamWidth}x${running.streamHeight}@${running.fps} → $hMime ${plan.w}x${plan.h}@${plan.fps} ${plan.bps / 1000}k")
+                if (running.retune(hMime, plan.name, plan.w, plan.h, plan.fps, plan.bps)) {
+                    refusedPlan = null
+                } else {
+                    refusedPlan = plan.copy(bps = 0)
+                    running.setBitrate(plan.bps)
+                }
+            }
+            lastCaptureDims = Pair(rw, rh)
+            return
         }
-        w = w and 1.inv(); h = h and 1.inv()
-        val fps = minOf(if (hFps > 0) hFps else 30, 30)
-        val kbps = minOf(if (hKbps > 0) hKbps else 6000, 8000)
-        Log.i(TAG, "startCapture native ${w}x${h}@$fps ${kbps}k mime=$hMime")
-        HostEncoder(proj, hMime, w, h, fps, kbps * 1000, dm.densityDpi, hPort, hAudioPort, hRecovery).also { it.start(); hostEncoder = it }
+        val dm = activity.resources.displayMetrics
+        Log.i(TAG, "startCapture ${rw}x${rh} → ${plan.w}x${plan.h}@${plan.fps} ${plan.bps / 1000}k mime=$hMime enc=${plan.name} hw=${plan.hardware} (asked ${hW}x${hH}@$hFps ${hKbps}k)")
+        refusedPlan = null
+        val enc = try {
+            HostEncoder(proj, hMime, plan.w, plan.h, plan.fps, plan.bps, dm.densityDpi, hPort, hAudioPort, hRecovery, plan.name).also { startOrRelease(it) }
+        } catch (e: Exception) {
+            refusedPlan = plan.copy(bps = 0)
+            // An encoder that lists a size / rate it then refuses: retry at the limits the
+            // host always used (H.264 is what the client has a decoder for in any case).
+            Log.w(TAG, "encoder at the requested size failed (${e.message}); retrying at the safe defaults")
+            var w = rw; var h = rh
+            if (maxOf(w, h) > 1280) { val s = 1280.0 / maxOf(w, h); w = (w * s).toInt(); h = (h * s).toInt() }
+            w = w and 1.inv(); h = h and 1.inv()
+            HostEncoder(proj, hMime, w, h, minOf(plan.fps, 30), minOf(plan.bps, 8_000_000), dm.densityDpi, hPort, hAudioPort, hRecovery, plan.name).also { startOrRelease(it) }
+        }
+        hostEncoder = enc
         lastCaptureDims = Pair(rw, rh)
+    }
+
+    /** Start [enc]; on failure release what it built (its encoder) before rethrowing. */
+    private fun startOrRelease(enc: HostEncoder) {
+        try { enc.start() } catch (e: Exception) { enc.stop(); throw e }
+    }
+
+    /** The panel's current refresh rate (Hz, rounded), 0 when unknown. The stream cannot
+     *  have more frames than the panel composes. */
+    private fun displayRefreshHz(): Int = try {
+        val disp = (activity.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+            .getDisplay(android.view.Display.DEFAULT_DISPLAY)
+        Math.round(disp.refreshRate)
+    } catch (_: Exception) { 0 }
+
+    /**
+     * Mobile host: what this phone can stream (Rust `host_encoder_caps`, sent to the client as
+     * StreamCaps): `codecs` = the encodable codecs best first (HostEncoder.probeCodecs), plus
+     * the screen's real size and refresh rate. Native-only.
+     */
+    @Command
+    fun hostEncoderCaps(invoke: Invoke) {
+        val r = JSObject()
+        try {
+            val arr = JSArray()
+            HostEncoder.probeCodecs().forEach { arr.put(it) }
+            val (w, h) = realDisplaySize()
+            r.put("ok", true); r.put("codecs", arr)
+            r.put("width", w); r.put("height", h); r.put("refreshHz", displayRefreshHz())
+        } catch (e: Exception) {
+            Log.w(TAG, "hostEncoderCaps failed", e)
+            r.put("ok", false)
+        }
+        invoke.resolve(r)
     }
 
     /** The physical display's CURRENT size (accounts for rotation), independent of the
@@ -2252,6 +2341,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     // decoder reconfigures + re-aspects. Brief (~200ms) freeze during the swap is fine.
     private var displayListener: android.hardware.display.DisplayManager.DisplayListener? = null
     private var lastCaptureDims: Pair<Int, Int>? = null
+    /** The stream plan (bit rate zeroed) the running encoder refused to start or rebuild at;
+     *  a re-stream asking for it again only changes the bit rate. */
+    private var refusedPlan: HostEncoder.Plan? = null
     private val displayCheckHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var recheckQueued = false
 
@@ -2327,14 +2419,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 cursorY = (cursorY / old.second * rh).coerceIn(0f, rh - 1f)
                 moveCursor()
             }
-            var w = rw; var h = rh
-            val maxDim = 1280
-            if (maxOf(w, h) > maxDim) {
-                val s = maxDim.toDouble() / maxOf(w, h)
-                w = (w * s).toInt(); h = (h * s).toInt()
-            }
-            w = w and 1.inv(); h = h and 1.inv()
-            enc.reconfigure(w, h)
+            // Same fit as startCapture: the client's box, oriented to the new screen.
+            val plan = HostEncoder.plan(enc.mime, rw, rh, displayRefreshHz(), hW, hH, hFps, hKbps)
+            enc.reconfigure(plan.w, plan.h)
             lastCaptureDims = Pair(rw, rh)
         }
     }

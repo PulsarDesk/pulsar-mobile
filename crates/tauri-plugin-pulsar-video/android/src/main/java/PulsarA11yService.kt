@@ -3,9 +3,11 @@ package dev.pulsar.video
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -19,6 +21,9 @@ class PulsarA11yService : AccessibilityService() {
     companion object {
         @Volatile
         var instance: PulsarA11yService? = null
+
+        /** Held this long, a touch is a long-press (ViewConfiguration's default is 400-500 ms). */
+        private const val LONG_PRESS_MS = 650L
     }
 
     override fun onServiceConnected() { instance = this }
@@ -101,26 +106,92 @@ class PulsarA11yService : AccessibilityService() {
         if (!busy) flushDrag()
     }
 
+    /** Right click: a long-press at (x,y) — Android's context menu / text selection. */
+    fun longPress(x: Float, y: Float) = gesture(x, y, x, y, LONG_PRESS_MS)
+
+    /** The Back navigation action (Esc, the mouse back button, Alt+Left). */
+    fun back() { performGlobalAction(GLOBAL_ACTION_BACK) }
+
     // ── Keyboard (remote client → this phone) ─────────────────────────────────
     // An AccessibilityService cannot inject arbitrary KeyEvents (that needs the
     // system INJECT_EVENTS permission), so remote keys are mapped to what a11y CAN
-    // do: global navigation actions and text editing on the focused input node.
-    // evdev codes (see input-event-codes.h): 1=ESC 14=BACKSPACE 15=TAB 28=ENTER
-    // 56=LALT 100=RALT 96=KPENTER 105=LEFT 106=RIGHT 111=DELETE 125/126=META.
+    // do: global navigation actions, text editing on the focused input node, and the
+    // media / volume keys any app may send. Codes are Linux evdev (input-event-codes.h).
+    //
+    // Mapped:
+    //   Esc, Alt+Left, Browser Back → Back · Meta (tapped alone), Meta+D, Browser Home → Home
+    //   Alt+Tab, Meta+Tab → Recents · Meta+N → notifications · Meta+A → quick settings
+    //   Meta+L → lock screen (Android 9+) · PrintScreen → screenshot (Android 9+)
+    //   Backspace / Delete / Enter, ←/→ (Shift extends the selection), ↑/Home and ↓/End
+    //   (line boundaries, see moveLine), Ctrl+Home / Ctrl+End (whole text),
+    //   Ctrl+A / C / X / V on the focused text field
+    //   Volume up / down / mute, Play/Pause, Next, Previous
+    // Not possible without system permissions: any other key (F-keys, Tab focus moves,
+    // Ctrl+Z, game keys), keys into apps that read raw KeyEvents, IME composition.
 
     private var altDown = false
+    private var ctrlDown = false
+    private var shiftDown = false
+    private var metaDown = false
+    // Meta acts as Home only when tapped alone (released with no shortcut in between), so
+    // Meta+N etc. do not also leave the app.
+    private var metaUsed = false
 
     /** Handle a remote key press/release (evdev `code`). */
     fun key(code: Int, down: Boolean) {
-        Log.i("PulsarA11y", "key code=$code down=$down alt=$altDown")
+        Log.i("PulsarA11y", "key code=$code down=$down alt=$altDown ctrl=$ctrlDown shift=$shiftDown meta=$metaDown")
         when (code) {
             56, 100 -> { altDown = down; return }
-            15 -> if (down && altDown) { performGlobalAction(GLOBAL_ACTION_RECENTS); return }
+            29, 97 -> { ctrlDown = down; return }
+            42, 54 -> { shiftDown = down; return }
+            125, 126 -> {
+                if (down) { metaDown = true; metaUsed = false }
+                else {
+                    if (metaDown && !metaUsed) performGlobalAction(GLOBAL_ACTION_HOME)
+                    metaDown = false
+                }
+                return
+            }
         }
         if (!down) return
+        if (metaDown) {
+            metaUsed = true
+            when (code) {
+                15 -> performGlobalAction(GLOBAL_ACTION_RECENTS)              // Meta+Tab
+                32 -> performGlobalAction(GLOBAL_ACTION_HOME)                 // Meta+D
+                49 -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)        // Meta+N
+                30 -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)       // Meta+A
+                38 -> if (Build.VERSION.SDK_INT >= 28) performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN) // Meta+L
+            }
+            return
+        }
+        if (altDown) {
+            when (code) {
+                15 -> { performGlobalAction(GLOBAL_ACTION_RECENTS); return }  // Alt+Tab
+                105 -> { back(); return }                                     // Alt+Left
+            }
+        }
+        if (ctrlDown) {
+            when (code) {
+                30 -> { selectAll(); return }                                 // Ctrl+A
+                46 -> { focusedAction(AccessibilityNodeInfo.ACTION_COPY); return }  // Ctrl+C
+                45 -> { focusedAction(AccessibilityNodeInfo.ACTION_CUT); return }   // Ctrl+X
+                47 -> { focusedAction(AccessibilityNodeInfo.ACTION_PASTE); return } // Ctrl+V
+                102 -> { setCaret(0, extend = shiftDown); return }            // Ctrl+Home
+                107 -> { setCaret(Int.MAX_VALUE, extend = shiftDown); return } // Ctrl+End
+            }
+        }
         when (code) {
-            125, 126 -> performGlobalAction(GLOBAL_ACTION_HOME) // Win/Meta → Home
-            1 -> performGlobalAction(GLOBAL_ACTION_BACK)        // Esc → Back
+            1, 158 -> back()                                    // Esc / Browser Back → Back
+            172 -> performGlobalAction(GLOBAL_ACTION_HOME)      // Browser Home → Home
+            99 -> if (Build.VERSION.SDK_INT >= 28) performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT) // PrintScreen
+            115 -> volume(AudioManager.ADJUST_RAISE)            // Volume up
+            114 -> volume(AudioManager.ADJUST_LOWER)            // Volume down
+            113 -> volume(AudioManager.ADJUST_TOGGLE_MUTE)      // Mute
+            164 -> mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)  // Play/Pause
+            163 -> mediaKey(KeyEvent.KEYCODE_MEDIA_NEXT)        // Next track
+            165 -> mediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS)    // Previous track
+            166 -> mediaKey(KeyEvent.KEYCODE_MEDIA_STOP)        // Stop
             14 -> editText { text, s, e ->                      // Backspace
                 if (s == e && s == 0) null
                 else if (s == e) Triple(text.substring(0, s - 1) + text.substring(e), s - 1, s - 1)
@@ -139,9 +210,78 @@ class PulsarA11yService : AccessibilityService() {
                     typeText("\n")
                 }
             }
-            105 -> moveCaret(-1)                                // ← caret left
-            106 -> moveCaret(1)                                 // → caret right
+            105 -> moveCaret(-1, extend = shiftDown)            // ← caret left
+            106 -> moveCaret(1, extend = shiftDown)             // → caret right
+            103, 102 -> moveLine(forward = false, extend = shiftDown) // ↑ / Home
+            108, 107 -> moveLine(forward = true, extend = shiftDown)  // ↓ / End
         }
+    }
+
+    private fun volume(direction: Int) {
+        try {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
+        } catch (e: Exception) { Log.w("PulsarA11y", "volume: ${e.message}") }
+    }
+
+    /** A media key to the current media session (the same path a headset button takes). */
+    private fun mediaKey(keyCode: Int) {
+        try {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        } catch (e: Exception) { Log.w("PulsarA11y", "media key: ${e.message}") }
+    }
+
+    private fun focusedAction(action: Int) {
+        val node = focusedEditable() ?: return
+        try { node.performAction(action) } catch (_: Exception) {}
+    }
+
+    private fun selectAll() {
+        val node = focusedEditable() ?: return
+        val len = node.text?.length ?: 0
+        select(node, 0, len)
+    }
+
+    private fun select(node: AccessibilityNodeInfo, start: Int, end: Int) {
+        try {
+            val sel = Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
+            }
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel)
+        } catch (_: Exception) {}
+    }
+
+    /** Caret to [pos] (clamped to the text); [extend] keeps the selection's anchor. */
+    private fun setCaret(pos: Int, extend: Boolean) {
+        val node = focusedEditable() ?: return
+        val len = node.text?.length ?: 0
+        val p = pos.coerceIn(0, len)
+        val anchor = node.textSelectionStart.let { if (it < 0) len else it.coerceAtMost(len) }
+        if (extend) select(node, anchor, p) else select(node, p, p)
+    }
+
+    /**
+     * ↑ / Home and ↓ / End: the accessibility line step, which the text field resolves
+     * itself (line wrapping included). It moves to the previous line boundary / the next
+     * one, so ↑ and Home both land on the start of the line (then the line above), ↓ and End
+     * on its end (then the line below): a11y has no "same column on the next line".
+     */
+    private fun moveLine(forward: Boolean, extend: Boolean) {
+        val node = focusedEditable() ?: return
+        try {
+            val args = Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT, AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE)
+                putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, extend)
+            }
+            node.performAction(
+                if (forward) AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
+                else AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY,
+                args
+            )
+        } catch (_: Exception) {}
     }
 
     /** Insert `str` at the caret of the focused editable node (replacing any selection). */
@@ -182,18 +322,17 @@ class PulsarA11yService : AccessibilityService() {
         } catch (_: Exception) {}
     }
 
-    private fun moveCaret(delta: Int) {
+    private fun moveCaret(delta: Int, extend: Boolean = false) {
         val node = focusedEditable() ?: return
         val text = node.text?.toString() ?: ""
-        val cur = node.textSelectionEnd.let { if (it < 0) text.length else it }
+        val cur = node.textSelectionEnd.let { if (it < 0) text.length else it.coerceAtMost(text.length) }
         val pos = (cur + delta).coerceIn(0, text.length)
-        try {
-            val sel = Bundle().apply {
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, pos)
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, pos)
-            }
-            node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel)
-        } catch (_: Exception) {}
+        if (extend) {
+            val anchor = node.textSelectionStart.let { if (it < 0) text.length else it.coerceAtMost(text.length) }
+            select(node, anchor, pos)
+        } else {
+            select(node, pos, pos)
+        }
     }
 
     private fun flushDrag() {
