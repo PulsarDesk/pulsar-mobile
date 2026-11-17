@@ -13,7 +13,7 @@
  *   send_chat       { slot, text: String }  → ()
  *
  * Tauri events (listened here):
- *   clipboard-in    { slot, text }
+ *   clipboard-in    { slot, text, applied }  (applied = clipboard sync already copied it)
  *   chat-msg        { slot, text }
  *
  * Design principles (DT-clipboard-chat, §4):
@@ -147,11 +147,18 @@ function _wireClipboard() {
 		btn.classList.add('loading');
 		try {
 			// Read the system clipboard and send it to the remote
+			// The Android WebView denies navigator.clipboard.readText() ("Read permission
+			// denied"): read through the native ClipboardManager first (as connect.js does).
 			let text = '';
 			try {
-				text = await navigator.clipboard.readText();
+				const res = await invoke('plugin:pulsar-video|read_clipboard', {});
+				text = (res && res.detail) || '';
 			} catch (_) {
-				// Fallback: use empty string (the host side handles empty gracefully)
+				try {
+					text = await navigator.clipboard.readText();
+				} catch (_e) {
+					// Fallback: empty string → "clipboard is empty" below
+				}
 			}
 			if (!text) {
 				_showToast(_t('m.sc.clipboardEmpty'), 'warn');
@@ -407,8 +414,13 @@ function _refreshChatCardPreview() {
  * Handle an inbound clipboard-in event from the Rust side.
  * Shows a toast with a "Panoya kopyala" action button.
  */
-function _onClipboardIn({ slot, text }) {
+function _onClipboardIn({ slot, text, applied }) {
 	if (slot !== _slot) return;
+	// Clipboard sync on: Rust already wrote it to the phone's clipboard — just confirm.
+	if (applied) {
+		_showToast(_t('m.sc.clipSynced'), 'ok');
+		return;
+	}
 	_showClipboardToast(text);
 }
 

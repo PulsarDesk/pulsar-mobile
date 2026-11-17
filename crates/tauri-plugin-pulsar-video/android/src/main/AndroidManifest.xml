@@ -42,6 +42,12 @@
          it still install the app. Access to each pad is the per-device USB permission
          dialog, not a manifest permission. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- Received files (ReceivedFiles.kt) go to the public Downloads/Pulsar Received folder.
+         Android 10+ writes through MediaStore with no permission; before that the public
+         Downloads dir needs this runtime permission (asked on the first received file). -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application>
         <!-- In-app update: content:// URI for the downloaded APK, scoped to the updates/

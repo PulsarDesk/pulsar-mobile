@@ -172,6 +172,10 @@ async function boot() {
 	// Language switched → re-render the pill's mode label in the new language.
 	window.addEventListener('langchange', () => setNetPillMode(netmode()));
 
+	// 2a. Two-way clipboard sync (Settings → Session) — the Rust watcher starts enabled;
+	// tell it the stored choice before any session opens.
+	invoke('set_clipboard_sync', { enabled: getPref('clipboardSync') !== false }).catch(() => {});
+
 	// 3. Router — wire bottom-nav + bus listeners + Tauri conn-phase listener.
 	// Pass the tauri module so the router can subscribe to 'conn-phase' and
 	// update the net-pill with the real transport (Direct / Relay) before auth.

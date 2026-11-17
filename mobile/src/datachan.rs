@@ -11,7 +11,10 @@
 //! - 8 concurrent in-flight transfers per slot (W4 cap).
 //! - Idle entries (no activity for 60 s) are swept on the next `FileBegin`.
 //! - Total received bytes capped at `MAX_XFER_BYTES` (2 GiB) to prevent OOM.
-//! - Completed file is saved to "Pulsar Received" inside the app data dir.
+//! - Completed file is reassembled in "Pulsar Received" inside the app data dir, then the
+//!   plugin copies it to the public Downloads/Pulsar Received folder (MediaStore on
+//!   Android 10+) and posts a notification with Open / Share; the private copy is removed.
+//!   If publishing fails the private copy stays (the old behaviour).
 //!
 //! ## Send commands
 //!
@@ -84,6 +87,9 @@ pub struct XferMap(pub Mutex<HashMap<u8, HashMap<u32, FileReasm>>>);
 struct ClipboardInPayload {
     slot: u8,
     text: String,
+    /// Clipboard sync is on and the text was written to the phone's clipboard already (the
+    /// UI then only confirms; with sync off it offers the manual "Copy" action).
+    applied: bool,
 }
 
 /// The host pushed its display name (`DataMsg::PeerName`) for this session. JS
@@ -152,7 +158,13 @@ struct FileRecvPayload {
     slot: u8,
     id: u32,
     name: String,
+    /// Where the file is: "Download/Pulsar Received/<name>" once published, else the
+    /// private path. Empty = the transfer failed.
     saved_path: String,
+    /// `content://` URI for Open / Share (`open_received` / `share_received`); empty when the
+    /// file could not be published to Downloads.
+    uri: String,
+    mime: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -393,7 +405,13 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
 
     match msg {
         DataMsg::Clipboard(text) => {
-            let _ = app.emit("clipboard-in", ClipboardInPayload { slot, text });
+            // Emitted once the sync write finished, so `applied` is only true when the text
+            // really is on the phone's clipboard (else the UI offers the manual "Copy").
+            let app2 = app.clone();
+            let text2 = text.clone();
+            crate::clipsync::apply_remote(app, &text, move |applied| {
+                let _ = app2.emit("clipboard-in", ClipboardInPayload { slot, text: text2, applied });
+            });
         }
         DataMsg::Chat(text) => {
             let _ = app.emit("chat-msg", ChatMsgPayload { slot, text });
@@ -549,7 +567,14 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
                     drop(outer);
                     let _ = app.emit(
                         "file-recv",
-                        FileRecvPayload { slot, id: xfer, name, saved_path: String::new() },
+                        FileRecvPayload {
+                            slot,
+                            id: xfer,
+                            name,
+                            saved_path: String::new(),
+                            uri: String::new(),
+                            mime: String::new(),
+                        },
                     );
                 }
                 ChunkResult::OutOfRange | ChunkResult::NoEntry => {
@@ -582,16 +607,15 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
             let dir = received_dir(app);
 
             tokio::task::spawn_blocking(move || {
-                let saved_path = if complete {
-                    save_chunks(&dir, &r.name, r.chunks.values())
-                        .and_then(|p| p.to_str().map(str::to_string))
-                        .unwrap_or_default()
-                } else {
-                    String::new()
+                let saved = if complete { save_chunks(&dir, &r.name, r.chunks.values()) } else { None };
+                drop(r.chunks); // free the reassembly buffers before the copy below
+                let (saved_path, uri, mime) = match saved {
+                    Some(p) => publish_received(&app2, &p, &r.name),
+                    None => Default::default(),
                 };
                 let _ = app2.emit(
                     "file-recv",
-                    FileRecvPayload { slot, id: xfer, name: r.name, saved_path },
+                    FileRecvPayload { slot, id: xfer, name: r.name, saved_path, uri, mime },
                 );
             });
         }
@@ -640,6 +664,67 @@ pub fn route<R: Runtime>(app: &AppHandle<R>, slot: u8, bytes: &[u8]) {
         // All other variants are host-only or handled by another wave.
         _ => {}
     }
+}
+
+// ── Received files → public Downloads ───────────────────────────────────────
+
+/// Hand a reassembled file (private storage) to the plugin, which copies it to the public
+/// Downloads/Pulsar Received folder and posts the "file received" notification. Returns
+/// (shown location, content URI, MIME type); on failure the private copy is kept and its
+/// path returned with an empty URI. Blocking.
+fn publish_received<R: Runtime>(app: &AppHandle<R>, path: &Path, name: &str) -> (String, String, String) {
+    use tauri_plugin_pulsar_video::PulsarVideoExt;
+    let private = path.to_string_lossy().into_owned();
+    let shown = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string());
+    match app.pulsar_video().publish_download(&private, &shown) {
+        Ok(p) if p.ok => {
+            let _ = std::fs::remove_file(path);
+            (p.location, p.uri, p.mime)
+        }
+        Ok(p) => {
+            log::warn!("received file not published to Downloads: {}", p.error);
+            (private, String::new(), String::new())
+        }
+        Err(e) => {
+            log::warn!("received file not published to Downloads: {e}");
+            (private, String::new(), String::new())
+        }
+    }
+}
+
+/// Open a received file (`uri` from `file-recv`) in another app.
+///
+/// JS: `invoke('open_received', { uri, mime })` → `{ ok, detail }` (`detail: "no_app"` when
+/// nothing on the phone opens this type).
+#[tauri::command]
+pub async fn open_received<R: Runtime>(
+    app: AppHandle<R>,
+    uri: String,
+    mime: Option<String>,
+) -> Result<tauri_plugin_pulsar_video::AttachResponse, String> {
+    use tauri_plugin_pulsar_video::PulsarVideoExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.pulsar_video().open_download(&uri, mime.as_deref().unwrap_or("")).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Share a received file (`uri` from `file-recv`) through the system share sheet.
+///
+/// JS: `invoke('share_received', { uri, mime })`
+#[tauri::command]
+pub async fn share_received<R: Runtime>(
+    app: AppHandle<R>,
+    uri: String,
+    mime: Option<String>,
+) -> Result<tauri_plugin_pulsar_video::AttachResponse, String> {
+    use tauri_plugin_pulsar_video::PulsarVideoExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.pulsar_video().share_download(&uri, mime.as_deref().unwrap_or("")).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Helper: get SessionSender for a slot ────────────────────────────────────

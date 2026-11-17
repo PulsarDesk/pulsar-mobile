@@ -20,6 +20,7 @@ const DEFAULTS = {
 	resolution: 'auto',      // 'auto' (host default) | '720' | '1080' | '1440' | '2160'
 	hdr: false,              // request HDR (HEVC Main10 / PQ) from the host
 	audioQuality: 'auto',    // host audio: 'auto' | 'standard' | 'high' | 'raw' (next connect)
+	clipboardSync: true,     // two-way clipboard sync with every open session (desktop parity)
 	gamepadTargets: {},      // controller name → host emulation: 'auto' | 'xbox' | 'ds4'
 	ds5Passthrough: true,    // drive a USB DualSense raw for FEAT_DS5 hosts (ds5.rs)
 };

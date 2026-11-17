@@ -318,6 +318,49 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
+  /// Clipboard sync: has the clipboard changed since `seq` (-1 = baseline)? Returns its text
+  /// when it did and the app may read it now (focused). `since` (epoch ms, baseline only) =
+  /// when the session opened: a clip set after it is reported as `fresh`. Rust-only.
+  pub fn clipboard_poll(&self, seq: i64, since: i64) -> crate::Result<ClipPoll> {
+    self
+      .0
+      .run_mobile_plugin("clipboardPoll", ClipPollArgs { seq, since })
+      .map_err(Into::into)
+  }
+
+  /// Clipboard sync: write a peer's text to the system clipboard. Rust-only.
+  pub fn write_clipboard(&self, text: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("writeClipboard", ClipWriteArgs { text })
+      .map_err(Into::into)
+  }
+
+  /// Copy a received file (`path`, private app storage) into the public Downloads/Pulsar
+  /// Received folder and post the "file received" notification (Open / Share). Rust-only.
+  pub fn publish_download(&self, path: &str, name: &str) -> crate::Result<PublishedFile> {
+    self
+      .0
+      .run_mobile_plugin("publishDownload", PublishArgs { path, name })
+      .map_err(Into::into)
+  }
+
+  /// Open a received file (`content://` URI from `publish_download`) in another app.
+  pub fn open_download(&self, uri: &str, mime: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("openDownload", UriArgs { uri, mime })
+      .map_err(Into::into)
+  }
+
+  /// Share a received file (`content://` URI) through the system share sheet.
+  pub fn share_download(&self, uri: &str, mime: &str) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("shareDownload", UriArgs { uri, mime })
+      .map_err(Into::into)
+  }
+
   /// Display refresh rate in Hz (returned in `AttachResponse.detail`).
   pub fn screen_refresh_rate(&self) -> crate::Result<AttachResponse> {
     self
@@ -594,6 +637,29 @@ struct Ds5UsbPollArgs {
 struct Ds5UsbCloseArgs {
   id: u32,
   failed: bool,
+}
+
+#[derive(Serialize)]
+struct ClipPollArgs {
+  seq: i64,
+  since: i64,
+}
+
+#[derive(Serialize)]
+struct ClipWriteArgs<'a> {
+  text: &'a str,
+}
+
+#[derive(Serialize)]
+struct PublishArgs<'a> {
+  path: &'a str,
+  name: &'a str,
+}
+
+#[derive(Serialize)]
+struct UriArgs<'a> {
+  uri: &'a str,
+  mime: &'a str,
 }
 
 #[derive(Serialize)]

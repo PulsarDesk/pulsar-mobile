@@ -138,6 +138,34 @@ class VideoSizeArgs {
     var slot: Int = 0
 }
 
+/** Clipboard sync: the change counter the caller last saw (-1 = read regardless). */
+@InvokeArg
+class ClipPollArgs {
+    var seq: Long = -1
+    /** Baseline only: when the session opened (System.currentTimeMillis). A clip set after
+     *  it is a real copy, not the baseline, even if Pulsar only got focus later. 0 = unknown. */
+    var since: Long = 0
+}
+
+@InvokeArg
+class ClipWriteArgs {
+    var text: String = ""
+}
+
+/** Received file: private path written by Rust + the peer's (sanitized) file name. */
+@InvokeArg
+class PublishArgs {
+    var path: String = ""
+    var name: String = ""
+}
+
+/** Received file: a content:// URI from publishDownload + its MIME type ("" = look it up). */
+@InvokeArg
+class UriArgs {
+    var uri: String = ""
+    var mime: String = ""
+}
+
 @InvokeArg
 class PadFeedArgs {
     var port: Int = 0
@@ -396,6 +424,17 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     @Volatile private var appResumed = false
 
     /**
+     * Clipboard sync (the Rust watcher polls [clipboardPoll]): bumped by the system's
+     * clip-changed listener (only delivered while we are focused on Android 10+, e.g. a copy
+     * inside the app) and on every resume (a copy in another app is never reported to us).
+     */
+    private val clipSeq = AtomicLong(0)
+    /** ClipDescription timestamp of the clip last returned (API 26+): a resume that finds the
+     *  same clip is not read again, so Android 12+ doesn't toast "Pulsar pasted from your
+     *  clipboard" each time the user switches back. */
+    @Volatile private var clipStampSeen = 0L
+
+    /**
      * LAN discovery: Android drops INBOUND multicast (pulsar-core's Discovery on
      * 239.255.71.21) unless this lock is held. Acquired once in [load] and held for
      * the app's lifetime — the Tauri Plugin base class has no destroy lifecycle to
@@ -424,11 +463,16 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
         appResumed = true // load runs with the activity in the foreground
+        try {
+            (activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                .addPrimaryClipChangedListener { clipSeq.incrementAndGet() }
+        } catch (e: Exception) { Log.w(TAG, "clipboard listener failed: ${e.message}") }
         activity.application.registerActivityLifecycleCallbacks(
             object : android.app.Application.ActivityLifecycleCallbacks {
                 override fun onActivityResumed(a: android.app.Activity) {
                     if (a !== activity) return
                     appResumed = true
+                    clipSeq.incrementAndGet()
                     // Back from another app mid-stream: some OEMs show the bars again.
                     if (immersive) a.window.decorView.post { if (immersive) applyImmersive(true) }
                 }
@@ -1337,6 +1381,137 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             } catch (e: Exception) {
                 invoke.reject("clipboard read failed: ${e.message}")
             }
+        }
+    }
+
+    /**
+     * Clipboard sync poll (Rust watcher, every 500 ms while a session is open). Android 10+
+     * lets only the focused app read the clipboard, so nothing is read unless our window has
+     * focus; a change made meanwhile is picked up on the next resume.
+     *
+     * - `seq` == current counter → unchanged (`changed: false`, cheap, no clipboard access).
+     * - not focused → `seq` is echoed back unchanged so the caller retries later.
+     * - `seq` == -1 (baseline when a session opens) → on API 26+ only the clip's timestamp is
+     *   recorded (`changed: false`, new `seq`): reading the text would make Android 12+ toast
+     *   "pasted from your clipboard" on every connect. Older versions read the text. A clip
+     *   set after `since` (the session opened before Pulsar got focus) is read instead and
+     *   reported with `fresh: true`, so that copy is sent rather than swallowed as baseline.
+     * - otherwise the clip is read unless its timestamp shows it is the one already returned.
+     */
+    @Command
+    fun clipboardPoll(invoke: Invoke) {
+        val a = invoke.parseArgs(ClipPollArgs::class.java)
+        activity.runOnUiThread {
+            val r = JSObject(); r.put("ok", true)
+            val cur = clipSeq.get()
+            // Android 10+ denies background reads (null clip): only read while focused.
+            // Older versions allow them, and their change listener also fires in background.
+            val readable = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                (appResumed && activity.hasWindowFocus())
+            if (cur == a.seq || !readable) {
+                r.put("seq", a.seq); r.put("changed", false); invoke.resolve(r)
+                return@runOnUiThread
+            }
+            try {
+                val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val stamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    cm.primaryClipDescription?.timestamp ?: 0L else 0L
+                // Baseline taken late (the session opened while Pulsar was in the background,
+                // e.g. an unattended host): a clip set AFTER the session opened is a real copy
+                // the user expects to be sent, so it is read and reported (`fresh`). The stamp
+                // is wall-clock on current Android; tolerate an elapsedRealtime base too.
+                val since = if (a.since <= 0L || stamp == 0L) 0L
+                    else if (stamp < 1_000_000_000_000L)
+                        a.since - (System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime())
+                    else a.since
+                val fresh = a.seq < 0 && since > 0L && stamp > since
+                if (stamp != 0L && !fresh && (a.seq < 0 || stamp == clipStampSeen)) {
+                    clipStampSeen = stamp
+                    r.put("seq", cur); r.put("changed", false)
+                } else {
+                    val text = cm.primaryClip?.getItemAt(0)?.coerceToText(activity)?.toString() ?: ""
+                    clipStampSeen = stamp
+                    r.put("seq", cur); r.put("changed", true); r.put("text", text)
+                    r.put("fresh", fresh)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "clipboard poll failed: ${e.message}")
+                r.put("seq", cur); r.put("changed", false)
+            }
+            invoke.resolve(r)
+        }
+    }
+
+    /** Clipboard sync: put a peer's text on the system clipboard (allowed in the background). */
+    @Command
+    fun writeClipboard(invoke: Invoke) {
+        val a = invoke.parseArgs(ClipWriteArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("Pulsar", a.text))
+                val r = JSObject(); r.put("ok", true); invoke.resolve(r)
+            } catch (e: Exception) {
+                Log.w(TAG, "clipboard write failed: ${e.message}")
+                val r = JSObject(); r.put("ok", false); r.put("detail", e.message ?: ""); invoke.resolve(r)
+            }
+        }
+    }
+
+    /**
+     * A file received from a peer (private app storage, written by Rust): copy it into the
+     * public Downloads/Pulsar Received folder (see [ReceivedFiles]) and post the "file
+     * received" notification with Open / Share. Runs on its own thread (files can be large).
+     */
+    @Command
+    fun publishDownload(invoke: Invoke) {
+        val a = invoke.parseArgs(PublishArgs::class.java)
+        Thread {
+            val r = JSObject()
+            try {
+                val res = ReceivedFiles.publish(activity, File(a.path), a.name)
+                ReceivedFiles.notifyReceived(activity, res, a.name)
+                r.put("ok", true); r.put("uri", res.uri.toString())
+                r.put("location", res.location); r.put("mime", res.mime)
+            } catch (e: Exception) {
+                Log.w(TAG, "publishDownload failed: ${e.message}")
+                r.put("ok", false); r.put("error", e.message ?: e.toString())
+            }
+            invoke.resolve(r)
+        }.start()
+    }
+
+    /** Open a received file (content:// URI from publishDownload) in another app. */
+    @Command
+    fun openDownload(invoke: Invoke) {
+        val a = invoke.parseArgs(UriArgs::class.java)
+        activity.runOnUiThread {
+            val r = JSObject()
+            try {
+                ReceivedFiles.open(activity, Uri.parse(a.uri), a.mime)
+                r.put("ok", true)
+            } catch (e: android.content.ActivityNotFoundException) {
+                r.put("ok", false); r.put("detail", "no_app")
+            } catch (e: Exception) {
+                r.put("ok", false); r.put("detail", e.message ?: "")
+            }
+            invoke.resolve(r)
+        }
+    }
+
+    /** Share a received file through the system share sheet. */
+    @Command
+    fun shareDownload(invoke: Invoke) {
+        val a = invoke.parseArgs(UriArgs::class.java)
+        activity.runOnUiThread {
+            val r = JSObject()
+            try {
+                ReceivedFiles.share(activity, Uri.parse(a.uri), a.mime)
+                r.put("ok", true)
+            } catch (e: Exception) {
+                r.put("ok", false); r.put("detail", e.message ?: "")
+            }
+            invoke.resolve(r)
         }
     }
 

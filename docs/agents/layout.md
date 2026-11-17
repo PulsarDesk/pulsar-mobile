@@ -10,6 +10,16 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   decode_caps.rs: connect-time codec + fps choice from the phone's decoders
   (hardware-only auto codec with AV1 last, `decode_codecs` pinned to the armed codec,
   decoder fps cap, refresh vote).
+  clipsync.rs: two-way clipboard sync (desktop `clipboard_sync.rs` port, `clipboardSync` pref,
+  on by default) for viewed AND hosted sessions. Peer → phone is written at once (background
+  writes are allowed); phone → peer comes from a 500 ms poll of the plugin's `clipboardPoll`,
+  which reads only while Pulsar's window is focused (Android 10+), so a copy in another app goes
+  out when the user returns to Pulsar. Baseline uses the clip timestamp (no Android 12+ "pasted"
+  toast on connect). Untested on a device.
+  Received files (datachan.rs `FileEnd`): reassembled in private storage, then the plugin's
+  `ReceivedFiles.kt` copies them to public Downloads/Pulsar Received (MediaStore on 10+, the
+  public dir with WRITE_EXTERNAL_STORAGE ≤ 9) and posts a notification with Open / Share; the
+  session's files card shows the same actions (`open_received` / `share_received`).
   pad_feed.rs: physical gamepads — Kotlin `PadInput` sends pad state over a loopback
   UDP socket (token-prefixed datagrams), forwarded to the active pane's host as
   `GamepadSlot`; neutral state on focus loss / pane change / session end; rumble back.
