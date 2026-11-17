@@ -50,20 +50,15 @@ async function _subscribeHostDisplays() {
 	try {
 		_unlistenHostDisplays = await listen('host-displays', (payload) => {
 			if (payload == null) return;
-			// Guard: only process events for the active slot
-			if (typeof payload.slot === 'number' && payload.slot !== _slot) return;
+			const slot = typeof payload.slot === 'number' ? payload.slot : 0;
 			const displays = Array.isArray(payload.displays) ? payload.displays : [];
-			renderDisplays(displays);
+			// The host sends its displays DURING `connect`, before `session-started`
+			// fires: keep them per slot so the session can pick them up when it starts.
+			_displaysBySlot.set(slot, displays);
+			if (slot === _slot) renderDisplays(displays);
 		});
 	} catch (e) {
 		console.warn('[display] listen host-displays failed:', e);
-	}
-}
-
-function _unsubscribeHostDisplays() {
-	if (typeof _unlistenHostDisplays === 'function') {
-		_unlistenHostDisplays();
-		_unlistenHostDisplays = null;
 	}
 }
 
@@ -98,6 +93,9 @@ let _pointerMode = _resolvePointerMode();
  * @type {Array<{idx:number, name:string, width:number, height:number, primary:boolean}>}
  */
 let _displays = [];
+
+/** Last `host-displays` list per slot (may arrive before `session-started`). */
+const _displaysBySlot = new Map();
 
 /** Currently selected display index. */
 let _selectedDisplay = null;
@@ -604,15 +602,15 @@ function _wireBus() {
 			_displays        = [];
 			_selectedDisplay = null;
 			_switchingDisplay = false;
-			// Subscribe to host-displays event (W4-sidechannels)
-			_subscribeHostDisplays();
+			// The list usually arrived during connect, before this event.
+			renderDisplays(_displaysBySlot.get(_slot) || []);
 		});
 
-		bus.on('session-ended', () => {
+		bus.on('session-ended', ({ slot } = {}) => {
 			_displays        = [];
 			_selectedDisplay = null;
-			// Unsubscribe from host-displays event
-			_unsubscribeHostDisplays();
+			if (typeof slot === 'number') _displaysBySlot.delete(slot);
+			else _displaysBySlot.clear();
 		});
 
 		return true;
@@ -649,5 +647,8 @@ function _register() {
 // ---- Boot --------------------------------------------------------------------
 
 _injectStyles();
+// Listen from boot, not from `session-started`: the host's display list is emitted
+// while `connect` is still running, so a later subscription always missed it.
+_subscribeHostDisplays();
 _wireBus();
 _register();

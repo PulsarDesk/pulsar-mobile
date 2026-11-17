@@ -236,16 +236,21 @@ pub async fn node_port<R: Runtime>(app: AppHandle<R>) -> Result<u16, String> {
 /// App version + whether this is a local/debug build (`cargo`/`tauri … dev`) vs a
 /// CI release. The Settings "About" card shows it so a dev build is clearly marked.
 /// JS: `invoke('app_build_info')` → `{ version, local }`.
+///
+/// The version comes from the Tauri config, not `CARGO_PKG_VERSION`: the release
+/// workflow stamps the computed version only through `tauri android build --config`
+/// and never rewrites Cargo.toml, so `CARGO_PKG_VERSION` is stuck at the placeholder.
+/// The in-app updater (`app.getVersion()`) reads the same value.
 #[derive(Serialize)]
 pub struct BuildInfo {
-    pub version: &'static str,
+    pub version: String,
     pub local: bool,
 }
 
 #[tauri::command]
-pub async fn app_build_info() -> Result<BuildInfo, String> {
+pub async fn app_build_info<R: Runtime>(app: AppHandle<R>) -> Result<BuildInfo, String> {
     Ok(BuildInfo {
-        version: env!("CARGO_PKG_VERSION"),
+        version: app.package_info().version.to_string(),
         local: cfg!(debug_assertions),
     })
 }
