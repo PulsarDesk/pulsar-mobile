@@ -86,6 +86,22 @@ pub struct DecoderCaps {
   pub panel_hz: u32,
 }
 
+/// `networkKind` (native-only): what the phone's active network runs over, for the adaptive
+/// controller's phone-link mode (`adapt::Config::mobile`). `known` = the probe could tell;
+/// `cellular` = a cellular transport (on a VPN: its underlying one, when Android says);
+/// `metered` = the network lacks NOT_METERED (a Wi-Fi hotspot shared by another phone is
+/// metered); `vpn` = the active network is a VPN. The default (all false) means "unknown"
+/// (desktop builds, iOS, a failed probe).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NetworkKind {
+  pub known: bool,
+  pub cellular: bool,
+  pub wifi: bool,
+  pub vpn: bool,
+  pub metered: bool,
+}
+
 /// `hostStatus` (native-only): `stop_gen` moves each time the screen-share projection is
 /// stopped outside Pulsar; `message` is the end reason for the viewer (app language).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

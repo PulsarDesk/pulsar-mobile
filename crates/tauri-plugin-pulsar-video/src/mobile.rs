@@ -649,6 +649,10 @@ pub trait PulsarVideoW5Ext<R: Runtime> {
   /// Mobile host: projection-stop generation + end reason (see [`HostStatus`]). Native-only.
   fn host_status(&self) -> crate::Result<HostStatus>;
 
+  /// What the active network runs over (cellular / metered / VPN), see [`NetworkKind`].
+  /// Native-only.
+  fn network_kind(&self) -> crate::Result<NetworkKind>;
+
   /// Physical gamepads: send pad state to this loopback UDP port, each datagram prefixed
   /// with `token` (hex; the receiver drops datagrams without it). Native-only.
   fn pad_feed_start(&self, port: u16, token: &str) -> crate::Result<AttachResponse>;
@@ -698,6 +702,10 @@ impl<R: Runtime> PulsarVideoW5Ext<R> for PulsarVideo<R> {
 
   fn host_status(&self) -> crate::Result<HostStatus> {
     self.0.run_mobile_plugin("hostStatus", ()).map_err(Into::into)
+  }
+
+  fn network_kind(&self) -> crate::Result<NetworkKind> {
+    self.0.run_mobile_plugin("networkKind", ()).map_err(Into::into)
   }
 
   fn pad_feed_start(&self, port: u16, token: &str) -> crate::Result<AttachResponse> {

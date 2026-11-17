@@ -143,6 +143,72 @@ mod slot_gen_tests {
     }
 }
 
+#[cfg(test)]
+mod ladder_tests {
+    use super::{apply_ladder, decoder_sheds_step, restream_controller};
+    use pulsar_core::adapt::{self, Controller};
+
+    fn ctl(native: (u32, u32, u32), game: bool, start_kbps: u32) -> Controller {
+        let mut cfg = adapt::Config::new(adapt::codec_from_wire("h265"), 50_000);
+        cfg.native = native;
+        cfg.start_kbps = start_kbps;
+        apply_ladder(&mut cfg, game);
+        Controller::new(cfg)
+    }
+
+    #[test]
+    fn no_rung_exceeds_the_decoder_capped_top() {
+        for game in [false, true] {
+            for native in [(1920, 1080, 120), (1920, 1080, 60), (1280, 720, 30), (2560, 1440, 90), (854, 480, 60), (1280, 720, 120)] {
+                let c = ctl(native, game, 0);
+                for p in c.points() {
+                    assert!(p.width <= native.0 && p.height <= native.1 && p.fps <= native.2, "{p:?} over {native:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn floors_fit_a_phone() {
+        // Remote: 720p floor (the last-resort rung is 720p30 too); game: 720p60 + 720p30 last resort.
+        let c = ctl((1920, 1080, 60), false, 0);
+        assert!(c.points().iter().all(|p| p.height >= 720));
+        let g = ctl((1920, 1080, 60), true, 0);
+        assert!(g.points().iter().all(|p| p.height >= 720 && (p.fps >= 60 || (p.height, p.fps) == (720, 30))));
+    }
+
+    #[test]
+    fn a_thin_start_picks_a_lighter_rung() {
+        let top = ctl((1920, 1080, 60), true, 50_000).point();
+        let thin = ctl((1920, 1080, 60), true, 1_500).point();
+        assert_eq!((top.width, top.height, top.fps), (1920, 1080, 60));
+        assert!(thin.height < 1080, "{thin:?}");
+    }
+
+    #[test]
+    fn a_restream_on_a_phone_link_keeps_the_running_rate() {
+        let mut cfg = adapt::Config::new(adapt::codec_from_wire("h265"), 50_000);
+        cfg.native = (1920, 1080, 60);
+        cfg.start_kbps = 20_000;
+        cfg.startup_windows = 0;
+        cfg.mobile = true;
+        apply_ladder(&mut cfg, true);
+        let c = restream_controller(cfg);
+        assert!(c.target_kbps() >= 20_000, "{}", c.target_kbps());
+        let p = c.point();
+        assert_eq!((p.width, p.height, p.fps), (1920, 1080, 60));
+    }
+
+    #[test]
+    fn a_shedding_decoder_steps_the_fps_down() {
+        let mut c = ctl((1920, 1080, 120), true, 50_000);
+        let before = c.point();
+        let d = decoder_sheds_step(&mut c);
+        let p = d.point.expect("a lower fps rung");
+        assert!(p.fps < before.fps, "{before:?} -> {p:?}");
+    }
+}
+
 // ── conn-phase event ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -378,13 +444,14 @@ fn emit_play_decode_limit<R: Runtime>(app: &AppHandle<R>, slot: u8, fps: u32, us
     let _ = app.emit("play-decode-limit", PlayDecodeLimitPayload { slot, fps, user_fps });
 }
 
-/// What `SessionRegistry::last_req` keeps: the stream request with the SESSION's fps, not
-/// a decoder-forced lower one (`Controller::client_decoder_sheds`). A session-menu restream
-/// (codec, bitrate, ...) builds on `last_req` and rebuilds the controller from its fps: a
-/// stored 30 would become the session's new top for good.
-fn user_view(req: &StreamReq, user_fps: u32) -> StreamReq {
+/// What `SessionRegistry::last_req` keeps: the stream request with the SESSION's size and fps
+/// (the ladder's top rung), not the rung the controller runs at now (a thin link's 720p30, a
+/// decoder-forced lower fps). A session-menu restream (codec, bitrate, ...) builds on `last_req`
+/// and rebuilds the controller from its size and fps: a stored lower rung would become the
+/// session's new top for good.
+fn user_view(req: &StreamReq, user_top: (u32, u32, u32)) -> StreamReq {
     let mut r = req.clone();
-    r.fps = user_fps;
+    (r.width, r.height, r.fps) = user_top;
     r
 }
 
@@ -414,11 +481,62 @@ fn emit_auth_prompt<R: Runtime>(app: &AppHandle<R>, slot: u8, peer: &str, kind: 
 
 /// Decision cadence (the controller works on 2 s windows).
 const ABR_TICK: Duration = Duration::from_millis(2000);
-/// Auto-rate start when neither the bandwidth probe nor the path's memory has a rate. The
-/// ceiling is `adapt::caps::mobile_auto_cap_kbps` (what the phone's point needs, at most
-/// 50 Mbit; was a flat 12 Mbit that also cut the probe's plan short), under the relay's cap
-/// while relayed.
-const AUTO_START_KBPS: u32 = 8_000;
+/// Ladder floor height on a phone, remote-desktop sessions. The desktop holds 1080 there
+/// (readable text on a monitor); a phone screen shows 720p text about as legibly, the split
+/// view's secondary panes already stream 720p, and a cellular link that can't carry 1080p
+/// should trade resolution before it starves the encoder.
+const REMOTE_MIN_HEIGHT: u32 = 720;
+
+/// The resolution / fps ladder on a phone (desktop play.rs parity, floors sized for a phone
+/// screen). The top rung is `acfg.native`: the requested size and the fps already capped to
+/// what this phone's decoder declares for it (`decode_caps::effective_fps`). Every rung is at
+/// most that size and that fps, so the ladder never asks the host for more than the decoder
+/// can take.
+/// * Remote desktop: hold 720p ([`REMOTE_MIN_HEIGHT`]), adapt fps + bitrate; desktop content
+///   needs fewer bits than the game-content table assumes (`min_kbps_scale` 0.5, as desktop).
+/// * Game: keep 60 fps, give up resolution down to 720p (desktop's floor, maintainer decision
+///   2026-11-09); 720p60 is the bottom of the normal ladder.
+/// * Both: a last-resort 720p30 rung under the floors, for a path that can't carry the floor
+///   rung (desktop 2026-11-13 hotspot).
+fn apply_ladder(acfg: &mut adapt::Config, game_mode: bool) {
+    acfg.ladder = true;
+    if game_mode {
+        acfg.min_fps = 60;
+        acfg.min_height = 720;
+    } else {
+        acfg.min_height = REMOTE_MIN_HEIGHT;
+        acfg.min_kbps_scale = 0.5;
+    }
+    acfg.last_resort = Some((720, 30));
+}
+
+/// The phone's decoder sheds frames (`decoder_sheds`, several windows running). With the
+/// ladder on, `Controller::client_decoder_sheds` (the ladder-off step) does nothing; the
+/// controller's ladder-on step is `client_decode_bound`, which wants the decoder's time per
+/// frame, and MediaCodec does not report one. A decoder that sheds what it is fed is one whose
+/// time per frame fills the frame budget, so the budget itself is passed: the controller then
+/// steps to the best lighter rung with a lower fps whose pixel-scaled estimate fits (one fps
+/// rung at the same size when there is one) and caps the ladder there, retried later.
+fn decoder_sheds_step(ctl: &mut Controller) -> adapt::Decision {
+    let fps = ctl.point().fps.max(1);
+    ctl.client_decode_bound(1000.0 / fps as f32)
+}
+/// The controller a session-menu restream rebuilds: it starts at `acfg.start_kbps` (the
+/// picked bitrate, or the rate the link was just running at). On a phone link the core caps a
+/// new controller's start at `MOBILE_START_KBPS` (a session's first seconds, where the probe
+/// reads a cellular link's burst); mid-session that would throw away a rate the link has
+/// already proven and step the ladder down for nothing, so the start is restored and the
+/// rung re-picked for it.
+fn restream_controller(acfg: adapt::Config) -> Controller {
+    let start = acfg.start_kbps;
+    let mut ctl = Controller::new(acfg);
+    if start > 0 && ctl.target_kbps() < start.min(ctl.cap()) {
+        ctl.set_target(start);
+        ctl.set_manual_point(false);
+    }
+    ctl
+}
+
 /// After a stream re-request that rebuilds the host's encoder (a new size / fps), the next
 /// windows' loss is that rebuild gap, not congestion: the controller skips them (desktop
 /// hold.rs does the same).
@@ -1264,8 +1382,8 @@ pub async fn connect_host<R: Runtime>(
     // request lands (observed live: 20% loss + RTT panic within 2 s of connect →
     // ABR pinned at the floor → blocky picture for the whole session). Open at the
     // ABR's own starting point instead; the auto ramp ceiling stays higher.
+    // (The request's `bitrate_kbps` below is the controller's start, never 0.)
     let auto_rate = bitrate_kbps == 0;
-    let bitrate_kbps = if auto_rate { 8_000 } else { bitrate_kbps };
 
     // ── W5: audio routing — transmit audio only on the active pane slot ──────
     // Previously, audio was always transmitted for slot 0 only. Now it follows
@@ -1358,23 +1476,33 @@ pub async fn connect_host<R: Runtime>(
     } else {
         None
     };
-    // Auto: the probe, else the peer's memory, else the fixed auto start. A picked bitrate
-    // starts AT the pick (start_kbps 0 would now mean the controller's cautious no-memory
-    // start, not the cap).
-    acfg.start_kbps = if auto_rate {
-        probed.or(hint).unwrap_or(AUTO_START_KBPS).min(cap_kbps)
-    } else {
-        bitrate_kbps
-    };
+    // Auto: the probe, else the peer's memory, else 0 = the controller's cautious no-memory
+    // start (min(cap, ~4 Mbit), at most ~6 Mbit on a phone link) that the startup ramp climbs
+    // from; desktop play.rs parity (was a fixed 8 Mbit, above what a thin cellular link
+    // carries). A picked bitrate starts AT the pick.
+    acfg.start_kbps = if auto_rate { probed.or(hint).unwrap_or(0) } else { bitrate_kbps };
     if probed.is_some() {
         // The probe did the startup ramp's job.
         acfg.startup_windows = 0;
     }
     acfg.ir_capable = false;
-    // Size/fps are fixed for the session (settings / screen); only the bitrate adapts. The one
-    // exception: a decoder that sheds frames steps the fps down one rung (`client_decoder_sheds`),
-    // retried upward after a while, and the UI is told (`play-decode-limit`).
-    acfg.ladder = false;
+    // Is the phone on a cellular link (or another phone's hotspot)? It then starts lower and
+    // climbs gently (desktop: mobile_link.rs, once per session start).
+    let link = {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || crate::mobile_link::detect(&app))
+            .await
+            .unwrap_or(crate::mobile_link::LinkKind::Unknown)
+    };
+    log::info!("pulsar: link kind {}", link.label());
+    let link_mobile = link.is_mobile();
+    acfg.mobile = link_mobile;
+    // The resolution/fps ladder is ON (desktop parity): when the budget no longer buys a clean
+    // picture at the current point, the controller steps to a lighter one instead of starving
+    // the encoder. A decoder that sheds frames caps the ladder at a lower fps
+    // (`decoder_sheds_step`), retried upward after a while, and the UI is told
+    // (`play-decode-limit`).
+    apply_ladder(&mut acfg, game_mode);
     let ctl = Controller::new(acfg);
     let start_point = ctl.point();
     let req = StreamReq {
@@ -1439,8 +1567,10 @@ pub async fn connect_host<R: Runtime>(
         .state::<SessionRegistry>()
         .register(slot, my_id.0, target.clone(), feat_nack);
 
-    // Store the initial req so quality patch commands can build from it.
-    app.state::<SessionRegistry>().update_last_req(slot, req.clone());
+    // Store the initial req so quality patch commands can build from it: at the session's
+    // size and fps (the ladder's top), not the start rung.
+    let user_top0 = (eff_width, eff_height, fps);
+    app.state::<SessionRegistry>().update_last_req(slot, user_view(&req, user_top0));
     // What set_play_codec / _fps / _resolution re-resolve from: the host's codecs, the fps
     // the user asked for, and the decoder caps already probed for this size.
     app.state::<SessionRegistry>().set_stream_ctx(slot, caps.codecs.clone(), want_fps, (eff_width, eff_height, dcaps));
@@ -1605,9 +1735,11 @@ pub async fn connect_host<R: Runtime>(
         let mut dec_verdict: Option<bool> = None;
         let mut dec_over_windows: u32 = 0;
         let mut dec_disturbed = false;
-        // The session's own fps (the controller's top rung): what `last_req` keeps, and what a
-        // decoder-forced step goes back to.
-        let mut user_fps = cur_req.fps;
+        // The session's own size and fps (the controller's top rung): what `last_req` keeps.
+        let mut user_top = user_top0;
+        // The fps a decoder-forced step left the stream at (`decoder_sheds_step`), until the
+        // ladder lifts it again.
+        let mut dec_forced_fps: Option<u32> = None;
 
         // ── W3: stats tracking ───────────────────────────────────────────────
         let mut frames: u64 = 0;
@@ -1672,12 +1804,45 @@ pub async fn connect_host<R: Runtime>(
                         Err(_) => None,
                     };
 
+                    // A user pick is a new top rung + cap: rebuild the controller around it first,
+                    // so the host is asked for the rung the rebuilt ladder starts on (the top
+                    // when the rate carries it), not blindly for the top. It starts at the picked
+                    // bitrate, or (auto) at the rate the link was just running at; a 0 start
+                    // would mean the core's cautious no-memory start (~4 Mbit), a needless drop
+                    // mid-session.
+                    let running_kbps = ctl.target_kbps();
+                    let new_direct_cap = if new_req.bitrate_kbps > 0 {
+                        new_req.bitrate_kbps
+                    } else {
+                        mobile_auto_cap_kbps(&new_req.codec, (new_req.width, new_req.height, new_req.fps), new_req.game_mode)
+                    };
+                    let cap = path_cap_kbps(on_relay, sess.rate_cap_kbps(), new_direct_cap);
+                    let mut acfg = adapt::Config::new(adapt::codec_from_wire(&new_req.codec), cap);
+                    acfg.start_kbps = if new_req.bitrate_kbps > 0 {
+                        new_req.bitrate_kbps
+                    } else {
+                        running_kbps.clamp(adapt::FLOOR_KBPS, cap)
+                    };
+                    acfg.startup_windows = 0;
+                    acfg.native = (new_req.width, new_req.height, new_req.fps);
+                    acfg.ir_capable = false;
+                    acfg.mobile = link_mobile;
+                    apply_ladder(&mut acfg, new_req.game_mode);
+                    let new_ctl = restream_controller(acfg);
+                    let new_top = (new_req.width, new_req.height, new_req.fps);
+                    let mut send_req = new_req.clone();
+                    let p = new_ctl.point();
+                    (send_req.width, send_req.height, send_req.fps) = (p.width, p.height, p.fps);
+                    if new_req.bitrate_kbps == 0 {
+                        send_req.bitrate_kbps = new_ctl.encoder_kbps();
+                    }
+
                     // Re-request the stream from the host.
-                    if let Err(e) = request_stream(&mut sess, &new_req).await {
+                    if let Err(e) = request_stream(&mut sess, &send_req).await {
                         log::warn!("pulsar: restream request_stream failed: {e:?}");
                     } else {
                         // stop_stream dropped the pane's refresh vote; re-vote at the new fps.
-                        crate::decode_caps::vote_refresh(&app2, slot, new_req.fps);
+                        crate::decode_caps::vote_refresh(&app2, slot, send_req.fps);
                         // Reset depacketizer for potentially new codec.
                         depack = Depacketizer::new(new_cenum);
                         // Re-seat the active codec so the keyframe gate (au_is_keyframe)
@@ -1701,29 +1866,9 @@ pub async fn connect_host<R: Runtime>(
 
                         // Re-seat the adaptive-bitrate baseline to the user's new pick
                         // so ABR ramps relative to it (and doesn't fight a manual change).
-                        cur_req = new_req.clone();
-                        // A user pick is a new top rung + cap: rebuild the controller around it.
-                        // It starts at the picked bitrate, or (auto) at the rate the link was
-                        // just running at — a 0 start would now mean the core's cautious
-                        // no-memory start (~4 Mbit), a needless drop mid-session.
-                        let running_kbps = ctl.target_kbps();
-                        direct_cap = if new_req.bitrate_kbps > 0 {
-                            new_req.bitrate_kbps
-                        } else {
-                            mobile_auto_cap_kbps(&new_req.codec, (new_req.width, new_req.height, new_req.fps), new_req.game_mode)
-                        };
-                        let cap = path_cap_kbps(on_relay, sess.rate_cap_kbps(), direct_cap);
-                        let mut acfg = adapt::Config::new(adapt::codec_from_wire(&new_req.codec), cap);
-                        acfg.start_kbps = if new_req.bitrate_kbps > 0 {
-                            new_req.bitrate_kbps
-                        } else {
-                            running_kbps.clamp(adapt::FLOOR_KBPS, cap)
-                        };
-                        acfg.startup_windows = 0;
-                        acfg.native = (new_req.width, new_req.height, new_req.fps);
-                        acfg.ir_capable = false;
-                        acfg.ladder = false;
-                        ctl = Controller::new(acfg);
+                        cur_req = send_req;
+                        direct_cap = new_direct_cap;
+                        ctl = new_ctl;
                         frame_clock.reset();
                         last_abr = Instant::now();
                         last_switch_at = Some(Instant::now());
@@ -1731,9 +1876,10 @@ pub async fn connect_host<R: Runtime>(
                         dec_verdict = None;
                         dec_over_windows = 0;
                         dec_disturbed = true;
-                        user_fps = new_req.fps;
+                        dec_forced_fps = None;
+                        user_top = new_top;
                         let new_codec = new_req.codec.clone();
-                        app2.state::<SessionRegistry>().update_last_req(slot, new_req);
+                        app2.state::<SessionRegistry>().update_last_req(slot, user_view(&new_req, user_top));
                         log::info!("pulsar: restream applied slot={slot} codec={new_codec}");
                     }
                 }
@@ -2085,7 +2231,7 @@ pub async fn connect_host<R: Runtime>(
                                 if request_stream(&mut sess, &cur_req).await.is_err() {
                                     break 'read;
                                 }
-                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
+                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_top));
                             }
                         }
                         let live = transport_str(live_t);
@@ -2158,6 +2304,12 @@ pub async fn connect_host<R: Runtime>(
                                 cur_req.width = p.width;
                                 cur_req.height = p.height;
                                 cur_req.fps = p.fps;
+                                // The host rebuilds its encoder for a size / fps change (as the
+                                // tick below; desktop hold.rs does the same on its fast step): the
+                                // gap is not congestion, nor the decoder shedding frames.
+                                last_switch_at = Some(now);
+                                dec_base = None;
+                                dec_verdict = None;
                                 changed = true;
                             }
                             if changed {
@@ -2168,7 +2320,7 @@ pub async fn connect_host<R: Runtime>(
                                 if request_stream(&mut sess, &cur_req).await.is_err() {
                                     break 'read;
                                 }
-                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
+                                app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_top));
                             }
                         }
                     }
@@ -2190,7 +2342,6 @@ pub async fn connect_host<R: Runtime>(
                         if let Some(sheds) = dec_verdict.take() {
                             dec_over_windows = if sheds { dec_over_windows + 1 } else { 0 };
                         }
-                        let was_limited = ctl.decoder_limited();
                         let quiet = last_switch_at.is_some_and(|t| now.saturating_duration_since(t) < SWITCH_QUIET);
                         let mut d = if quiet {
                             // A re-request rebuilt the host's encoder: that gap is not congestion.
@@ -2204,18 +2355,24 @@ pub async fn connect_host<R: Runtime>(
                         // for its decoder; no bitrate fixes a decoder limit. The rung it left is
                         // retried later (the controller).
                         if !quiet && d.point.is_none() && dec_over_windows >= DECODE_OVER_WINDOWS {
-                            let cb = ctl.client_decoder_sheds();
+                            let cb = decoder_sheds_step(&mut ctl);
                             if let Some(p) = cb.point {
                                 log::info!("pulsar: decoder can't keep up slot={slot} — {}", p.label());
                                 d.point = Some(p);
                                 d.reason = cb.reason;
-                                emit_play_decode_limit(&app2, slot, p.fps, user_fps);
+                                dec_forced_fps = Some(p.fps);
+                                emit_play_decode_limit(&app2, slot, p.fps, user_top.2);
                             }
                             dec_over_windows = 0;
-                        } else if was_limited && !ctl.decoder_limited() {
-                            if let Some(p) = d.point {
-                                log::info!("pulsar: decoder retry slot={slot} — back to {}", p.label());
-                                emit_play_decode_limit(&app2, slot, p.fps, user_fps);
+                        } else if let (Some(forced), Some(p)) = (dec_forced_fps, d.point) {
+                            // The ladder lifted the fps over the decoder-forced one (its retry):
+                            // the toast says so once the session's own fps is back.
+                            if p.fps > forced {
+                                dec_forced_fps = None;
+                                if p.fps >= user_top.2 {
+                                    log::info!("pulsar: decoder retry slot={slot} — back to {}", p.label());
+                                    emit_play_decode_limit(&app2, slot, p.fps, user_top.2);
+                                }
                             }
                         }
                         let sig = ctl.last();
@@ -2270,7 +2427,7 @@ pub async fn connect_host<R: Runtime>(
                             if request_stream(&mut sess, &cur_req).await.is_err() {
                                 break 'read;
                             }
-                            app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_fps));
+                            app2.state::<SessionRegistry>().update_last_req(slot, user_view(&cur_req, user_top));
                         }
                     }
 

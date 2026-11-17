@@ -34,6 +34,8 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.net.Uri
 import android.os.Build
@@ -1340,6 +1342,47 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val r = JSObject()
         r.put("ok", true); r.put("hw", hw); r.put("sw", sw); r.put("maxFps", maxFps)
         r.put("panelHz", Math.round(panelMaxHz()))
+        invoke.resolve(r)
+    }
+
+    /**
+     * Native-only (Rust, not a JS command): what the active network runs over, for the
+     * adaptive controller's phone-link mode (a cellular link reads its burst in the start
+     * probe and stalls on handovers: it starts lower and climbs gently). `cellular` = a
+     * cellular transport; `metered` = no NOT_METERED capability (a phone's Wi-Fi hotspot);
+     * `vpn` = the active network is a VPN (its metered flag says little, its transports
+     * include the underlying network's on recent Android). `known` = false when nothing
+     * could be read.
+     */
+    @Command
+    @Suppress("DEPRECATION") // activeNetworkInfo / TYPE_* before Android 6 only
+    fun networkKind(invoke: Invoke) {
+        var known = false; var cellular = false; var wifi = false; var vpn = false; var metered = false
+        try {
+            val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+                if (caps != null) {
+                    known = true
+                    cellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    vpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                }
+            } else {
+                val info = cm.activeNetworkInfo
+                if (info != null) {
+                    known = true
+                    cellular = info.type == ConnectivityManager.TYPE_MOBILE
+                    wifi = info.type == ConnectivityManager.TYPE_WIFI
+                    metered = cm.isActiveNetworkMetered
+                }
+            }
+        } catch (e: Exception) { Log.w(TAG, "networkKind error", e) }
+        Log.i(TAG, "networkKind known=$known cellular=$cellular wifi=$wifi vpn=$vpn metered=$metered")
+        val r = JSObject()
+        r.put("known", known); r.put("cellular", cellular); r.put("wifi", wifi)
+        r.put("vpn", vpn); r.put("metered", metered)
         invoke.resolve(r)
     }
 
@@ -2711,6 +2754,11 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         private var pps: ByteArray? = null
         private var pendingCanned = false
         private var cannedThread: Thread? = null
+        // The largest picture the running decoder was configured for (buildFormat): the declared
+        // adaptive-playback max, or the configured size itself when the decoder has no adaptive
+        // playback. null = unknown (AV1, an SPS that didn't parse) → never checked.
+        private var decoderMax: Pair<Int, Int>? = null
+        private var decoderAdaptive = false
 
         fun ensureSurface(parent: ViewGroup) {
             if (surfaceView != null) return
@@ -2822,6 +2870,15 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         fun feed(au: ByteArray): Boolean = synchronized(lock) {
             val wasConfigured = configured
             try {
+                // The adaptive ladder moves the stream's size mid-session (an in-band SPS on the
+                // host's next IDR). A size past what this decoder was configured for (a climb
+                // above its adaptive max, or any size change on a decoder without adaptive
+                // playback) is rebuilt from that IDR instead of fed into a decoder that rejects
+                // or garbles it (Qualcomm: 'Unsupported input buffer' storm, frozen picture).
+                if (configured && streamOutgrewDecoder(au)) {
+                    Log.i(TAG, "slot $slot stream size outgrew the decoder (max=$decoderMax adaptive=$decoderAdaptive) — reconfiguring")
+                    releaseCodec()
+                }
                 if (!configured) { collectParams(au); if (canConfigure()) configure() }
                 if (configured) feedAndDrain(au)
             } catch (e: Exception) {
@@ -2848,6 +2905,39 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 releaseCodec()
             }
             configured
+        }
+
+        /** Whether [au] carries an SPS whose picture size the running decoder can't take
+         *  (see [decoderMax]). Only the leading parameter-set NALs are looked at: a picture
+         *  without an SPS stops the scan at its first slice. */
+        private fun streamOutgrewDecoder(au: ByteArray): Boolean {
+            if (isAv1()) return false
+            val max = decoderMax ?: return false
+            val nal = leadingSps(au) ?: return false
+            val dims = (if (isH265()) hevcSpsDims(nal) else h264SpsDims(nal)) ?: return false
+            return if (decoderAdaptive) dims.first > max.first || dims.second > max.second else dims != max
+        }
+
+        /** The SPS NAL (no start code) among [au]'s NALs before its first slice, else null. */
+        private fun leadingSps(au: ByteArray): ByteArray? {
+            val n = au.size; var p = 0
+            while (p < n) {
+                val sl = startCodeLen(au, p, n)
+                if (sl == 0) { p++; continue }
+                val start = p + sl
+                if (start >= n) return null
+                val h265 = isH265()
+                val type = if (h265) (au[start].toInt() shr 1) and 0x3F else au[start].toInt() and 0x1F
+                val vcl = if (h265) type < 32 else type in 1..5
+                if (vcl) return null
+                if (type == (if (h265) 33 else 7)) {
+                    var end = start + 1
+                    while (end < n && startCodeLen(au, end, n) == 0) end++
+                    return au.copyOfRange(start, end)
+                }
+                p = start
+            }
+            return null
         }
 
         /** Busy hardware or a transient state, not a property of the options. */
@@ -3020,6 +3110,8 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 else     -> sps?.let { h264SpsDims(it) }
             }
             if (dims != null) Log.i(TAG, "slot $slot SPS dims ${dims.first}x${dims.second}")
+            // No adaptive playback (or it can't be declared): the configured size is the limit.
+            decoderMax = dims; decoderAdaptive = false
             else Log.w(TAG, "slot $slot SPS dims unknown ($m) — adaptive max disabled")
             val fmt = MediaFormat.createVideoFormat(m, dims?.first ?: 1920, dims?.second ?: 1080)
             when {
@@ -3055,6 +3147,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 if (dims != null && caps != null && caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback)) {
                     fmt.setInteger(MediaFormat.KEY_MAX_WIDTH, maxOf(dims.first, 1920))
                     fmt.setInteger(MediaFormat.KEY_MAX_HEIGHT, maxOf(dims.second, 1080))
+                    decoderMax = Pair(maxOf(dims.first, 1920), maxOf(dims.second, 1080)); decoderAdaptive = true
                     // Frame-rate hint = the panel refresh rate (best available "fps"; the decode
                     // path carries no explicit stream fps). Best-effort, defaults to 60.
                     val fps = try {

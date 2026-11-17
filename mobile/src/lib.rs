@@ -13,6 +13,7 @@ mod datachan;
 mod decode_caps;
 mod host;
 mod identity;
+mod mobile_link;
 mod input_cmds;
 mod net;
 mod pad_feed;
