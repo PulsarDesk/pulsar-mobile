@@ -95,3 +95,17 @@ pub struct HostStatus {
   pub stop_gen: u32,
   pub message: String,
 }
+
+/// Mobile host encode capabilities (`hostEncoderCaps`): `codecs` = what this phone can
+/// encode, best first (`av1` / `h265` only from hardware encoders, `h264` always), and the
+/// shared screen's current real size and refresh rate (0 = unknown). `ok` false = no probe
+/// (desktop builds, an old plugin): the host then advertises the H.264-only fallback.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HostEncoderCaps {
+  pub ok: bool,
+  pub codecs: Vec<String>,
+  pub width: u32,
+  pub height: u32,
+  pub refresh_hz: u32,
+}

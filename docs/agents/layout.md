@@ -64,3 +64,34 @@ WakeLock / WifiLock acquire threw, so these locks are new on every device:
   while any stream runs) until the session ends some other way. Follow-up: a mobile
   power-watch (end on `ACTION_SCREEN_OFF`, reconnect on unlock) plus the desktop's idle expiry
   for `FLAG_KEEP_SCREEN_ON`.
+
+## Mobile host (phone shares its screen)
+
+Untested on a device (2026-11-17 parity pass with the desktop host):
+
+- **Codecs** (`host.rs` `probe_host_caps` → plugin `hostEncoderCaps` → `HostEncoder.probeCodecs`):
+  every session advertises what the phone can encode, desktop order: `av1` and `h265` only from
+  a hardware encoder, `h264` always. The screen goes out as the one `DisplayInfo` (real size +
+  refresh) so the client offers it as the native size and caps its fps to the panel. AV1 is
+  packetized like the desktop host (`pulsar-capture` `send_av1_tu`: W=0, aggregation header
+  0x00, one LEB128-prefixed chunk per packet); the sequence header from the codec-config
+  buffer is re-sent with every keyframe that lacks one.
+- **Size / fps / bit rate** (`HostEncoder.plan`): the client's request up to what the screen and
+  the encoder take — the screen fitted into the requested box (orientation-agnostic, never
+  upscaled), shrunk to `VideoCapabilities.isSizeSupported`, fps ≤ panel refresh and the
+  encoder's rate at that size (`KEY_MAX_FPS_TO_ENCODER` drops the panel's extra frames, API 29+),
+  bit rate inside `bitrateRange`. A software encoder (emulator) keeps the old 1280 px / 30 fps /
+  8 Mbit/s limits. A re-stream with only a new bit rate (client ABR) is applied live; a new
+  codec / size / fps rebuilds the encoder on the same VirtualDisplay (`HostEncoder.retune`).
+- **Input** (`PulsarA11yService`, the AccessibilityService): left / middle = tap / live drag,
+  right = long-press (context menu), mouse back button = Back (`FEAT_MOUSE_X` is advertised),
+  wheel on both axes = swipe. Keys: Esc / Alt+Left / Browser Back → Back, Meta tapped alone /
+  Meta+D → Home, Alt+Tab / Meta+Tab → Recents, Meta+N notifications, Meta+A quick settings,
+  Meta+L lock (9+), PrintScreen screenshot (9+), volume / media keys (AudioManager), and on the
+  focused text field: typing, Backspace, Delete, Enter, arrows (Shift extends), Home / End,
+  Ctrl+Home / End, Ctrl+A / C / X / V.
+- **What stock Android cannot do** (no `INJECT_EVENTS` for a normal app): no real KeyEvents, so
+  F-keys, Tab focus moves, Ctrl+Z, game / IME keys and apps that read raw keys get nothing;
+  ↑ / ↓ only step to line boundaries (a11y has no same-column move); no mouse hover or real
+  secondary / middle button (touch gestures only); the forward side button has no action;
+  scrolling is a swipe (it flings); the lock screen PIN pad cannot be typed into.

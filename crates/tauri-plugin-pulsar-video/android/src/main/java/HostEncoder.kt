@@ -24,16 +24,16 @@ import java.net.InetAddress
  * MediaCodec ENCODER, packetize the encoded H.264/H.265 to RTP, and send it to a
  * loopback UDP port the Rust side forwards into the encrypted session.
  *
- * W5-native addition: companion object [probeCodecs] enumerates available hardware
- * video encoders for the `host_codecs` probe (W5-host-codecprobe).
+ * The companion's [probeCodecs] lists the codecs this phone can encode (the host's
+ * StreamCaps) and [plan] fits the client's size / fps / bit rate request to the encoder.
  */
 class HostEncoder(
     private val projection: MediaProjection,
-    private val mime: String,
+    initialMime: String,
     private val width: Int,
     private val height: Int,
-    private val fps: Int,
-    private val bitrate: Int,
+    initialFps: Int,
+    initialBitrate: Int,
     private val densityDpi: Int,
     private val port: Int,
     private val audioPort: Int,
@@ -41,7 +41,17 @@ class HostEncoder(
     // (keyframe every ~0.5 s) or "intra_refresh" (rolling intra wave, API 24+). Applied at
     // creation — MediaCodec can't change its GOP live.
     private val recovery: String = "normal",
+    // The encoder [plan] picked (hardware first); null = MediaCodec's default for the type.
+    initialEncoderName: String? = null,
 ) {
+    // Codec / rate / encoder of the RUNNING encoder. A re-stream that changes them rebuilds
+    // the encoder in place ([retune]); the drain loop reads its own copy of the codec.
+    @Volatile var mime: String = initialMime
+        private set
+    @Volatile var fps: Int = initialFps
+        private set
+    @Volatile private var bitrate: Int = initialBitrate
+    @Volatile private var encoderName: String? = initialEncoderName
     private val TAG = "PulsarHost"
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
@@ -69,7 +79,10 @@ class HostEncoder(
      *    paced, loss-sensitive stream wants; VBR overshoots on scene changes
      *  - try 3: the plain format the host always used
      */
-    private fun videoFormat(w: Int, h: Int, tryNumber: Int = 3, codec: MediaCodec? = null): MediaFormat =
+    private fun videoFormat(
+        w: Int, h: Int, tryNumber: Int = 3, codec: MediaCodec? = null,
+        mime: String = this.mime, fps: Int = this.fps, bitrate: Int = this.bitrate,
+    ): MediaFormat =
         MediaFormat.createVideoFormat(mime, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
@@ -106,6 +119,13 @@ class HostEncoder(
             // remote sees a frozen image. Repeat the last frame every ~frame-interval so the
             // stream keeps flowing (repeated static frames compress to almost nothing).
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
+            // The client's fps is a cap, not only a hint: a 90/120 Hz panel composes more
+            // frames than asked for, and the surface would feed them all to the encoder
+            // (more bits per second than the bitrate assumes, and a load the client did not
+            // ask for). The framework's input surface drops the excess (API 29+).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
+            }
             // Pulsar's SDR colour rule (every host, every client): BT.709, limited range. A
             // surface-input encoder converts the screen's RGB with these aspects and writes
             // them into the VUI; left unset, the vendor picks (often BT.601, untagged) and the
@@ -116,10 +136,10 @@ class HostEncoder(
                 setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
                 setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
             }
-            if (codec != null) applyRealtimeHints(this, tryNumber, codec)
+            if (codec != null) applyRealtimeHints(this, tryNumber, codec, mime, fps)
         }
 
-    private fun applyRealtimeHints(fmt: MediaFormat, tryNumber: Int, codec: MediaCodec) {
+    private fun applyRealtimeHints(fmt: MediaFormat, tryNumber: Int, codec: MediaCodec, mime: String, fps: Int) {
         if (tryNumber < 1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val name = codec.name.lowercase()
             val known = listOf(
@@ -155,13 +175,20 @@ class HostEncoder(
     /** A started encoder + its input surface at [w]x[h], with the richest hint set that
      *  configures (see [videoFormat]). A fresh MediaCodec per try: a failed configure can
      *  leave the instance unusable. */
-    private fun createEncoder(w: Int, h: Int): Pair<MediaCodec, Surface> {
+    private fun createEncoder(
+        w: Int, h: Int,
+        mime: String = this.mime, fps: Int = this.fps, bitrate: Int = this.bitrate,
+        name: String? = this.encoderName,
+    ): Pair<MediaCodec, Surface> {
         var last: Exception? = null
         for (tryNumber in 0..3) {
             var c: MediaCodec? = null
             try {
-                c = MediaCodec.createEncoderByType(mime)
-                c.configure(videoFormat(w, h, tryNumber, c), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                // The hardware encoder [plan] picked; the type's default when it has none
+                // or it cannot be created.
+                c = name?.let { try { MediaCodec.createByCodecName(it) } catch (_: Exception) { null } }
+                    ?: MediaCodec.createEncoderByType(mime)
+                c.configure(videoFormat(w, h, tryNumber, c, mime, fps, bitrate), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 val surface = c.createInputSurface()
                 c.start()
                 Log.i(TAG, "encoder ${c.name} ${w}x${h} configured (hints try=$tryNumber)")
@@ -225,6 +252,7 @@ class HostEncoder(
             val b = android.os.Bundle()
             b.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps)
             enc.setParameters(b)
+            bitrate = bps
             Log.i(TAG, "live bitrate → ${bps / 1000}k")
         } catch (e: Exception) {
             Log.w(TAG, "setBitrate failed", e)
@@ -239,11 +267,30 @@ class HostEncoder(
      * new size so the client's decoder reconfigures + re-aspects. RTP seq stays continuous.
      */
     fun reconfigure(newW: Int, newH: Int) {
-        val vd = vdisplay ?: return
-        if (newW <= 0 || newH <= 0 || (newW == curW && newH == curH)) return
+        if (newW == curW && newH == curH) return
+        rebuild(newW, newH, mime, fps, bitrate, encoderName)
+    }
+
+    /** The size the running encoder streams at. */
+    val streamWidth: Int get() = curW
+    val streamHeight: Int get() = curH
+
+    /**
+     * A re-stream that changes the codec, size or fps (the client picked another one in its
+     * session menu, or its ABR stepped the resolution / frame rate): rebuild the encoder on
+     * the SAME VirtualDisplay, like a rotation. The desktop host restarts its capture for
+     * these; a bitrate-only change stays live ([setBitrate]). On failure the running encoder
+     * keeps going unchanged. Returns whether the new encoder runs.
+     */
+    fun retune(newMime: String, newName: String?, newW: Int, newH: Int, newFps: Int, newBitrate: Int): Boolean =
+        rebuild(newW, newH, newMime, newFps, newBitrate, newName)
+
+    private fun rebuild(newW: Int, newH: Int, newMime: String, newFps: Int, newBitrate: Int, newName: String?): Boolean {
+        val vd = vdisplay ?: return false
+        if (newW <= 0 || newH <= 0 || newFps <= 0) return false
         try {
             // 1) New encoder + surface at the new size (started before we repoint the VD).
-            val (codec, surface) = createEncoder(newW, newH)
+            val (codec, surface) = createEncoder(newW, newH, newMime, newFps, newBitrate, newName)
             // 2) Repoint the SAME virtual display at the new surface + size.
             vd.resize(newW, newH, densityDpi)
             vd.setSurface(surface)
@@ -258,11 +305,15 @@ class HostEncoder(
             encoder = codec
             inputSurface = surface
             curW = newW; curH = newH
+            mime = newMime; fps = newFps; bitrate = newBitrate; encoderName = newName
+            av1SeqHeader = null
             running = true
             thread = Thread { drainLoop() }.also { it.isDaemon = true; it.start() }
-            Log.i(TAG, "reconfigure ${newW}x${newH}")
+            Log.i(TAG, "rebuild $newMime ${newW}x${newH}@$newFps ${newBitrate / 1000}k (${codec.name})")
+            return true
         } catch (e: Exception) {
-            Log.e(TAG, "reconfigure failed", e)
+            Log.e(TAG, "rebuild failed", e)
+            return false
         }
     }
 
@@ -347,6 +398,8 @@ class HostEncoder(
         // Captured once per invocation. reconfigure() stops + joins this loop BEFORE swapping
         // `encoder`, so the captured ref stays valid for this loop's lifetime.
         val codec = encoder ?: return
+        // Same for the codec: a retune() swaps `mime` only after this loop has stopped.
+        val m = mime
         // The capture -> encode -> send path is latency-critical (the client's decode thread
         // runs at this priority too).
         try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Exception) {}
@@ -411,9 +464,13 @@ class HostEncoder(
                     val data = ByteArray(info.size)
                     buf.position(info.offset); buf.get(data)
                     val ts = ((info.presentationTimeUs * 90) / 1000).toInt() // 90 kHz RTP clock
-                    val nals = splitNals(data)
-                    for ((i, nal) in nals.withIndex()) {
-                        seq = packetize(sock, addr, nal, ts, seq, ssrc, i == nals.lastIndex)
+                    if (m == MIME_AV1) {
+                        sendAv1(sock, addr, data, info.flags, ts, ssrc)
+                    } else {
+                        val nals = splitNals(data)
+                        for ((i, nal) in nals.withIndex()) {
+                            seq = packetize(sock, addr, nal, ts, seq, ssrc, i == nals.lastIndex, m)
+                        }
                     }
                 }
                 codec.releaseOutputBuffer(outIdx, false)
@@ -441,7 +498,7 @@ class HostEncoder(
     private val MAX = 1100
 
     /** RTP-packetize one NAL: single packet if small, else FU-A (H.264) / FU (H.265). */
-    private fun packetize(sock: DatagramSocket, addr: InetAddress, nal: ByteArray, ts: Int, seqIn: Int, ssrc: ByteArray, lastNal: Boolean): Int {
+    private fun packetize(sock: DatagramSocket, addr: InetAddress, nal: ByteArray, ts: Int, seqIn: Int, ssrc: ByteArray, lastNal: Boolean, mime: String): Int {
         var seq = seqIn
         if (nal.size <= MAX) {
             send(sock, addr, rtp(seq, ts, lastNal, ssrc, nal)); return seq + 1
@@ -477,6 +534,50 @@ class HostEncoder(
         return seq
     }
 
+    // ── AV1 (aomedia "RTP Payload Format for AV1", as the desktop host sends it) ──────────
+    // The encoder emits low-overhead OBU temporal units (no start codes; every OBU carries its
+    // obu_size). Like pulsar-capture's `send_av1_tu`, a TU is cut into MTU-sized chunks, each
+    // ONE length-prefixed element under the all-zero aggregation header (Z=0 Y=0 W=0 N=0):
+    // both Pulsar clients rebuild a W=0 stream by plain concatenation, and 0x00 reads the
+    // same under both clients' header layouts. The marker bit ends the TU.
+
+    /** The sequence header OBU(s) from the codec-config buffer, re-sent with keyframes. */
+    @Volatile private var av1SeqHeader: ByteArray? = null
+
+    private fun sendAv1(sock: DatagramSocket, addr: InetAddress, data: ByteArray, flags: Int, ts: Int, ssrc: ByteArray) {
+        if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+            // csd-0 is an AV1CodecConfigurationRecord (av1C: 4 header bytes, marker bit set,
+            // then the config OBUs) on most encoders, plain OBUs on some. An OBU header's
+            // first bit is forbidden (0), so the marker tells them apart. Not sent on its own:
+            // a TU of just a sequence header is no frame for the decoder.
+            av1SeqHeader = if (data.isNotEmpty() && (data[0].toInt() and 0x80) != 0) {
+                if (data.size > 4) data.copyOfRange(4, data.size) else null
+            } else data
+            return
+        }
+        var tu = data
+        // Keyframes must be self-describing (a client that joins late or rebuilds its decoder
+        // needs the sequence header), like KEY_PREPEND_HEADER_TO_SYNC_FRAMES for H.264/H.265.
+        val sh = av1SeqHeader
+        if (flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 && sh != null && !av1HasObu(tu, 1)) {
+            val at = av1LeadingTdEnd(tu) // after a temporal delimiter: it must come first
+            tu = tu.copyOfRange(0, at) + sh + tu.copyOfRange(at, tu.size)
+        }
+        var off = 0
+        while (off < tu.size) {
+            val end = minOf(off + AV1_CHUNK, tu.size)
+            val chunk = end - off
+            val lenBytes = leb128(chunk)
+            val payload = ByteArray(1 + lenBytes.size + chunk)
+            payload[0] = 0x00 // aggregation header: Z=0 Y=0 W=0 N=0 (cross-client safe)
+            System.arraycopy(lenBytes, 0, payload, 1, lenBytes.size)
+            System.arraycopy(tu, off, payload, 1 + lenBytes.size, chunk)
+            send(sock, addr, rtp(seq, ts, end == tu.size, ssrc, payload))
+            seq++
+            off = end
+        }
+    }
+
     private fun rtp(seq: Int, ts: Int, marker: Boolean, ssrc: ByteArray, payload: ByteArray, pt: Int = 96): ByteArray {
         val pkt = ByteArray(12 + payload.size)
         pkt[0] = 0x80.toByte()
@@ -494,39 +595,184 @@ class HostEncoder(
     }
 
     companion object {
+        const val MIME_AV1 = "video/av01"
+
+        /** OBU bytes per AV1 packet: the H.264/H.265 FU budget minus the aggregation header
+         *  and a 2-byte LEB128 length (any chunk < 16384 encodes in 2 bytes). */
+        private const val AV1_CHUNK = 1100 - 3
+
+        private fun leb128(v: Int): ByteArray {
+            val out = ArrayList<Byte>(2)
+            var x = v
+            do {
+                var b = x and 0x7F
+                x = x ushr 7
+                if (x != 0) b = b or 0x80
+                out.add(b.toByte())
+            } while (x != 0)
+            return out.toByteArray()
+        }
+
+        /** Read a LEB128 value at [at]: (value, byte count), or null when truncated. */
+        private fun readLeb128(d: ByteArray, at: Int): Pair<Long, Int>? {
+            var v = 0L
+            for (i in 0 until 8) {
+                if (at + i >= d.size) return null
+                val b = d[at + i].toInt() and 0xFF
+                v = v or ((b and 0x7F).toLong() shl (7 * i))
+                if (b and 0x80 == 0) return Pair(v, i + 1)
+            }
+            return null
+        }
+
+        /** Walk the OBUs of a low-overhead TU; [f] gets (type, start, end) and returns false
+         *  to stop. Stops at an OBU without a size field (it runs to the end). */
+        private fun av1Obus(d: ByteArray, f: (Int, Int, Int) -> Boolean) {
+            var i = 0
+            while (i < d.size) {
+                val hdr = d[i].toInt() and 0xFF
+                val type = (hdr shr 3) and 0x0F
+                val ext = hdr and 0x04 != 0
+                val hasSize = hdr and 0x02 != 0
+                val p = i + 1 + (if (ext) 1 else 0)
+                if (!hasSize) { f(type, i, d.size); return }
+                val (size, n) = readLeb128(d, p) ?: return
+                val end = p + n + size
+                if (end > d.size || size < 0) return
+                if (!f(type, i, end.toInt())) return
+                i = end.toInt()
+            }
+        }
+
+        private fun av1HasObu(d: ByteArray, obuType: Int): Boolean {
+            var found = false
+            av1Obus(d) { t, _, _ -> if (t == obuType) found = true; !found }
+            return found
+        }
+
+        /** End of a leading temporal delimiter OBU (type 2), or 0 when the TU has none. */
+        private fun av1LeadingTdEnd(d: ByteArray): Int {
+            var end = 0
+            av1Obus(d) { t, start, e -> if (start == 0 && t == 2) end = e; false }
+            return end
+        }
+
+        /** Wire codec name ("av1" / "h265" / "h264") → MediaCodec type. */
+        fun mimeFor(codec: String?): String = when (codec?.lowercase()) {
+            "av1", "av01" -> MIME_AV1
+            "h265", "hevc" -> "video/hevc"
+            else -> "video/avc"
+        }
+
+        /** Whether [info] is a hardware encoder. API 29+ asks the platform; before that the
+         *  AOSP / Google software codecs are known by name. */
+        fun isHardware(info: MediaCodecInfo): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return info.isHardwareAccelerated && !info.isSoftwareOnly
+            }
+            val n = info.name.lowercase()
+            return !(n.startsWith("omx.google.") || n.startsWith("c2.android.") ||
+                n.startsWith("omx.ffmpeg.") || n.startsWith("c2.ffmpeg."))
+        }
+
+        /** The encoder to use for [mime]: the first hardware one in the platform's order,
+         *  else the first at all; null when the device cannot encode the type. */
+        /** The device's codec list, read once (it does not change while the app runs). */
+        private val codecInfos: Array<MediaCodecInfo> by lazy {
+            try { MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos } catch (e: Exception) {
+                Log.w("PulsarHost", "MediaCodecList error", e); emptyArray()
+            }
+        }
+
+        fun bestEncoder(mime: String): MediaCodecInfo? = try {
+            val all = codecInfos.filter { info ->
+                info.isEncoder && info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
+            }
+            all.firstOrNull { isHardware(it) } ?: all.firstOrNull()
+        } catch (e: Exception) {
+            Log.w("PulsarHost", "bestEncoder($mime) error", e); null
+        }
+
+        @Volatile private var probed: List<String>? = null
+
         /**
-         * W5-native: Probe the MediaCodecList for available **encoder** MIME types that
-         * Pulsar supports as streaming codecs. Returns a list of human-friendly names in
-         * preference order (best/most capable first): ["h265", "h264"].
-         *
-         * Called by `PulsarVideoPlugin.enumerateDecoders` (Kotlin) and mirrored on the
-         * Rust side by `mobile.rs::enumerate_host_codecs` for the `host_codecs` command
-         * (W5-rust-host lane).
-         *
-         * AV1 encoding is NOT included: most Android devices lack a hardware AV1 encoder
-         * at sufficient frame rates, and software AV1 encoding is too slow for streaming.
-         * The decoder side (`enumerateDecoders`) may report AV1 if the device has HW
-         * decode capability.
+         * The video codecs this phone can ENCODE as a host, best first, as the desktop host
+         * advertises them: AV1 and H.265 only from a hardware encoder (a software AV1 / HEVC
+         * encoder cannot keep up with a screen stream), H.264 always (the fallback every
+         * client decodes). Cached: the encoder list does not change while the app runs.
          */
         fun probeCodecs(): List<String> {
-            val supported = mutableSetOf<String>()
-            try {
-                val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-                for (info in list.codecInfos) {
-                    if (!info.isEncoder) continue
-                    for (mime in info.supportedTypes) {
-                        when (mime.lowercase()) {
-                            "video/hevc" -> supported.add("h265")
-                            "video/avc"  -> supported.add("h264")
-                            else -> {}
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w("PulsarHost", "probeCodecs error", e)
+            probed?.let { return it }
+            val out = ArrayList<String>(3)
+            if (bestEncoder(MIME_AV1)?.let { isHardware(it) } == true) out.add("av1")
+            if (bestEncoder("video/hevc")?.let { isHardware(it) } == true) out.add("h265")
+            out.add("h264")
+            probed = out
+            Log.i("PulsarHost", "host encoders: $out")
+            return out
+        }
+
+        /** What one stream is encoded at: the encoder, its size / fps / bit rate. */
+        data class Plan(val name: String?, val hardware: Boolean, val w: Int, val h: Int, val fps: Int, val bps: Int)
+
+        // A software encoder (the emulator; a phone without a hardware one for the type)
+        // keeps the limits the host always had: a larger frame overloaded it into
+        // macroblock garbage.
+        private const val SW_MAX_DIM = 1280
+        private const val SW_MAX_FPS = 30
+        private const val SW_MAX_KBPS = 8000
+        private const val DEFAULT_KBPS = 6000
+        private const val DEFAULT_FPS = 60
+
+        /**
+         * Honour the client's request (0 = "host default") up to what the screen and the
+         * encoder can do, like the desktop host streams the size / fps / bit rate it is asked
+         * for:
+         *  - size: the screen fitted into the requested box, orientation-agnostic (the box's
+         *    long edge bounds the screen's long edge — a portrait phone asked for 1920x1080
+         *    streams 486x1080, not a stretched frame), never upscaled; then shrunk until the
+         *    encoder's VideoCapabilities take it, aligned to its width / height alignment.
+         *  - fps: the request (default 60), at most the panel's refresh (it composes no more)
+         *    and the encoder's supported rate at that size.
+         *  - bit rate: the request (default 6 Mbit/s) inside the encoder's bitrate range.
+         */
+        fun plan(mime: String, screenW: Int, screenH: Int, refreshHz: Int, reqW: Int, reqH: Int, reqFps: Int, reqKbps: Int): Plan {
+            val info = bestEncoder(mime)
+            val hw = info?.let { isHardware(it) } ?: false
+            val vc = try { info?.getCapabilitiesForType(mime)?.videoCapabilities } catch (_: Exception) { null }
+            var w = screenW.toDouble(); var h = screenH.toDouble()
+            fun scaleTo(s: Double) { if (s < 1.0) { w *= s; h *= s } }
+            if (reqW > 0 && reqH > 0) {
+                scaleTo(minOf(maxOf(reqW, reqH) / maxOf(w, h), minOf(reqW, reqH) / minOf(w, h)))
             }
-            // Return in preference order (h265 before h264)
-            return listOf("h265", "h264").filter { it in supported }
+            if (!hw) scaleTo(SW_MAX_DIM / maxOf(w, h))
+            val wa = maxOf(2, vc?.widthAlignment ?: 2)
+            val ha = maxOf(2, vc?.heightAlignment ?: 2)
+            fun aligned(): Pair<Int, Int> = Pair(maxOf(wa, w.toInt() / wa * wa), maxOf(ha, h.toInt() / ha * ha))
+            var (ew, eh) = aligned()
+            if (vc != null) {
+                var tries = 0
+                while (!vc.isSizeSupported(ew, eh) && tries++ < 24) {
+                    // Over the encoder's widths / heights: shrink both (aspect kept).
+                    val sw = vc.supportedWidths.upper.toDouble() / ew
+                    val sh = vc.supportedHeights.upper.toDouble() / eh
+                    scaleTo(minOf(0.92, sw, sh))
+                    val p = aligned(); ew = p.first; eh = p.second
+                }
+            }
+            var fps = if (reqFps > 0) reqFps else DEFAULT_FPS
+            if (refreshHz > 0) fps = minOf(fps, refreshHz)
+            if (!hw) fps = minOf(fps, SW_MAX_FPS)
+            if (vc != null) {
+                val maxRate = try { vc.getSupportedFrameRatesFor(ew, eh).upper } catch (_: Exception) { vc.supportedFrameRates.upper.toDouble() }
+                if (maxRate >= 1.0) fps = minOf(fps, maxRate.toInt())
+            }
+            fps = fps.coerceAtLeast(1)
+            var kbps = if (reqKbps > 0) reqKbps else DEFAULT_KBPS
+            if (!hw) kbps = minOf(kbps, SW_MAX_KBPS)
+            var bps = kbps.toLong() * 1000L
+            vc?.bitrateRange?.let { r -> bps = bps.coerceIn(r.lower.toLong(), r.upper.toLong()) }
+            return Plan(info?.name, hw, ew, eh, fps, bps.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
         }
     }
 

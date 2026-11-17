@@ -152,12 +152,20 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
-  /// Press/release the remote-control pointer (release dispatches the tap/swipe).
-  pub fn host_pointer_button(&self, down: bool) -> crate::Result<AttachResponse> {
+  /// Press/release a remote-control pointer button (`pulsar_core::input::mouse_button`
+  /// ids): left / middle drive the tap / drag finger, right is a long-press, back is the
+  /// Android Back action; the plugin ignores the others.
+  pub fn host_pointer_button(&self, button: u8, down: bool) -> crate::Result<AttachResponse> {
     self
       .0
-      .run_mobile_plugin("hostPointerButton", PointerBtnArgs { down })
+      .run_mobile_plugin("hostPointerButton", PointerBtnArgs { button, down })
       .map_err(Into::into)
+  }
+
+  /// Mobile host: the video codecs this phone can ENCODE (hardware AV1 / HEVC, H.264
+  /// always, best first) and the screen it shares (real size + refresh rate).
+  pub fn host_encoder_caps(&self) -> crate::Result<HostEncoderCaps> {
+    self.0.run_mobile_plugin("hostEncoderCaps", ()).map_err(Into::into)
   }
 
   /// Mouse wheel → a swipe at the remote-control cursor.
@@ -495,6 +503,7 @@ struct PointerRelArgs {
 
 #[derive(Serialize)]
 struct PointerBtnArgs {
+  button: u8,
   down: bool,
 }
 

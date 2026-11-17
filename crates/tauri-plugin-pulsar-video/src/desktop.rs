@@ -67,8 +67,11 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn host_pointer_rel(&self, _dx: f64, _dy: f64) -> crate::Result<AttachResponse> {
     Self::noop("no cursor injection on desktop")
   }
-  pub fn host_pointer_button(&self, _down: bool) -> crate::Result<AttachResponse> {
+  pub fn host_pointer_button(&self, _button: u8, _down: bool) -> crate::Result<AttachResponse> {
     Self::noop("no cursor injection on desktop")
+  }
+  pub fn host_encoder_caps(&self) -> crate::Result<HostEncoderCaps> {
+    Ok(HostEncoderCaps::default())
   }
   pub fn host_scroll(&self, _dx: f64, _dy: f64) -> crate::Result<AttachResponse> {
     Self::noop("no cursor injection on desktop")

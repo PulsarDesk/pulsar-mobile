@@ -14,13 +14,15 @@
 //! * `disconnect_session` — kicks an active peer by `sid`.
 //! * `open_a11y_settings` / `a11y_enabled` — plugin passthrough (unchanged).
 //!
-//! ## W5-rust-host additions
+//! ## Codecs and stream size
 //!
-//! * `host_codecs` — probe the Android `MediaCodecList` via the native plugin
-//!   (W5-native adds `PulsarVideo::host_codecs()`) and cache the result in the
-//!   managed [`HostCaps`] state.  `go_online`'s `StreamCaps` closure reads this
-//!   cache so it advertises the real codec set (h265 > h264, AV1 when present)
-//!   instead of the previous hard-coded `["h264"]`.
+//! * Every session probes the phone's encoders (`PulsarVideo::host_encoder_caps`, Kotlin
+//!   `HostEncoder.probeCodecs`) and advertises them in `StreamCaps` like the desktop host:
+//!   `av1` / `h265` from hardware encoders, `h264` always, best first. The screen goes out
+//!   as the one display (real size + refresh). `host_codecs` returns the same list to JS.
+//! * The client's resolution / fps / bitrate request is honoured up to what the chosen
+//!   encoder supports (`HostEncoder.plan`); a re-request changes the bitrate live and
+//!   rebuilds the encoder for a new codec / size / fps (`PulsarVideoPlugin.startCapture`).
 //!
 //! ## Events emitted (Rust → JS)
 //!
@@ -44,7 +46,7 @@ use tokio::sync::{oneshot, Notify};
 
 use pulsar_core::service::{
     accept, gen_password, media, need_password, recv_auth, reject, serve_with, Credential,
-    DataHandlers, DataMsg, InputEvent, StreamCaps,
+    DataHandlers, DataMsg, DisplayInfo, InputEvent, StreamCaps,
 };
 use crate::client::parse_mode;
 use crate::config::load_config;
@@ -66,21 +68,14 @@ fn next_sid() -> u32 {
 /// a live MediaProjection+encoder that a freshly-connected session is using.
 static ACTIVE_STREAMS: AtomicUsize = AtomicUsize::new(0);
 
-// ── W5-rust-host: Host codec capabilities ────────────────────────────────────
+// ── Host codec capabilities ──────────────────────────────────────────────────
 
-/// Cached result of the Android `MediaCodecList` probe (W5-native provides the
-/// plugin bridge; see `host_codecs`).
-///
-/// The cache is populated by an explicit JS call to `host_codecs` (typically on
-/// the My Device screen before going online), and then consumed by every
-/// `go_online` accept loop when building `StreamCaps`.  A `None` cache means
-/// the probe has never been run: `go_online` falls back to `["h264"]` so
-/// existing unprobed devices keep working.
+/// Last result of the encoder probe (`PulsarVideo::host_encoder_caps`, Kotlin
+/// `HostEncoder.probeCodecs`), kept so a failed later probe still advertises what this phone
+/// was found to encode. `None` = never probed: the H.264-only fallback.
 #[derive(Default)]
 pub struct HostCaps {
-    /// Ordered codec list, best first (h265 before h264, av1 when present).
-    /// `None` = probe not yet run; `Some([])` = probe ran but returned nothing
-    /// (treat as h264-only fallback).
+    /// Ordered codec list, best first (av1 > h265 > h264, the desktop host's order).
     pub codecs: Mutex<Option<Vec<String>>>,
 }
 
@@ -90,33 +85,10 @@ pub struct HostCodecsResult {
     pub codecs: Vec<String>,
 }
 
-/// Parse a JSON string array without `serde_json`.
-///
-/// Handles the compact form returned by the Kotlin bridge:
-/// `["video/hevc","video/avc"]` or a comma-separated plain list
-/// `video/hevc,video/avc` as a convenience for tests.
-fn parse_string_array(s: &str) -> Vec<String> {
-    let trimmed = s.trim();
-    // Strip outer `[` … `]` if present.
-    let inner = if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        &trimmed[1..trimmed.len() - 1]
-    } else {
-        trimmed
-    };
-
-    inner
-        .split(',')
-        .filter_map(|token| {
-            let t = token.trim().trim_matches('"').trim_matches('\'').trim();
-            if t.is_empty() { None } else { Some(t.to_string()) }
-        })
-        .collect()
-}
-
 /// Order a raw codec list so that higher-quality codecs appear first.
 ///
-/// Priority: AV1 > H.265/HEVC > H.264/AVC.  Unknown codecs are appended in
-/// their original order after the known ones.
+/// Priority: AV1 > H.265/HEVC > H.264/AVC (the desktop host's caps order).  Unknown codecs
+/// are appended in their original order after the known ones.
 fn prioritise_codecs(raw: &[String]) -> Vec<String> {
     let mut av1: Vec<&String> = Vec::new();
     let mut h265: Vec<&String> = Vec::new();
@@ -147,9 +119,7 @@ fn prioritise_codecs(raw: &[String]) -> Vec<String> {
     }
 
     // Guarantee at least h264 as a universal fallback.
-    if result.is_empty() {
-        result.push("h264".to_string());
-    } else if !result.iter().any(|c| c == "h264") {
+    if !result.iter().any(|c| c == "h264") {
         result.push("h264".to_string());
     }
 
@@ -167,13 +137,63 @@ fn normalise_codec_name(raw: &str) -> String {
     }
 }
 
+/// Probe what this phone can encode and the screen it shares, for one session's
+/// `StreamCaps`: the codec list (best first, cached in [`HostCaps`]) and the screen as the
+/// single advertised display (its real size and refresh rate, so the client offers a
+/// "native" size and caps its fps to the panel, as it does for a desktop host's monitor).
+/// A failed probe falls back to the cached list, else H.264 only, and no display.
+fn probe_host_caps<R: Runtime>(app: &AppHandle<R>) -> (Vec<String>, Option<DisplayInfo>) {
+    let probe = app.pulsar_video().host_encoder_caps().ok().filter(|c| c.ok);
+    let state = app.state::<HostCaps>();
+    let codecs = match &probe {
+        Some(c) if !c.codecs.is_empty() => {
+            let ordered = prioritise_codecs(&c.codecs);
+            *state.codecs.lock().unwrap() = Some(ordered.clone());
+            ordered
+        }
+        _ => cached_codecs(&state),
+    };
+    let display = probe.filter(|c| c.width > 0 && c.height > 0).map(|c| DisplayInfo {
+        idx: 0,
+        name: "Screen".to_string(),
+        width: c.width,
+        height: c.height,
+        primary: true,
+        refresh_hz: c.refresh_hz,
+        ..Default::default()
+    });
+    (codecs, display)
+}
+
+/// The encoder codec list this phone advertises as a host (best first: AV1 > H.265 >
+/// H.264, AV1/H.265 only from hardware encoders). Every session probes on its own; this
+/// command lets the UI show the list.
+///
+/// JS: `invoke('host_codecs', {})` → `{codecs: string[]}`
+#[tauri::command]
+pub async fn host_codecs<R: Runtime>(app: AppHandle<R>) -> Result<HostCodecsResult, String> {
+    let (codecs, _) = probe_host_caps(&app);
+    log::info!("pulsar host: codec list = {:?}", codecs);
+    Ok(HostCodecsResult { codecs })
+}
+
+/// Read the cached probed codec list, or return the h264-only fallback when the
+/// probe has not succeeded yet.
+fn cached_codecs(caps: &HostCaps) -> Vec<String> {
+    caps.codecs
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| vec!["h264".to_string()])
+}
+
 /// Wire scroll (browser px, 100 per notch) → whole notches for the plugin's `hostScroll`,
 /// which turns EVERY call into one ~0.6-screen accessibility swipe (and a new swipe cancels
 /// the one still running). A hi-res wheel (Linux evdev `REL_WHEEL_HI_RES`, Windows
 /// precision touchpad, Interception) sends ~8 × 12.5 px per notch: without this that was 8
 /// overlapping swipes per notch instead of one. The sub-notch remainder carries (trunc keeps
-/// the direction); a reversal drops the other direction's remainder. Horizontal notches are
-/// passed on too, but the Kotlin `hostScroll` still ignores `dx` (no horizontal swipe yet).
+/// the direction); a reversal drops the other direction's remainder. Both axes go to the
+/// Kotlin `hostScroll`, which swipes horizontally for `dx` too.
 #[derive(Default, Debug)]
 struct ScrollNotches {
     x: f64,
@@ -202,99 +222,6 @@ impl ScrollNotches {
         }
         (axis(&mut self.x, dx), axis(&mut self.y, dy))
     }
-}
-
-/// Probe the Android `MediaCodecList` for supported hardware video encoders and
-/// return an ordered codec list (best first: AV1 > H.265 > H.264).
-///
-/// ## How the probe works (cross-lane dependency)
-///
-/// The actual MediaCodecList enumeration is performed by the W5-native lane, which
-/// adds:
-///   - `@Command fun hostCodecs(invoke: Invoke)` to `PulsarVideoPlugin.kt`
-///     (iterates `MediaCodecList.getCodecInfos()`, filters to hardware encoders for
-///     `video/hevc`, `video/av01`, `video/avc`, returns a JSON array in
-///     `detail`, e.g. `["video/hevc","video/avc"]`).
-///   - `PulsarVideo::host_codecs(&self)` to both `mobile.rs` and `desktop.rs`
-///     (`desktop.rs` returns `noop("no MediaCodecList on desktop")`).
-///
-/// Once those additions are present, replace the stub body below with (a sketch of code
-/// that does not exist yet, so rustdoc must not try to compile it):
-/// ```ignore
-/// let raw_codecs: Vec<String> = match app.pulsar_video().host_codecs() {
-///     Ok(resp) if resp.ok && !resp.detail.is_empty() => {
-///         parse_string_array(&resp.detail)
-///     }
-///     _ => {
-///         log::info!("pulsar host: host_codecs probe unavailable, using h264 fallback");
-///         vec!["h264".to_string()]
-///     }
-/// };
-/// ```
-///
-/// ## Current behaviour (pre-W5-native stub)
-///
-/// Until the W5-native lane lands, `host_codecs` returns the codec list that is
-/// already stored in the [`HostCaps`] cache (populated by an earlier call or by
-/// external means), falling back to `["h264"]`.  This allows the `go_online` path
-/// to consume a dynamically-built `StreamCaps` even before the native probe is
-/// wired in.
-///
-/// The result is cached in the managed [`HostCaps`] state and also returned to
-/// the caller so the JS can update the My Device screen immediately.
-///
-/// JS: `invoke('host_codecs', {})` → `{codecs: string[]}`
-#[tauri::command]
-pub async fn host_codecs<R: Runtime>(app: AppHandle<R>) -> Result<HostCodecsResult, String> {
-    // ── W5-native hook ────────────────────────────────────────────────────────
-    //
-    // Once the W5-native lane adds `PulsarVideo::host_codecs()` to both
-    // `crates/tauri-plugin-pulsar-video/src/mobile.rs` (real probe) and
-    // `desktop.rs` (no-op), replace this entire block with the plugin call
-    // shown in the doc-comment above.  The rest of the function (prioritise /
-    // cache / return) is already correct and does not need to change.
-    //
-    // For now: read whatever is already in the cache (possibly seeded externally
-    // in tests or by a previous call) and fall back to ["h264"].
-    let caps_state = app.state::<HostCaps>();
-    let existing = caps_state.codecs.lock().unwrap().clone();
-
-    let raw_codecs: Vec<String> = existing.unwrap_or_else(|| {
-        log::info!("pulsar host: host_codecs probe not yet wired (W5-native pending), using h264 fallback");
-        vec!["h264".to_string()]
-    });
-    // ── end W5-native hook ────────────────────────────────────────────────────
-
-    let ordered = prioritise_codecs(&raw_codecs);
-
-    // Write back the ordered list (no-op if it was already ordered, but ensures
-    // the canonical normalised form is stored).
-    *caps_state.codecs.lock().unwrap() = Some(ordered.clone());
-
-    log::info!("pulsar host: codec list = {:?}", ordered);
-    Ok(HostCodecsResult { codecs: ordered })
-}
-
-/// Populate the [`HostCaps`] cache directly from a raw MIME list string returned
-/// by the native plugin bridge (called by `host_codecs_from_plugin` once the
-/// W5-native lane wires in the `PulsarVideo::host_codecs()` method).
-///
-/// This helper is `pub(crate)` so it can also be called from a future wrapper
-/// without going through the Tauri command layer.
-pub(crate) fn seed_host_caps(caps: &HostCaps, raw_detail: &str) {
-    let raw = parse_string_array(raw_detail);
-    let ordered = prioritise_codecs(&raw);
-    *caps.codecs.lock().unwrap() = Some(ordered);
-}
-
-/// Read the cached probed codec list, or return the h264-only fallback when the
-/// probe has not been run yet.  Called from the `go_online` `StreamCaps` closure.
-fn cached_codecs(caps: &HostCaps) -> Vec<String> {
-    caps.codecs
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_else(|| vec!["h264".to_string()])
 }
 
 // ── Managed host state ────────────────────────────────────────────────────────
@@ -872,13 +799,16 @@ pub async fn go_online<R: Runtime>(
                                                 continue;
                                             }
                                         }
-                                        // The Android pointer has one button (a tap / drag):
-                                        // left, right and middle press it as before; ids past
-                                        // that (3 = back, 4 = forward, sent only to hosts that
-                                        // advertise FEAT_MOUSE_X, which this one does not) and
-                                        // unknown ids are ignored, never a tap.
-                                        InputEvent::PointerButton { button, down } if button <= 2 => {
-                                            let _ = app_in.pulsar_video().host_pointer_button(down);
+                                        // Android has one touch "button": left and middle
+                                        // press the tap / drag finger, right is a long-press
+                                        // (Android's context menu), back (3, sent because we
+                                        // advertise FEAT_MOUSE_X) is the Back action. Forward
+                                        // (4) has no Android equivalent and is dropped in the
+                                        // plugin; unknown ids are ignored, never a tap.
+                                        InputEvent::PointerButton { button, down }
+                                            if pulsar_core::input::mouse_button::is_known(button) =>
+                                        {
+                                            let _ = app_in.pulsar_video().host_pointer_button(button, down);
                                         }
                                         InputEvent::PointerButton { .. } => {}
                                         InputEvent::Scroll { dx, dy } => {
@@ -929,20 +859,13 @@ pub async fn go_online<R: Runtime>(
                             let _ = in_tx.send(ev);
                         };
 
-                        // ── Stream caps (W5-rust-host: dynamic codec list) ─────
+                        // ── Stream caps: the probed encoder codecs + the screen ──
                         //
-                        // Use the codec list probed by `host_codecs` (cached in
-                        // HostCaps).  If the JS hasn't called `host_codecs` yet,
-                        // `cached_codecs` returns the safe ["h264"] fallback so
-                        // un-probed devices continue to work unchanged.
-                        //
-                        // The ordering from `prioritise_codecs` guarantees the
-                        // connecting client sees h265 (or AV1) before h264, so it
-                        // can negotiate the best codec its decoder supports.
-                        let probed_codecs = {
-                            let caps_state = app3.state::<HostCaps>();
-                            cached_codecs(&caps_state)
-                        };
+                        // Probed per session (`probe_host_caps`): AV1 / H.265 when a
+                        // hardware encoder has them, H.264 always, best first like the
+                        // desktop host, so the client negotiates the best codec its
+                        // decoder takes. The screen is the one display (size + refresh).
+                        let (probed_codecs, screen) = probe_host_caps(&app3);
 
                         let mut data = DataHandlers::default();
                         // Feed client NACKs to the retransmit ring in the video forwarder above.
@@ -965,8 +888,10 @@ pub async fn go_online<R: Runtime>(
                                 media::FEAT_NACK.to_string(),
                                 media::FEAT_FEC.to_string(),
                                 media::FEAT_FEC_RS.to_string(),
+                                // Side buttons: back maps to the Android Back action.
+                                media::FEAT_MOUSE_X.to_string(),
                             ],
-                            ..Default::default()
+                            displays: screen.clone().into_iter().collect(),
                         });
                         // The client's per-window feedback sizes the parity (Phase 2.4).
                         data.on_stats = {
@@ -1324,5 +1249,26 @@ mod scroll_tests {
         assert_eq!(s.push(0.0, -60.0), (0.0, 0.0)); // not +60 - 60 = nothing forever
         assert_eq!(s.push(0.0, -40.0), (0.0, -100.0));
         assert_eq!(s.push(-100.0, f64::NAN), (-100.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::prioritise_codecs;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn probe_order_matches_the_desktop_host() {
+        assert_eq!(prioritise_codecs(&v(&["h264", "h265", "av1"])), v(&["av1", "h265", "h264"]));
+        assert_eq!(prioritise_codecs(&v(&["video/hevc", "video/avc"])), v(&["h265", "h264"]));
+    }
+
+    #[test]
+    fn h264_is_always_advertised() {
+        assert_eq!(prioritise_codecs(&v(&["h265"])), v(&["h265", "h264"]));
+        assert_eq!(prioritise_codecs(&[]), v(&["h264"]));
     }
 }
