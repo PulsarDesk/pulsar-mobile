@@ -2343,7 +2343,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private var lastCaptureDims: Pair<Int, Int>? = null
     /** The stream plan (bit rate zeroed) the running encoder refused to start or rebuild at;
      *  a re-stream asking for it again only changes the bit rate. */
-    private var refusedPlan: HostEncoder.Plan? = null
+    private var refusedPlan: HostEncoder.Companion.Plan? = null
     private val displayCheckHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var recheckQueued = false
 
@@ -3487,8 +3487,6 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 else     -> sps?.let { h264SpsDims(it) }
             }
             if (dims != null) Log.i(TAG, "slot $slot SPS dims ${dims.first}x${dims.second}")
-            // No adaptive playback (or it can't be declared): the configured size is the limit.
-            decoderMax = dims; decoderAdaptive = false
             else Log.w(TAG, "slot $slot SPS dims unknown ($m) — adaptive max disabled")
             val fmt = MediaFormat.createVideoFormat(m, dims?.first ?: 1920, dims?.second ?: 1080)
             when {
@@ -3512,6 +3510,8 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                         fmt.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
                     }
                 }
+            // No adaptive playback (or it can't be declared): the configured size is the limit.
+            decoderMax = dims; decoderAdaptive = false
             // A21: if the decoder supports adaptive playback, declare the max resolution +
             // a frame-rate hint up front. Then a mid-session host resolution change
             // (Parsec-style) is absorbed IN-PLACE by the decoder instead of a multi-100ms
