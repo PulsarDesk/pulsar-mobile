@@ -22,10 +22,8 @@ import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Shader
 import android.graphics.SurfaceTexture
-import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
@@ -74,6 +72,8 @@ import java.util.concurrent.LinkedBlockingDeque
 
 // W5-native: max pane slots — was 0..1, now supports up to 4 (quadrant grid).
 private const val MAX_PANES = 4
+/** RTP payload type of uncompressed audio (pulsar-core `audio::L16_PAYLOAD_TYPE`). */
+private const val L16_PAYLOAD_TYPE = 98
 /** 2.20: a fatal decoder error before this many output frames counts as an options crash. */
 private const val OPTION_CRASH_FRAMES = 30L
 // Identity-image (avatar) square edge + wire-size cap — matches the desktop
@@ -165,6 +165,13 @@ class StreamFpsArgs {
 class StartStreamArgs {
     var mime: String? = null
     var slot: Int = 0
+}
+
+@InvokeArg
+class FeedAudioArgs {
+    var data: String? = null
+    /** RTP payload type: 97 = Opus, 98 = uncompressed L16 (big-endian interleaved stereo). */
+    var pt: Int = 97
 }
 
 @InvokeArg
@@ -295,10 +302,13 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     // W5-native: bumped from 2 panes to MAX_PANES
     private val panes = Array(MAX_PANES) { Pane(it) }
 
-    // --- live audio (M5): Opus → MediaCodec(audio/opus) → AudioTrack ---
+    // --- live audio (M5): Opus → MediaCodec(audio/opus) → AudioPlayout (steered AudioTrack);
+    // raw L16 skips the decoder ---
     private val audioLock = Any()
     private var audioCodec: MediaCodec? = null
-    private var audioTrack: AudioTrack? = null
+    private var audioPlayout: AudioPlayout? = null
+    /** Scratch for decoded / unpacked PCM handed to [audioPlayout]. */
+    private var audioPcm = ShortArray(0)
     private var audioConfigured = false
     // Audio decode error containment: one invalid opus packet makes c2.android.opus.decoder
     // fail FATALLY (C2 err 14 → MediaCodec dead). Recover by releasing + reconfiguring on the
@@ -464,15 +474,22 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun feedAudio(invoke: Invoke) {
-        val b64 = invoke.parseArgs(FeedAuArgs::class.java).data ?: run { invoke.reject("no data"); return }
-        val opus = Base64.decode(b64, Base64.DEFAULT)
+        val args = invoke.parseArgs(FeedAudioArgs::class.java)
+        val b64 = args.data ?: run { invoke.reject("no data"); return }
+        val pkt = Base64.decode(b64, Base64.DEFAULT)
         var ok = false
         synchronized(audioLock) {
             try {
-                if (!audioDisabled && opus.isNotEmpty()) {
-                    if (!audioConfigured) configureAudioLocked()
-                    if (audioConfigured) feedAudioPacketLocked(opus)
-                    ok = audioConfigured
+                if (!audioDisabled && pkt.isNotEmpty()) {
+                    if (args.pt == L16_PAYLOAD_TYPE) {
+                        // Uncompressed (the "Raw" audio quality): no decoder, straight to playout.
+                        playL16Locked(pkt)
+                        ok = audioPlayout != null
+                    } else {
+                        if (!audioConfigured) configureAudioLocked()
+                        if (audioConfigured) feedAudioPacketLocked(pkt)
+                        ok = audioConfigured
+                    }
                 }
             } catch (e: Exception) {
                 // A fatal decode error leaves the MediaCodec permanently dead ("Released
@@ -1125,7 +1142,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         synchronized(audioLock) {
             audioGain = if (args.muted) 0f else 1f
             try {
-                audioTrack?.setVolume(audioGain)
+                audioPlayout?.setVolume(audioGain)
             } catch (e: Exception) {
                 Log.w(TAG, "setAudioMuted: setVolume error", e)
             }
@@ -2257,37 +2274,26 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             throw e
         }
         audioCodec = codec
-        val minBuf = AudioTrack.getMinBufferSize(48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-        // W5-native: target ~80-120 ms jitter buffer.
-        // 48000 Hz stereo s16le = 192 000 bytes/s → 80ms = 15 360 bytes, 120ms = 23 040 bytes.
-        // We pick 19 200 bytes (~100 ms) clamped to at least minBuf and rounded to a
-        // power-of-2-friendly value (20 480 = 20 KiB). Previous default was 16 384 (~85 ms)
-        // which is acceptable, but on some devices minBuf > 16 384 caused underruns; the new
-        // value gives a safe headroom without perceptible extra latency.
-        val targetBuf = 20_480 // ~106 ms at 48k stereo s16le
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder().setSampleRate(48000)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build()
-            )
-            .setBufferSizeInBytes(maxOf(minBuf, targetBuf))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            // Ask for the low-latency (FAST mixer) output path where the device has one
-            // (hidden-gaps 1.11d); the buffer size above still bounds the queue. API 26+.
-            .apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                }
-            }
-            .build()
-            .also { it.setVolume(audioGain); it.play() }
+        ensurePlayoutLocked()
         audioConfigured = true
-        Log.i(TAG, "audio decoder configured: opus 48000/2 buf=${maxOf(minBuf, targetBuf)}B (~${maxOf(minBuf, targetBuf) * 1000 / 192000}ms)")
+        Log.i(TAG, "audio decoder configured: opus 48000/2")
+    }
+
+    /**
+     * The playout (AudioTrack + the desktop's queue steering, see [AudioPlayout]). It replaces
+     * the old fixed ~100 ms AudioTrack buffer written non-blocking with no steering: the queue
+     * now sits near a 15 ms margin that grows only on a dry queue (up to 120 ms).
+     */
+    private fun ensurePlayoutLocked(): AudioPlayout =
+        audioPlayout ?: AudioPlayout.open(activity, audioGain).also { audioPlayout = it }
+
+    /** One uncompressed L16 payload: 16-bit big-endian interleaved stereo. */
+    private fun playL16Locked(pkt: ByteArray) {
+        val shorts = pkt.size / 2 / 2 * 2
+        if (shorts == 0) return
+        if (audioPcm.size < shorts) audioPcm = ShortArray(shorts)
+        ByteBuffer.wrap(pkt, 0, shorts * 2).order(java.nio.ByteOrder.BIG_ENDIAN).asShortBuffer().get(audioPcm, 0, shorts)
+        ensurePlayoutLocked().push(audioPcm, shorts / 2, true)
     }
 
     private fun feedAudioPacketLocked(opus: ByteArray) {
@@ -2315,14 +2321,14 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             if (outIdx < 0) break
             if (info.size > 0) {
                 val out = codec.getOutputBuffer(outIdx)!!
-                val pcm = ByteArray(info.size)
-                out.position(info.offset); out.get(pcm)
-                // NON_BLOCKING: this runs on the plugin-invoke (main) thread, called
-                // synchronously from the session read loop. A blocking write during a
-                // post-hiccup packet burst would stall the read loop (and thus VIDEO
-                // delivery) for the buffer-overflow duration; dropping the tail of stale
-                // audio keeps playback near-live instead.
-                audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                // 16-bit native-order PCM, interleaved stereo. The playout writes it
+                // non-blocking (this runs on the plugin-invoke thread) and bounds the queue
+                // itself: a post-hiccup burst is flushed and re-buffered, never played late.
+                val shorts = info.size / 2 / 2 * 2
+                if (audioPcm.size < shorts) audioPcm = ShortArray(shorts)
+                out.position(info.offset); out.limit(info.offset + shorts * 2)
+                out.order(java.nio.ByteOrder.nativeOrder()).asShortBuffer().get(audioPcm, 0, shorts)
+                audioPlayout?.push(audioPcm, shorts / 2, false)
             }
             codec.releaseOutputBuffer(outIdx, false)
         }
@@ -2340,9 +2346,8 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     private fun releaseAudioLocked() {
         try { audioCodec?.stop() } catch (_: Exception) {}
         try { audioCodec?.release() } catch (_: Exception) {}
-        try { audioTrack?.stop() } catch (_: Exception) {}
-        try { audioTrack?.release() } catch (_: Exception) {}
-        audioCodec = null; audioTrack = null; audioConfigured = false
+        audioPlayout?.release()
+        audioCodec = null; audioPlayout = null; audioConfigured = false
         audioPtsUs = 0L
     }
 

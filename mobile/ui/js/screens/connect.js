@@ -642,6 +642,8 @@ export async function doConnect(target, slot, modeOverride, gameId) {
 			height:      qParams.height,
 			quality:     qParams.quality,
 			hdr:         getPref('hdr') === true,
+			// Host audio quality ('auto' resolved in Rust from the probe + path, like desktop).
+			audioQuality: getPref('audioQuality') || 'auto',
 			// Game-mode: the host-side game to launch before streaming ('' = Desktop /
 			// whole screen). Undefined in remote mode → host streams the desktop.
 			gameId:      gameId ?? '',
