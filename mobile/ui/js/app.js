@@ -313,6 +313,8 @@ function wireSessionBar() {
 				height:  0,
 				quality: 'balanced',
 				hdr:     false,
+				// The Settings audio-quality pick applies to split panes too.
+				audioQuality: getPref('audioQuality') || 'auto',
 				...creds,
 			})).catch((e) => { if (!(e && e.cancelled)) console.warn('[app] split connect error', e); });
 		}

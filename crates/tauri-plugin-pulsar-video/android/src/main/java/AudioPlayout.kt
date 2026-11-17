@@ -56,12 +56,17 @@ internal class AudioPlayout private constructor(
         private const val STEER_EVERY = 25
         /** AudioTrack capacity: room for the largest target + the flush threshold + a burst. */
         private const val CAPACITY_MS = 400
+        /** Capacity before API 24 (no setBufferSizeInFrames): the old fixed ~106 ms buffer. */
+        private const val LEGACY_CAPACITY_MS = 106
         private const val STATS_EVERY_MS = 5_000L
 
         /** Open a 48 kHz stereo 16-bit track on the low-latency path where the device has one. */
         fun open(ctx: Context, gain: Float): AudioPlayout {
             val minBuf = AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-            val capBytes = maxOf(minBuf, CAPACITY_MS * RATE / 1000 * 4)
+            // Before API 24 the usable size can't be changed after creation, and a stream track
+            // only starts once its whole buffer is full: keep the old ~106 ms buffer there.
+            val capMs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) CAPACITY_MS else LEGACY_CAPACITY_MS
+            val capBytes = maxOf(minBuf, capMs * RATE / 1000 * 4)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
@@ -96,6 +101,13 @@ internal class AudioPlayout private constructor(
             val burstMs = if (burst > 0 && nativeRate > 0) burst * 1000f / nativeRate else 10f
             // The FAST mixer pulls one HAL burst at a time; the normal mixer ~20 ms.
             val deviceMs = if (fast) burstMs.coerceIn(1f, 20f) else maxOf(burstMs, 20f)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // The streaming start threshold defaults to the buffer capacity: AudioFlinger
+                // would not start mixing until all 400 ms were queued (and the flush past
+                // target + 150 ms would fire first: no sound at all). play() is only called once
+                // the prebuffer is in, so the server may start at once.
+                try { track.setStartThresholdInFrames(maxOf(1, (deviceMs * FRAMES_PER_MS).toInt())) } catch (_: Exception) {}
+            }
             track.setVolume(gain)
             Log.i(
                 TAG,
@@ -120,6 +132,12 @@ internal class AudioPlayout private constructor(
     private var written = 0L
     private var headBase = 0L
     private var underruns = underrunCount()
+    /**
+     * API 24–30 (no start threshold): the usable size was lowered to the prebuffer so the
+     * server starts mixing on play(); it is opened back up to [capacityFrames] once the head
+     * moves. Holds the head position at play() while lowered, else -1.
+     */
+    private var shrunkAtHead = -1L
 
     // Resampler state: the last input frame of the previous packet and the read position past it.
     private var phase = 0.0
@@ -156,11 +174,17 @@ internal class AudioPlayout private constructor(
 
     /** Frames queued in the track (written, not yet played), in ms. */
     private fun queuedMs(): Float {
-        val head = (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL) - headBase
-        val q = written - (head and 0xFFFFFFFFL)
-        // The head can never pass what was written; a nonsense value (a device that did not
-        // reset the head on flush) reads as empty.
-        if (q < 0 || q > capacityFrames * 2L) return 0f
+        val raw = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+        val head = (raw - headBase) and 0xFFFFFFFFL
+        val q = written - head
+        // The head can never pass what was written, and a non-blocking write never queues
+        // more than the capacity. A nonsense value (a device that reset the head late, or not
+        // at all, after a flush) reads as empty and re-bases the head on it, so one bad read
+        // can't leave the queue looking empty (never starting playback) for good.
+        if (q < 0 || q > capacityFrames * 2L) {
+            headBase = (raw - written) and 0xFFFFFFFFL
+            return 0f
+        }
         return q / FRAMES_PER_MS
     }
 
@@ -174,6 +198,11 @@ internal class AudioPlayout private constructor(
         ratio = 1f
         levelMs = null
         underruns = underrunCount()
+        if (shrunkAtHead >= 0) {
+            // Lowered for a start that a flush cut short: the prebuffer needs the room back.
+            try { track.setBufferSizeInFrames(capacityFrames) } catch (_: Exception) {}
+            shrunkAtHead = -1
+        }
     }
 
     /**
@@ -195,6 +224,11 @@ internal class AudioPlayout private constructor(
             lastDryMs = now
         }
         underruns = ur
+        if (shrunkAtHead >= 0 && (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL) != shrunkAtHead) {
+            // Mixing started: give the queue its whole capacity back.
+            try { track.setBufferSizeInFrames(capacityFrames) } catch (_: Exception) {}
+            shrunkAtHead = -1
+        }
         val n = resample(pcm, frames)
         val wrote = track.write(out, 0, n * 2, AudioTrack.WRITE_NON_BLOCKING)
         if (wrote > 0) written += wrote / 2
@@ -205,10 +239,20 @@ internal class AudioPlayout private constructor(
         // What must not hit zero is the sawtooth's LOW point, so that is what gets steered.
         val full = targetMs + deviceMs
         if (!playing) {
-            if (after >= full) {
+            // (Capped below the capacity: a write never queues more, so a target grown past it
+            // could otherwise never start playback.)
+            if (after >= minOf(full, capacityFrames / FRAMES_PER_MS * 0.9f)) {
                 levelMs = null
                 winMinMs = Float.MAX_VALUE
                 winPushes = 0
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                    // No start threshold before API 31: a stream track starts mixing only once
+                    // its usable size is full. Lower it to what is queued for the start.
+                    try {
+                        track.setBufferSizeInFrames(maxOf(1, (after * FRAMES_PER_MS).toInt()))
+                        shrunkAtHead = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                    } catch (_: Exception) {}
+                }
                 try { track.play(); playing = true } catch (e: Exception) { Log.w(TAG, "play failed", e) }
             }
         } else if (after > full + FLUSH_OVER_MS) {
