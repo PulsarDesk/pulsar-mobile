@@ -61,6 +61,10 @@ class HostEncoder(
     private var audioEncoder: MediaCodec? = null
     private var audioThread: Thread? = null
     @Volatile private var running = false
+    // Generation of the video drain loop. A rebuild (rotation / retune) retires the old loop
+    // by bumping this, NOT by clearing [running]: the audio loop also runs on [running], and
+    // clearing it for the swap ended host audio for the rest of the session.
+    @Volatile private var drainGen = 0
     // RTP video sequence number — a FIELD (not a drainLoop local) so it stays continuous
     // across a reconfigure() (rotation), otherwise it would reset to 1 and the client's
     // jitter buffer would treat the whole stream as stale/reordered.
@@ -295,7 +299,7 @@ class HostEncoder(
             vd.resize(newW, newH, densityDpi)
             vd.setSurface(surface)
             // 3) Stop the old drain loop, then release the old encoder/surface.
-            running = false
+            drainGen++
             thread?.interrupt()
             try { thread?.join(300) } catch (_: Exception) {}
             try { encoder?.stop() } catch (_: Exception) {}
@@ -307,7 +311,6 @@ class HostEncoder(
             curW = newW; curH = newH
             mime = newMime; fps = newFps; bitrate = newBitrate; encoderName = newName
             av1SeqHeader = null
-            running = true
             thread = Thread { drainLoop() }.also { it.isDaemon = true; it.start() }
             Log.i(TAG, "rebuild $newMime ${newW}x${newH}@$newFps ${newBitrate / 1000}k (${codec.name})")
             return true
@@ -400,6 +403,7 @@ class HostEncoder(
         val codec = encoder ?: return
         // Same for the codec: a retune() swaps `mime` only after this loop has stopped.
         val m = mime
+        val gen = drainGen
         // The capture -> encode -> send path is latency-critical (the client's decode thread
         // runs at this priority too).
         try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Exception) {}
@@ -424,7 +428,7 @@ class HostEncoder(
         var lastKick = 0L
         var kicks = 0
         try {
-            while (running) {
+            while (running && gen == drainGen) {
                 val outIdx = codec.dequeueOutputBuffer(info, 50_000)
                 if (outIdx < 0) {
                     // Cap recovery attempts at 3 per stall episode: on Samsung neither the

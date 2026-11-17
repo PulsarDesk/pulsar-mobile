@@ -1930,28 +1930,38 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             // the desktop host: a bitrate-only change is applied live (no restart, no
             // keyframe glitch); a new codec / size / fps rebuilds the encoder on the same
             // VirtualDisplay (Android 14+ refuses a second createVirtualDisplay).
-            if (running.mime == hMime && running.streamWidth == plan.w && running.streamHeight == plan.h && running.fps == plan.fps) {
+            // A plan the encoder already refused (it then runs at the safe fallback) is not
+            // retried on every ABR step: each retry is up to four failed configures.
+            val same = running.mime == hMime && running.streamWidth == plan.w && running.streamHeight == plan.h && running.fps == plan.fps
+            if (same || plan.copy(bps = 0) == refusedPlan) {
                 Log.i(TAG, "startCapture: already running — re-stream bitrate ${plan.bps / 1000}k live (recovery=$hRecovery kept: GOP can't change live)")
                 running.setBitrate(plan.bps)
             } else {
                 Log.i(TAG, "startCapture: re-stream ${running.mime} ${running.streamWidth}x${running.streamHeight}@${running.fps} → $hMime ${plan.w}x${plan.h}@${plan.fps} ${plan.bps / 1000}k")
-                if (!running.retune(hMime, plan.name, plan.w, plan.h, plan.fps, plan.bps)) running.setBitrate(plan.bps)
+                if (running.retune(hMime, plan.name, plan.w, plan.h, plan.fps, plan.bps)) {
+                    refusedPlan = null
+                } else {
+                    refusedPlan = plan.copy(bps = 0)
+                    running.setBitrate(plan.bps)
+                }
             }
             lastCaptureDims = Pair(rw, rh)
             return
         }
         val dm = activity.resources.displayMetrics
         Log.i(TAG, "startCapture ${rw}x${rh} → ${plan.w}x${plan.h}@${plan.fps} ${plan.bps / 1000}k mime=$hMime enc=${plan.name} hw=${plan.hardware} (asked ${hW}x${hH}@$hFps ${hKbps}k)")
+        refusedPlan = null
         val enc = try {
             HostEncoder(proj, hMime, plan.w, plan.h, plan.fps, plan.bps, dm.densityDpi, hPort, hAudioPort, hRecovery, plan.name).also { startOrRelease(it) }
         } catch (e: Exception) {
+            refusedPlan = plan.copy(bps = 0)
             // An encoder that lists a size / rate it then refuses: retry at the limits the
             // host always used (H.264 is what the client has a decoder for in any case).
             Log.w(TAG, "encoder at the requested size failed (${e.message}); retrying at the safe defaults")
             var w = rw; var h = rh
             if (maxOf(w, h) > 1280) { val s = 1280.0 / maxOf(w, h); w = (w * s).toInt(); h = (h * s).toInt() }
             w = w and 1.inv(); h = h and 1.inv()
-            HostEncoder(proj, hMime, w, h, minOf(plan.fps, 30), minOf(plan.bps, 8_000_000), dm.densityDpi, hPort, hAudioPort, hRecovery, plan.name).also { it.start() }
+            HostEncoder(proj, hMime, w, h, minOf(plan.fps, 30), minOf(plan.bps, 8_000_000), dm.densityDpi, hPort, hAudioPort, hRecovery, plan.name).also { startOrRelease(it) }
         }
         hostEncoder = enc
         lastCaptureDims = Pair(rw, rh)
@@ -2018,6 +2028,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
     // decoder reconfigures + re-aspects. Brief (~200ms) freeze during the swap is fine.
     private var displayListener: android.hardware.display.DisplayManager.DisplayListener? = null
     private var lastCaptureDims: Pair<Int, Int>? = null
+    /** The stream plan (bit rate zeroed) the running encoder refused to start or rebuild at;
+     *  a re-stream asking for it again only changes the bit rate. */
+    private var refusedPlan: HostEncoder.Plan? = null
     private val displayCheckHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var recheckQueued = false
 
