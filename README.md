@@ -5,7 +5,6 @@
 <h3 align="center">Your computer and your games, on your phone. Free.</h3>
 
 <p align="center">
-  Control a computer with touch, play your PC games with a real controller, or let someone help you on your phone.<br>
   A free, open-source alternative to TeamViewer, AnyDesk and Parsec. <b>No account, no subscription, no tracking.</b>
 </p>
 
@@ -22,140 +21,53 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-5B57E0?style=flat-square" alt="License: GPLv3"></a>
 </p>
 
-<p align="center">
-  <a href="https://pulsardesk.com"><b>Website</b></a> ·
-  <a href="#-get-pulsar-mobile"><b>Download</b></a> ·
-  <a href="#-questions"><b>FAQ</b></a> ·
-  <a href="https://github.com/PulsarDesk/pulsar-desktop"><b>Desktop app</b></a> ·
-  <a href="https://github.com/PulsarDesk/pulsar-mobile/issues/new/choose"><b>Report a bug</b></a>
-</p>
-
-## 💜 Why Pulsar Mobile?
-
-<table>
-<tr>
-<td width="33%" valign="top">
-
-### 🖐️ Made for touch
-Use your finger like a trackpad, or tap exactly where you want to click. Two fingers scroll, and a keyboard with Ctrl+Alt+Del is always one tap away.
-
-</td>
-<td width="33%" valign="top">
-
-### 🎮 Your PC games, anywhere
-Pair a controller, pick a game from your PC's library and play. Rumble works, and you see the controller's
-battery level.
-
-</td>
-<td width="33%" valign="top">
-
-### 🔒 Private and free
-Always end-to-end encrypted. No account, no ads, no tracking, and nothing to pay. Open source under GPLv3.
-
-</td>
-</tr>
-</table>
-
-## 👀 A look inside
-
-<p align="center">
-  <img src="docs/screenshots/connect.png" width="30%" alt="Connect: type a device ID">
-  &nbsp;
-  <img src="docs/screenshots/game-mode.png" width="30%" alt="Game mode: play on a gaming PC">
-  &nbsp;
-  <img src="docs/screenshots/my-device.png" width="30%" alt="My Device: share this phone with an ID and one-time password">
-</p>
-<p align="center">
-  <b>Connect</b> to any computer &nbsp;·&nbsp; <b>Play</b> your PC games &nbsp;·&nbsp; <b>Share</b> your own phone
-</p>
-
-## 🚀 How it works
-
 <p align="center"><img src=".github/assets/steps.png" alt="1. Install Pulsar on both devices. 2. Share the ID and one-time password. 3. You're connected, encrypted end to end." width="100%"></p>
 
-Install [Pulsar Desktop](https://github.com/PulsarDesk/pulsar-desktop) on the computer, type its ID and password on
-your phone, and you're in. Computers on the same Wi-Fi show up on their own.
+<p align="center"><img src=".github/assets/feat-m-control.png" alt="Control a computer: mouse or touch mode, keyboard, files and clipboard, sound and mic, any screen, several sessions" width="100%"></p>
 
-## ✨ What you can do
+<p align="center"><img src=".github/assets/feat-m-gaming.png" alt="Game streaming: your game library, real controllers, battery shown, quality presets, live stats, Android TV" width="100%"></p>
 
-### 🖥️ Use your computer from the couch, the train or the office
-- **Mouse or touch mode:** a trackpad-style cursor, or tap right on the spot. Tap, double-tap, long-press, drag and
-  two-finger scroll.
-- **Keyboard included:** an on-screen keyboard with Ctrl+Alt+Del, or plug in a real mouse and keyboard.
-- **Files, clipboard, chat:** send files both ways, copy on one side and paste on the other, and chat.
-- **Hear it, talk to it:** the computer's sound plays on your phone, and your phone's microphone works on the
-  computer.
-- **Any screen, any way:** pick which monitor to view; fit, fill or stretch; portrait or landscape.
-- **Several computers at once,** with a quick switcher, plus saved devices with favourites, search and icons.
+<p align="center"><img src=".github/assets/feat-m-share.png" alt="Share and stay safe: share your screen, you approve, always encrypted, passwords and 2FA, relay on the phone, 4 languages" width="100%"></p>
 
-### 🎮 Play your PC games
-- **Game mode:** stream the whole desktop, one screen, or a game picked from the computer's library.
-- **Real controllers** over Bluetooth or USB, with rumble. The PC sees an Xbox 360 controller or a DualShock 4,
-  your pick.
-- **Picture your way:** H.264 / H.265, HDR, resolution, frame rate, and presets from *Data saver* to
-  *Low latency*, with a live overlay showing fps, ping and loss.
-- **On the big screen:** on Android TV, the whole app works with the remote's D-pad.
-
-### 📱 Get help on your phone
-- **Share your screen** with someone you trust and let them tap for you.
-- **You approve** who connects, see who is connected, and disconnect them any time.
-
-### 🔒 Safe by default
-- **Always end-to-end encrypted:** even the relay server only forwards data it cannot read.
-- **You decide who gets in:** a one-time password, a permanent password, unattended access and two-factor codes.
-- **Direct first, relay when needed,** or force either one. Use your own server, or **run a relay on the phone**
-  for your Wi-Fi.
-- **Updates itself.** In English, Turkish, Russian and Kazakh.
+<p align="center">
+  <img src="docs/screenshots/connect.png" width="30%" alt="Connect">
+  &nbsp;
+  <img src="docs/screenshots/game-mode.png" width="30%" alt="Game mode">
+  &nbsp;
+  <img src="docs/screenshots/my-device.png" width="30%" alt="My Device">
+</p>
 
 ## 📥 Get Pulsar Mobile
 
 Download **[`Pulsar-android.apk`](https://github.com/PulsarDesk/pulsar-mobile/releases/latest/download/Pulsar-android.apk)**
-from the [latest release](https://github.com/PulsarDesk/pulsar-mobile/releases/latest) and install it. The app keeps
-itself up to date after that.
+and install it; it updates itself after that. Needs **Android 7.0+**. On the computer, install
+[Pulsar Desktop](https://github.com/PulsarDesk/pulsar-desktop). iPhone and iPad are not available yet.
 
 > [!TIP]
-> **Want others to control your phone?** That needs Pulsar's accessibility service. Android may block it for apps
-> installed from a file: open *App info* → ⋮ → **Allow restricted settings**, then turn it on.
-
-Needs **Android 7.0** or newer. iPhone and iPad are not available yet.
+> **Letting others control your phone** needs Pulsar's accessibility service. If Android blocks it: *App info* → ⋮ →
+> **Allow restricted settings**, then turn it on.
 
 ## ❓ Questions
 
-<details>
-<summary><b>What do I need on the computer?</b></summary>
-<br>
-The free <a href="https://github.com/PulsarDesk/pulsar-desktop">Pulsar Desktop</a> app for Windows, macOS or Linux.
-Open it, and it shows the ID and password to type on your phone.
+<details><summary><b>Does it work outside my home Wi-Fi?</b></summary><br>
+Yes. Pulsar connects directly when it can and falls back to a relay automatically, so mobile data works too. The
+<i>Data saver</i> preset keeps data use low.
 </details>
 
-<details>
-<summary><b>Does it work outside my home Wi-Fi?</b></summary>
-<br>
-Yes. Pulsar connects directly whenever it can and falls back to a relay server automatically when it can't, so it
-works on mobile data and other networks too.
+<details><summary><b>Is it safe?</b></summary><br>
+Every session is end-to-end encrypted. Nobody connects without the password or your approval, and you can
+disconnect anyone at any time.
 </details>
 
-<details>
-<summary><b>Can I play games on mobile data?</b></summary>
-<br>
-Yes. The stream adapts to your connection. The <i>Data saver</i> preset keeps data use low; on Wi-Fi, pick
-<i>Low latency</i> for the snappiest play.
+<details><summary><b>Is it finished?</b></summary><br>
+Not yet: Pulsar is in <b>alpha</b> (0.x). Expect rough edges and
+<a href="https://github.com/PulsarDesk/pulsar-mobile/issues/new/choose">tell us what you hit</a>.
 </details>
 
-<details>
-<summary><b>Is it safe?</b></summary>
-<br>
-Every session is end-to-end encrypted, always. Nobody can connect without the password or your approval, and you
-can disconnect anyone at any time.
-</details>
+## 📚 More
 
 <details>
-<summary><b>Is there an iPhone version?</b></summary>
-<br>
-Not yet. Android (phones, tablets and Android TV) comes first.
-</details>
-
-## 🧪 Where it has been tested
+<summary><b>🧪 Where it has been tested</b></summary>
 
 | Device | Connect to a computer | Share this phone |
 |---|---|---|
@@ -164,10 +76,32 @@ Not yet. Android (phones, tablets and Android TV) comes first.
 | Android TV | ❔ not tested on a real TV yet | ❔ |
 | iPhone / iPad | ❌ not available yet | ❌ |
 
-Pulsar is in **alpha** (0.x): expect rough edges. Tried it on another phone? A short note in an
-[issue](https://github.com/PulsarDesk/pulsar-mobile/issues) helps, even when everything worked.
+Tried it on another phone? A short note in an [issue](https://github.com/PulsarDesk/pulsar-mobile/issues) helps.
 
-## 🐞 Reporting a bug
+</details>
+
+<details>
+<summary><b>✨ Full feature list</b></summary>
+
+- **Control:** mouse (trackpad) or touch mode; tap, double-tap, long-press, drag, two-finger scroll; on-screen
+  keyboard with Ctrl+Alt+Del; external mice and keyboards.
+- **Session:** file transfer both ways, clipboard, chat, the computer's sound, your phone's microphone; pick a
+  monitor; fit / fill / stretch; portrait or landscape; several sessions with a quick switcher; saved devices with
+  favourites, search and icons.
+- **Game mode:** stream the desktop, one screen or a game from the computer's library; controllers over Bluetooth
+  or USB with rumble and battery level; the PC sees an Xbox 360 pad or a DualShock 4 (your pick).
+- **Picture:** H.264 / H.265, HDR, resolution, frame rate, bitrate, presets from *Data saver* to *Low latency*,
+  live stats overlay (fps, ping, loss).
+- **Share this phone:** share the screen, approve or deny, see and disconnect connected devices.
+- **Security & network:** always end-to-end encrypted; one-time password, permanent password, unattended access,
+  two-factor codes; direct first with relay fallback, or forced either way; your own relay, or a relay running on
+  the phone.
+- **Android TV** D-pad navigation; updates itself; English, Turkish, Russian and Kazakh.
+
+</details>
+
+<details>
+<summary><b>🐞 Reporting a bug</b></summary>
 
 [Open an issue](https://github.com/PulsarDesk/pulsar-mobile/issues/new/choose) and include:
 
@@ -176,19 +110,10 @@ Pulsar is in **alpha** (0.x): expect rough edges. Tried it on another phone? A s
 - What you did and what happened (black screen, no connection, touch not working, crash, ...)
 - A screen recording, if you can
 
-## 🌌 The Pulsar family
-
-| | Project | |
-|---|---|---|
-| 🖥️ | [**Pulsar Desktop**](https://github.com/PulsarDesk/pulsar-desktop) | Pulsar for Windows, macOS and Linux |
-| 🛰️ | [**Pulsar Relay**](https://github.com/PulsarDesk/relay) | Run your own Pulsar server |
-| 🧩 | [**pulsar-core**](https://github.com/PulsarDesk/pulsar-core) | The shared engine behind both apps |
-| 🌐 | [**pulsardesk.com**](https://pulsardesk.com) | The website |
-
-## 🛠️ For developers
+</details>
 
 <details>
-<summary>Build Pulsar Mobile from source</summary>
+<summary><b>🛠️ Build from source</b></summary>
 
 **Needs:** Rust stable, [bun](https://bun.sh), the Android SDK + NDK and JDK 17.
 
@@ -199,19 +124,20 @@ bun install
 bun run tauri android dev    # needs a device or emulator
 ```
 
-More: [docs/development.md](docs/development.md) (layout, releases, signing, the accessibility service).
+More: [docs/development.md](docs/development.md). Issues and pull requests are welcome; commits follow
+[Conventional Commits](https://www.conventionalcommits.org).
 
 </details>
 
-Everyone is welcome to open [issues](https://github.com/PulsarDesk/pulsar-mobile/issues) and pull requests.
-Irrelevant or abusive issues may be closed or removed. Commits follow
-[Conventional Commits](https://www.conventionalcommits.org).
-
-## 📄 License
-
-Pulsar is free software under the **GNU GPLv3 or later** (GPL-3.0-or-later). See [LICENSE](LICENSE).
+---
 
 <p align="center">
-  <br>
-  <b>Like Pulsar? A ⭐ helps other people find it.</b>
+  <a href="https://github.com/PulsarDesk/pulsar-desktop">🖥️ Pulsar Desktop</a> ·
+  <a href="https://github.com/PulsarDesk/relay">🛰️ Pulsar Relay</a> ·
+  <a href="https://github.com/PulsarDesk/pulsar-core">🧩 pulsar-core</a> ·
+  <a href="https://pulsardesk.com">🌐 pulsardesk.com</a>
+</p>
+
+<p align="center">
+  <sub>Free software under the <a href="LICENSE">GNU GPLv3 or later</a>. Like Pulsar? A ⭐ helps other people find it.</sub>
 </p>
