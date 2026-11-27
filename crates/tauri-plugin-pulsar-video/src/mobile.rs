@@ -394,6 +394,21 @@ impl<R: Runtime> PulsarVideo<R> {
       .map_err(Into::into)
   }
 
+  pub fn pip_supported(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("pipSupported", ()).map_err(Into::into)
+  }
+
+  pub fn pip_enter(&self) -> crate::Result<AttachResponse> {
+    self.0.run_mobile_plugin("pipEnter", ()).map_err(Into::into)
+  }
+
+  pub fn pip_set_auto(&self, on: bool) -> crate::Result<AttachResponse> {
+    self
+      .0
+      .run_mobile_plugin("pipSetAuto", PipAutoArgs { on })
+      .map_err(Into::into)
+  }
+
   pub fn gamepad_battery(&self) -> crate::Result<AttachResponse> {
     self
       .0
@@ -561,6 +576,11 @@ impl<R: Runtime> PulsarVideo<R> {
 
 #[derive(Serialize)]
 struct PointerCaptureArgs {
+  on: bool,
+}
+
+#[derive(Serialize)]
+struct PipAutoArgs {
   on: bool,
 }
 

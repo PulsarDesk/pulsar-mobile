@@ -1,6 +1,6 @@
 ## Default Permission
 
-Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture + in-app update download/install).
+Default permissions for the pulsar-video plugin (attach/detach surface + decode test clip + audio mute + aspect/orientation control + microphone capture + picture-in-picture + in-app update download/install).
 
 #### This default permission set includes the following:
 
@@ -17,6 +17,9 @@ Default permissions for the pulsar-video plugin (attach/detach surface + decode 
 - `allow-gamepad-battery`
 - `allow-get-video-size`
 - `allow-set-pointer-capture`
+- `allow-pip-supported`
+- `allow-pip-enter`
+- `allow-pip-set-auto`
 - `allow-get-wallpaper-avatar`
 - `allow-mic-start`
 - `allow-mic-stop`
@@ -212,6 +215,84 @@ Enables the mic_stop command without any pre-configured scope.
 <td>
 
 Denies the mic_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-pip-enter`
+
+</td>
+<td>
+
+Enables the pip_enter command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-pip-enter`
+
+</td>
+<td>
+
+Denies the pip_enter command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-pip-set-auto`
+
+</td>
+<td>
+
+Enables the pip_set_auto command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-pip-set-auto`
+
+</td>
+<td>
+
+Denies the pip_set_auto command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:allow-pip-supported`
+
+</td>
+<td>
+
+Enables the pip_supported command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pulsar-video:deny-pip-supported`
+
+</td>
+<td>
+
+Denies the pip_supported command without any pre-configured scope.
 
 </td>
 </tr>

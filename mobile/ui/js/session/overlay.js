@@ -600,6 +600,17 @@ function _renderDock() {
 	// -- Footer: End session (the removed bottom bar used to hold End) -------------
 	const footer = document.createElement('div');
 	footer.className = 'overlay-footer';
+	// Small window (Android picture-in-picture, pip.js): `.pip-only` hides it where the
+	// device can't do PiP. Through the bus: pip.js imports this module.
+	const pipBtn = document.createElement('button');
+	pipBtn.type = 'button';
+	pipBtn.className = 'btn overlay-pip-btn full pip-only';
+	pipBtn.textContent = _t('m.overlay.pip');
+	pipBtn.addEventListener('click', () => {
+		close();
+		window.__pulsarBus?.emit('pip-enter');
+	});
+	footer.appendChild(pipBtn);
 	const endBtn = document.createElement('button');
 	endBtn.type = 'button';
 	endBtn.className = 'btn overlay-end-btn full';

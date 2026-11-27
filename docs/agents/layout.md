@@ -110,6 +110,24 @@ Part of the pulsar-mobile agent docs — index: [`CLAUDE.md`](../../CLAUDE.md).
   `PadInput.kt`: native gamepad reader (Window.Callback proxy, in-stream only).
 - Deps: `pulsar-core` + `pulsar-relay` as **git deps**.
 
+## Picture-in-picture (Android client stream)
+
+Untested on a device (2026-11-27, pulsar-desktop#18 parity with the desktop's session small
+window). Manifest: the plugin's `AndroidManifest.xml` declares `dev.pulsar.app.MainActivity`
+with `supportsPictureInPicture` + `resizeableActivity`; the manifest merger adds them to the
+generated activity (gen/android is never edited; if the app identifier changes, update that
+name). The generated `configChanges` already has orientation|screenSize|smallestScreenSize|
+screenLayout. Plugin (`PulsarVideoPlugin.kt` "picture-in-picture"): `pip_supported` (API 26+
+and `FEATURE_PICTURE_IN_PICTURE`), `pip_enter` (overlay "Small window" button), `pip_set_auto`
+(JS arms it while a session is live and Settings → "Small window when leaving the app",
+pref `pipOnLeave`, is on; `detach` disarms). Android 12+ auto-enters via
+`setAutoEnterEnabled`, 8-11 via the androidx `OnUserLeaveHintProvider`. Aspect = the single
+pane's video size (split: the screen), clamped to 2.39:1..1:2.39; source rect = the picture's
+fit rect. Mode changes go to JS as a `pulsar-pip` window event `{ pip, closed }` (androidx
+`OnPictureInPictureModeChangedProvider`; `closed` = left PiP while the activity is stopped =
+the user closed the window). `ui/js/session/pip.js`: `body.pip-mode` hides every webview
+element and swallows input events; `closed` ends every session like the End button.
+
 ## Keep-awake (Android, `PulsarVideoPlugin.kt`)
 
 Untested on a device. `WAKE_LOCK` is declared in the plugin manifest; before that, every

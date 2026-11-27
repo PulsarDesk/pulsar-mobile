@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-pip-set-auto"
+description = "Enables the pip_set_auto command without any pre-configured scope."
+commands.allow = ["pip_set_auto"]
+
+[[permission]]
+identifier = "deny-pip-set-auto"
+description = "Denies the pip_set_auto command without any pre-configured scope."
+commands.deny = ["pip_set_auto"]

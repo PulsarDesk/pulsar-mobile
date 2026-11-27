@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-pip-enter"
+description = "Enables the pip_enter command without any pre-configured scope."
+commands.allow = ["pip_enter"]
+
+[[permission]]
+identifier = "deny-pip-enter"
+description = "Denies the pip_enter command without any pre-configured scope."
+commands.deny = ["pip_enter"]

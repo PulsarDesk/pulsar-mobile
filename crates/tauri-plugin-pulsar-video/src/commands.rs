@@ -125,6 +125,29 @@ pub(crate) async fn set_pointer_capture<R: Runtime>(app: AppHandle<R>, on: bool)
     app.pulsar_video().set_pointer_capture(on)
 }
 
+/// Whether this device can show a stream in a picture-in-picture window (Android 8+ with
+/// the system PiP feature): `ok`. JS-invokable as `plugin:pulsar-video|pip_supported`.
+#[command]
+pub(crate) async fn pip_supported<R: Runtime>(app: AppHandle<R>) -> Result<AttachResponse> {
+    app.pulsar_video().pip_supported()
+}
+
+/// Enter picture-in-picture now (the in-session "Small window" button); `ok` false when the
+/// device or the user's system setting does not allow it.
+/// JS-invokable as `plugin:pulsar-video|pip_enter`.
+#[command]
+pub(crate) async fn pip_enter<R: Runtime>(app: AppHandle<R>) -> Result<AttachResponse> {
+    app.pulsar_video().pip_enter()
+}
+
+/// Arm (`on: true`) or disarm entering picture-in-picture automatically when the user
+/// leaves the app (Home / Recents) during a stream.
+/// JS-invokable as `plugin:pulsar-video|pip_set_auto`.
+#[command]
+pub(crate) async fn pip_set_auto<R: Runtime>(app: AppHandle<R>, on: bool) -> Result<AttachResponse> {
+    app.pulsar_video().pip_set_auto(on)
+}
+
 /// The device's home-screen wallpaper as a small (96×96, ≤14 KB) JPEG, base64'd
 /// in `AttachResponse.detail` (`ok:false` when the wallpaper can't be read, e.g.
 /// permission denied or a live wallpaper). Used as this phone's identity image

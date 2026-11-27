@@ -164,6 +164,15 @@ impl<R: Runtime> PulsarVideo<R> {
   pub fn set_pointer_capture(&self, _on: bool) -> crate::Result<AttachResponse> {
     Self::noop("no pointer capture on desktop")
   }
+  pub fn pip_supported(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no picture-in-picture on desktop")
+  }
+  pub fn pip_enter(&self) -> crate::Result<AttachResponse> {
+    Self::noop("no picture-in-picture on desktop")
+  }
+  pub fn pip_set_auto(&self, _on: bool) -> crate::Result<AttachResponse> {
+    Self::noop("no picture-in-picture on desktop")
+  }
   pub fn get_wallpaper_avatar(&self) -> crate::Result<AttachResponse> {
     Self::noop("no wallpaper avatar on desktop")
   }

@@ -741,6 +741,8 @@ body[data-mode="game"] .gp-focus { outline-color: var(--cyan); }
 .overlay-footer { margin-top: 14px; padding-top: 14px; border-top: 1px solid oklch(1 0 0 / 0.1); }
 .overlay-end-btn { background: var(--danger); color: oklch(0.99 0 0); width: 100%; font-size: 15px; padding: 13px; }
 .overlay-end-btn:active { filter: brightness(0.92); }
+.overlay-pip-btn { background: oklch(1 0 0 / 0.08); color: oklch(0.99 0 0); border: 1px solid oklch(1 0 0 / 0.14); width: 100%; font-size: 15px; padding: 13px; margin-bottom: 10px; }
+.overlay-pip-btn:active { background: oklch(1 0 0 / 0.14); }
 .overlay-card {
 	background: oklch(1 0 0 / 0.06);
 	border: 1px solid oklch(1 0 0 / 0.1);

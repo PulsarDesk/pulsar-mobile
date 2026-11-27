@@ -364,6 +364,17 @@ function buildSettingsDom(section) {
           <span class="thumb"></span>
         </label>
       </div>
+      <div class="setting pip-only" style="margin-top:12px">
+        <div>
+          <div class="lbl" data-i18n="m.settings.pipOnLeave">${t('m.settings.pipOnLeave')}</div>
+          <div class="settings-field-hint" data-i18n="m.settings.pipOnLeaveHint">${t('m.settings.pipOnLeaveHint')}</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="s-pip-leave" aria-label="${t('m.settings.pipOnLeave')}" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
     </div>
 
     <!-- ── Controllers (live connected-pad list) ── -->
@@ -1126,6 +1137,14 @@ function wireFields(section) {
       invoke('set_clipboard_sync', { enabled: clipSyncEl.checked }).catch(() => {});
     });
   }
+  const pipLeaveEl = document.getElementById('s-pip-leave');
+  if (pipLeaveEl) {
+    pipLeaveEl.addEventListener('change', () => {
+      setPref('pipOnLeave', pipLeaveEl.checked);
+      // pip.js re-arms / disarms auto-enter for a live session.
+      window.__pulsarBus?.emit('pip-pref-changed');
+    });
+  }
   const overlayBtnEl = document.getElementById('s-overlay-btn');
   if (overlayBtnEl) {
     overlayBtnEl.addEventListener('change', () => {
@@ -1310,6 +1329,8 @@ async function syncFieldsFromConfig() {
   if (ds5Init)                       ds5Init.checked = getPref('ds5Passthrough') !== false;
   const clipSyncInit = document.getElementById('s-clip-sync');
   if (clipSyncInit)                  clipSyncInit.checked = getPref('clipboardSync') !== false;
+  const pipLeaveInit = document.getElementById('s-pip-leave');
+  if (pipLeaveInit)                  pipLeaveInit.checked = getPref('pipOnLeave') !== false;
   const frameRateEl = document.getElementById('s-framerate');
   if (frameRateEl) {
     const fr = getPref('frameRate');

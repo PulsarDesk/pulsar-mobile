@@ -52,6 +52,18 @@
         android:maxSdkVersion="28" />
 
     <application>
+        <!-- Picture-in-picture for a client stream (PulsarVideoPlugin "picture-in-picture").
+             The app's MainActivity lives in the GITIGNORED gen/android manifest, which
+             `tauri android init` regenerates, so the PiP attributes are merged in from here:
+             the manifest merger matches this element to the app's activity by its fully
+             qualified name (identifier dev.pulsar.app, see tauri.conf.json) and adds the
+             attributes the app does not set. The generated activity already lists
+             orientation|screenSize|smallestScreenSize|screenLayout in configChanges, so
+             entering / leaving PiP resizes the window without recreating the activity. -->
+        <activity
+            android:name="dev.pulsar.app.MainActivity"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true" />
         <!-- In-app update: content:// URI for the downloaded APK, scoped to the updates/
              dir (res/xml/pulsar_updates.xml). Own subclass so it doesn't collide with the
              app's androidx FileProvider entry in the manifest merger. -->

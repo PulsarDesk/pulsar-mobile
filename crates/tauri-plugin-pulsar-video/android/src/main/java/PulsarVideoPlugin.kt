@@ -3,6 +3,7 @@ package dev.pulsar.video
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationChannel
+import android.app.PictureInPictureParams
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.UiModeManager
@@ -20,6 +21,7 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.SurfaceTexture
 import android.media.AudioFormat
@@ -41,6 +43,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import android.util.Rational
 import android.view.Gravity
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -53,10 +56,14 @@ import android.widget.FrameLayout
 import androidx.activity.result.ActivityResult
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.OnPictureInPictureModeChangedProvider
+import androidx.core.app.OnUserLeaveHintProvider
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -323,6 +330,11 @@ class PointerCaptureArgs {
 }
 
 @InvokeArg
+class PipAutoArgs {
+    var on: Boolean = false
+}
+
+@InvokeArg
 class SetAudioMutedArgs {
     var muted: Boolean = false
 }
@@ -509,6 +521,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 override fun onActivityDestroyed(a: android.app.Activity) {}
             }
         )
+        installPipHooks()
     }
 
     // ---------------- commands ----------------
@@ -653,6 +666,9 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
                 padInput.neutralizeAll()
                 releaseAudio()
                 stopStreamService()
+                // No stream left: leaving the app must not shrink an empty window into PiP.
+                pipAuto = false
+                refreshPipParams()
                 webView?.setBackgroundColor(Color.TRANSPARENT) // body paints opaque; WHITE flashed in dark theme
                 val ret = JSObject(); ret.put("ok", true); ret.put("detail", "detached")
                 invoke.resolve(ret)
@@ -1322,6 +1338,167 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
         val r = JSObject(); r.put("ok", true); r.put("detail", "${pane.videoW}x${pane.videoH}")
         invoke.resolve(r)
     }
+
+    // ---------------- picture-in-picture (client stream) ----------------
+    //
+    // The manifest side (supportsPictureInPicture / resizeableActivity on MainActivity) is
+    // merged in from this plugin's AndroidManifest.xml, so it survives `tauri android init`.
+    // JS owns the policy: `pip_set_auto` arms auto-enter while a session streams and the user
+    // setting is on; `pip_enter` is the in-session "Small window" button. Mode changes reach
+    // JS as a `pulsar-pip` window event ({ pip, closed }): JS hides its overlay UI in PiP and
+    // ends the session when the PiP window was closed (`closed: true`).
+
+    /** JS armed auto-enter (a session is live and the user setting is on). */
+    @Volatile private var pipAuto = false
+    /** The activity is in PiP right now. UI thread. */
+    private var inPip = false
+
+    private fun pipAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            activity.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun streaming(): Boolean = panes.any { it.active }
+
+    /** Install the PiP mode-change + user-leave listeners (androidx ComponentActivity). */
+    private fun installPipHooks() {
+        if (!pipAvailable()) return
+        try {
+            val modes = activity as? OnPictureInPictureModeChangedProvider
+            if (modes != null) {
+                modes.addOnPictureInPictureModeChangedListener { info ->
+                    onPipModeChanged(info.isInPictureInPictureMode)
+                }
+            } else Log.w(TAG, "pip: activity has no PiP mode-change provider")
+            // Android 8-11: no auto-enter flag, so enter from onUserLeaveHint (Home / Recents).
+            // 12+ enters by itself from setAutoEnterEnabled (smoother: the system animates
+            // straight into PiP instead of shrinking an app that already left).
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                (activity as? OnUserLeaveHintProvider)?.addOnUserLeaveHintListener {
+                    if (pipAuto && streaming() && !inPip) enterPip()
+                }
+            }
+        } catch (e: Exception) { Log.w(TAG, "pip hooks failed: ${e.message}") }
+    }
+
+    /** UI thread. */
+    private fun onPipModeChanged(pip: Boolean) {
+        inPip = pip
+        // Closing the PiP window (its X, or a fling off-screen) stops the activity and THEN
+        // reports "left PiP"; expanding it reports "left PiP" with the activity started.
+        val state = (activity as? LifecycleOwner)?.lifecycle?.currentState
+        val closed = !pip && state != null && !state.isAtLeast(Lifecycle.State.STARTED)
+        Log.i(TAG, "pip: mode changed pip=$pip closed=$closed state=$state")
+        if (pip) {
+            // No input reaches the host from the PiP window: release held pad buttons and a
+            // captured mouse (the PiP window is not focusable anyway).
+            try { padInput.neutralizeAll() } catch (_: Exception) {}
+            try { pointerCapture.set(false) } catch (_: Exception) {}
+        }
+        // The window size changed: re-fit the picture now and once the layout settled (JS
+        // also re-fits on its resize event).
+        webView?.post { relayout() }
+        webView?.postDelayed({ relayout() }, 300L)
+        webView?.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('pulsar-pip',{detail:{pip:$pip,closed:$closed}}))", null
+        )
+    }
+
+    /**
+     * Params for the current stream: its aspect ratio clamped to what Android accepts
+     * (2.39:1 .. 1:2.39, else enterPictureInPictureMode throws), the picture's on-screen rect
+     * as the enter animation's source, and auto-enter on 12+ while armed.
+     */
+    private fun buildPipParams(): PictureInPictureParams? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
+        val live = panes.filter { it.active }
+        val parent = webView?.parent as? ViewGroup
+        val hasParent = parent != null && parent.width > 0 && parent.height > 0
+        val single = live.size == 1 && live[0].videoW > 0 && live[0].videoH > 0
+        var w = 16; var h = 9
+        if (single) {
+            w = live[0].videoW; h = live[0].videoH
+        } else if (hasParent) {
+            w = parent!!.width; h = parent.height // split: the whole layout shrinks as it is
+        }
+        var hint: Rect? = null
+        if (hasParent) {
+            val pr = Rect()
+            if (parent!!.getGlobalVisibleRect(pr)) {
+                hint = if (single) {
+                    val p = live[0]
+                    val l = pr.left + (p.tnX * parent.width).toInt()
+                    val t = pr.top + (p.tnY * parent.height).toInt()
+                    val r = Rect(l, t, l + (p.tnW * parent.width).toInt(), t + (p.tnH * parent.height).toInt())
+                    if (r.intersect(pr)) r else pr
+                } else pr
+            }
+        }
+        val ratio = w.toDouble() / h
+        val rational = when {
+            ratio > 2.39 -> Rational(239, 100)
+            ratio < 1 / 2.39 -> Rational(100, 239)
+            else -> Rational(w, h)
+        }
+        val b = PictureInPictureParams.Builder().setAspectRatio(rational)
+        hint?.let { if (!it.isEmpty) b.setSourceRectHint(it) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            b.setAutoEnterEnabled(pipAuto && streaming())
+            b.setSeamlessResizeEnabled(false) // video: crossfade, not a stretched live resize
+        }
+        return b.build()
+    }
+
+    /** Push fresh params (aspect ratio / auto-enter) to the activity. UI thread. */
+    private fun refreshPipParams() {
+        if (!pipAvailable()) return
+        try { buildPipParams()?.let { activity.setPictureInPictureParams(it) } }
+        catch (e: Exception) { Log.w(TAG, "pip: setPictureInPictureParams failed: ${e.message}") }
+    }
+
+    /** UI thread. */
+    private fun enterPip(): Boolean {
+        if (!pipAvailable() || !streaming()) return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        return try {
+            val params = buildPipParams() ?: return false
+            activity.enterPictureInPictureMode(params)
+        } catch (e: Exception) {
+            // IllegalStateException: the activity does not declare supportsPictureInPicture
+            // (manifest merge missing) or the user turned PiP off for Pulsar in system settings.
+            Log.w(TAG, "pip: enter failed: ${e.message}"); false
+        }
+    }
+
+    /** Whether this device can show Pulsar in a PiP window (API 26+ and the system feature). */
+    @Command
+    fun pipSupported(invoke: Invoke) {
+        val r = JSObject(); r.put("ok", pipAvailable()); r.put("detail", "api ${Build.VERSION.SDK_INT}")
+        invoke.resolve(r)
+    }
+
+    /** The in-session "Small window" button: enter PiP now. `ok` false when it could not. */
+    @Command
+    fun pipEnter(invoke: Invoke) {
+        activity.runOnUiThread {
+            val ok = enterPip()
+            val r = JSObject(); r.put("ok", ok); r.put("detail", if (ok) "pip" else "unavailable")
+            invoke.resolve(r)
+        }
+    }
+
+    /** Arm (`on: true`) or disarm auto-enter on leaving the app. JS arms it while a session
+     *  streams and the setting is on, and disarms it when the last session ends. */
+    @Command
+    fun pipSetAuto(invoke: Invoke) {
+        val on = invoke.parseArgs(PipAutoArgs::class.java).on
+        activity.runOnUiThread {
+            pipAuto = on
+            refreshPipParams()
+            val r = JSObject(); r.put("ok", pipAvailable()); r.put("detail", if (on) "armed" else "off")
+            invoke.resolve(r)
+        }
+    }
+
 
     /** Physical-mouse capture while the host pointer is locked ([PointerCapture]). */
     private val pointerCapture by lazy { PointerCapture(activity) { webView } }
@@ -3844,6 +4021,7 @@ class PulsarVideoPlugin(private val activity: Activity) : Plugin(activity) {
             if (vw <= 0 || vh <= 0) return
             videoW = vw; videoH = vh
             activity.runOnUiThread {
+                refreshPipParams() // the PiP window follows the stream's aspect ratio
                 val sv = surfaceView ?: return@runOnUiThread
                 val parent = sv.parent as? ViewGroup ?: return@runOnUiThread
                 val pw = parent.width; val ph = parent.height

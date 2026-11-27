@@ -21,6 +21,7 @@ const DEFAULTS = {
 	hdr: false,              // request HDR (HEVC Main10 / PQ) from the host
 	audioQuality: 'auto',    // host audio: 'auto' | 'standard' | 'high' | 'raw' (next connect)
 	clipboardSync: true,     // two-way clipboard sync with every open session (desktop parity)
+	pipOnLeave: true,        // Android: shrink a live stream into a small window (PiP) on leaving the app (pip.js)
 	gamepadTargets: {},      // controller name → host emulation: 'auto' | 'xbox' | 'ds4'
 	ds5Passthrough: true,    // drive a USB DualSense raw for FEAT_DS5 hosts (ds5.rs)
 	ringtone: 'system',      // incoming voice call: 'system' | 'classic' | 'chime' | 'pulse' | 'none' (call.js)

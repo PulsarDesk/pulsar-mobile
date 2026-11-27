@@ -82,6 +82,9 @@ _importOverlay.then(() => import('./session/files.js')).catch(() => null);
 _importOverlay.then(() => import('./session/keyboard.js')).catch(() => null);
 // On-screen touch controller (game mode; toggled from the overlay's Controllers card).
 _importOverlay.then(() => import('./session/vpad.js')).catch(() => null);
+// Android picture-in-picture ("Small window"): auto-enter on leaving the app, the overlay
+// button, overlay UI hidden while in PiP, session end when the PiP window is closed.
+_importOverlay.then(() => import('./session/pip.js')).catch(() => null);
 // Global connected-controller monitor (toast on connect + the "Controllers" list).
 import('./session/gamepad-monitor.js').catch(() => null);
 
